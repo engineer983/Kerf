@@ -89,9 +89,190 @@ pub(crate) fn parse_turn(reply: &Value) -> Result<Turn, String> {
     })
 }
 
+/// Small local models often write a tool call out as text, such as
+/// `{"name": "find_pictures", "arguments": {"query": "eagle"}}`, instead of
+/// sending it as one. Where the text holds such a call to a tool that exists,
+/// it is turned into a real call, so the tool runs rather than the person
+/// being shown JSON. `seed` keeps the made-up ids distinct between turns.
+pub(crate) fn recover_written_calls(turn: &mut Turn, tools: &[ToolSpec], seed: usize) {
+    if !turn.tool_calls.is_empty() || turn.stop != Stop::Done {
+        return;
+    }
+    let text = turn.text.clone();
+    let bytes = text.as_bytes();
+    let mut calls = Vec::new();
+    let mut prose = String::new();
+    let mut kept_from = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let found = (bytes[at] == b'{')
+            .then(|| object_end(bytes, at))
+            .flatten()
+            .and_then(|end| Some((end, written_call(&text[at..end], tools)?)));
+        match found {
+            Some((end, (name, input))) => {
+                prose.push_str(&text[kept_from..at]);
+                calls.push(ToolCall {
+                    id: format!("written_{seed}_{}", calls.len() + 1),
+                    name,
+                    input,
+                });
+                at = end;
+                kept_from = end;
+            }
+            None => at += 1,
+        }
+    }
+    if calls.is_empty() {
+        return;
+    }
+    prose.push_str(&text[kept_from..]);
+    // What wrapped the calls is dropped along with them.
+    for wrapper in ["<tool_call>", "</tool_call>", "```json", "```"] {
+        prose = prose.replace(wrapper, "");
+    }
+    turn.text = prose.trim().to_owned();
+    turn.message = json!({
+        "role": "assistant",
+        "content": turn.text,
+        "tool_calls": calls.iter().map(|call| json!({
+            "id": call.id,
+            "type": "function",
+            "function": {"name": call.name, "arguments": call.input.to_string()},
+        })).collect::<Vec<_>>(),
+    });
+    turn.tool_calls = calls;
+    turn.stop = Stop::ToolUse;
+}
+
+/// Where the JSON object starting at `start` ends, if its braces balance.
+fn object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, &byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Reads `{"name": ..., "arguments": {...}}` as a call to one of `tools`.
+fn written_call(object: &str, tools: &[ToolSpec]) -> Option<(String, Value)> {
+    let value: Value = serde_json::from_str(object).ok()?;
+    // Some models nest the call under "function".
+    let call = if value["function"].is_object() {
+        &value["function"]
+    } else {
+        &value
+    };
+    let name = call["name"].as_str()?;
+    if !tools.iter().any(|tool| tool.name == name) {
+        return None;
+    }
+    let arguments = match (&call["arguments"], &call["parameters"]) {
+        (Value::Null, Value::Null) => return None,
+        (Value::Null, parameters) => parameters,
+        (arguments, _) => arguments,
+    };
+    let input = match arguments {
+        Value::String(text) => serde_json::from_str(text).ok()?,
+        Value::Object(_) => arguments.clone(),
+        _ => return None,
+    };
+    Some((name.to_owned(), input))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            schema: json!({"type": "object"}),
+        }
+    }
+
+    fn said(text: &str) -> Turn {
+        let reply = json!({"model": "m", "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]});
+        parse_turn(&reply).unwrap()
+    }
+
+    #[test]
+    fn a_tool_call_written_as_text_becomes_a_real_one() {
+        let tools = [tool("find_pictures"), tool("set_operation")];
+        let mut turn = said(
+            "{\"name\": \"find_pictures\", \"arguments\": {\"query\": \"Bald Eagle {flag}\"}}\n\nThis should show you any images. Choose one and I can load it for you.",
+        );
+        recover_written_calls(&mut turn, &tools, 3);
+        assert_eq!(turn.stop, Stop::ToolUse);
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "find_pictures");
+        assert_eq!(
+            turn.tool_calls[0].input,
+            json!({"query": "Bald Eagle {flag}"})
+        );
+        assert_eq!(turn.tool_calls[0].id, "written_3_1");
+        assert_eq!(
+            turn.text,
+            "This should show you any images. Choose one and I can load it for you."
+        );
+        // The history gets a message the tool's result can be matched to.
+        assert_eq!(turn.message["tool_calls"][0]["id"], "written_3_1");
+        assert_eq!(
+            turn.message["tool_calls"][0]["function"]["arguments"],
+            "{\"query\":\"Bald Eagle {flag}\"}"
+        );
+    }
+
+    #[test]
+    fn wrapped_and_repeated_written_calls_are_found() {
+        let tools = [tool("get_project"), tool("set_operation")];
+        let mut turn = said(
+            "<tool_call>\n{\"name\": \"get_project\", \"arguments\": {}}\n</tool_call>\n```json\n{\"function\": {\"name\": \"set_operation\", \"parameters\": {\"operation\": 1, \"depth\": 3}}}\n```",
+        );
+        recover_written_calls(&mut turn, &tools, 0);
+        assert_eq!(turn.tool_calls.len(), 2);
+        assert_eq!(
+            turn.tool_calls[1].input,
+            json!({"operation": 1, "depth": 3})
+        );
+        assert_eq!(turn.text, "");
+    }
+
+    #[test]
+    fn ordinary_text_with_braces_is_left_alone() {
+        let tools = [tool("get_project")];
+        for text in [
+            "Use {curly} braces, or {\"name\": \"something_else\", \"arguments\": {}}.",
+            "The settings are {\"name\": \"get_project\"} and an unclosed { brace",
+            "No JSON here at all.",
+        ] {
+            let mut turn = said(text);
+            recover_written_calls(&mut turn, &tools, 0);
+            assert_eq!(turn.stop, Stop::Done, "{text}");
+            assert!(turn.tool_calls.is_empty());
+            assert_eq!(turn.text, text);
+        }
+    }
 
     #[test]
     fn request_puts_the_system_prompt_first_and_wraps_tools() {

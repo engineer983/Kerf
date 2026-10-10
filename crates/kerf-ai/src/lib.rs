@@ -121,7 +121,9 @@ pub fn send(
                 &openai::headers(key),
                 &body,
             )?;
-            openai::parse_turn(&reply)
+            let mut turn = openai::parse_turn(&reply)?;
+            openai::recover_written_calls(&mut turn, tools, messages.len());
+            Ok(turn)
         }
     }
 }

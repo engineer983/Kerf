@@ -229,6 +229,24 @@ const MAX_SVG_CHARS = 400_000;
 /** Longest side, in pixels, of the picture made from a drawing. */
 const DRAWN_PICTURE_PX = 1600;
 
+/** The most searches one request for pictures may make. */
+const MAX_SEARCH_ATTEMPTS = 6;
+const FILLER_WORDS = new Set(["a", "an", "the", "of", "on", "in", "at", "with", "and", "or", "for", "to", "over", "across", "image", "images", "picture", "pictures", "photo", "photos"]);
+
+/**
+ * The searches to try for a request, most exact first: the words as given,
+ * then without filler words, then with each remaining word left out in turn.
+ */
+export function searchAttempts(query: string): string[] {
+  const given = query.trim().replace(/\s+/g, " ").slice(0, 200);
+  const words = given.split(" ").filter((word) => !FILLER_WORDS.has(word.toLowerCase()));
+  const attempts = [given, words.join(" ")];
+  if (words.length > 2) {
+    for (let skip = 0; skip < words.length; skip++) attempts.push(words.filter((_, i) => i !== skip).join(" "));
+  }
+  return [...new Set(attempts.filter(Boolean))].slice(0, MAX_SEARCH_ATTEMPTS);
+}
+
 type Input = Record<string, unknown>;
 
 /** A number from the model's input, checked; undefined when the field was not given. */
@@ -586,17 +604,30 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     if (!usePictures.getState().webSearch) {
       throw new ToolError("Searching the web for pictures is switched off. The person can switch it on under Pictures in the assistant's settings.");
     }
-    const found = await ipc.searchPictures(input.query.trim().slice(0, 200), flag(input, "publicDomainOnly") ?? false);
+    const publicDomainOnly = flag(input, "publicDomainOnly") ?? false;
+    // The search only returns pictures matching every word, so a long phrase
+    // often finds nothing. Looser versions are tried until one does.
+    let words = "";
+    let found: ipc.FoundPicture[] = [];
+    for (const attempt of searchAttempts(input.query)) {
+      words = attempt;
+      found = await ipc.searchPictures(attempt, publicDomainOnly);
+      if (found.length > 0) break;
+    }
     usePictures.getState().setFound(found);
     if (found.length === 0) {
-      return { content: "Nothing was found. Try fewer or different words.", summary: `Found no pictures for "${input.query.trim()}"` };
+      return {
+        content: "The search ran, but no pictures match those words. Search again with two or three plain words for the subject.",
+        summary: `Found no pictures for "${input.query.trim()}"`,
+      };
     }
     return {
       content: JSON.stringify({
+        searchedFor: words,
         note: "The person can see these as thumbnails and click one to load it. You cannot see them.",
         results: found.map((p, i) => ({ number: i + 1, title: p.title, creator: p.creator || null, licence: p.licence, creditRequired: p.needsCredit, pixels: [p.width, p.height] })),
       }),
-      summary: `Found ${found.length} picture${found.length === 1 ? "" : "s"} for "${input.query.trim()}"`,
+      summary: `Found ${found.length} picture${found.length === 1 ? "" : "s"} for "${words}"`,
       pictures: found,
     };
   },
