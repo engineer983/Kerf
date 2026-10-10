@@ -78,6 +78,45 @@ export function defaultCutout(thickness: number): OperationKind {
 
 let nextOperationId = 1;
 
+/** Simple mode sets everything from a few choices; advanced shows every setting. */
+export type Mode = "simple" | "advanced";
+
+/** What the person wants made, in simple mode. Which ones apply depends on the machine. */
+export type Goal = "picture" | "shapes" | "outline" | "carving" | "lines";
+export type Quality = "draft" | "standard" | "fine";
+
+export interface SimpleSetup {
+  /** Null until chosen: the app then picks one to suit the machine and the picture. */
+  goal: Goal | null;
+  quality: Quality;
+  /** How deep a carving goes, in millimetres. */
+  depth: number;
+  /** On a router, also cut the finished piece free. */
+  cutOut: boolean;
+  /** When the carving and the cut-out need different bits: which is made now. */
+  part: "main" | "cutOut";
+}
+
+/** The goals a machine offers, most likely first. */
+export function goalsFor(kind: MachineKind): Goal[] {
+  return kind === "laser" ? ["picture", "shapes", "outline"] : ["carving", "lines"];
+}
+
+/** The goal used when none has been chosen. */
+export function defaultGoal(kind: MachineKind, photo: boolean): Goal {
+  return kind === "cnc" ? "carving" : photo ? "picture" : "shapes";
+}
+
+const MODE_KEY = "kerf.mode";
+
+function storedMode(): Mode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "advanced" ? "advanced" : "simple";
+  } catch {
+    return "simple";
+  }
+}
+
 export const DEFAULT_RELIEF: OperationKind = {
   type: "cncRelief",
   depth: 3,
@@ -225,6 +264,11 @@ interface ProjectState {
   depth: DepthState;
   /** How much of the photo's fine texture is laid over a depth relief, 0 to 1. */
   detail: number;
+  mode: Mode;
+  simple: SimpleSetup;
+  setMode: (mode: Mode) => void;
+  /** Changes a simple-mode choice and sets the project up to match. */
+  setSimple: (patch: Partial<SimpleSetup>) => void;
   /** Share of the depth range, from the far end, flattened into a level background (0 to 0.9). */
   depthFloor: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
@@ -496,6 +540,87 @@ export const useProject = create<ProjectState>((set, get) => {
     return equip(defaultOperation(kind, s.image?.photo ?? false), s);
   }
 
+  /**
+   * Sets the whole project up from the simple-mode choices: which operations
+   * to run, with which bit, and at what settings.
+   */
+  async function applySimple() {
+    const s = get();
+    if (!s.image) return;
+    const { quality, cutOut } = s.simple;
+    const goal =
+      s.simple.goal && goalsFor(s.machineKind).includes(s.simple.goal)
+        ? s.simple.goal
+        : defaultGoal(s.machineKind, s.image.photo);
+    const material = findMaterial(s.materialId);
+    const blank = { color: null, power: 0, passes: 1, feed: 600 };
+    const operations: OperationItem[] = [];
+
+    if (s.machineKind === "laser") {
+      // Finer lines hold more detail and take longer. About 0.1 mm is as
+      // fine as a diode laser's spot allows.
+      const interval = { draft: 0.2, standard: 0.15, fine: 0.1 }[quality];
+      // Speed and power depend on the laser and the material, which the app
+      // does not know, so whatever is already set is kept.
+      const current = s.operations.find((op) => op.kind.type.startsWith("laser"));
+      const kind: OperationKind =
+        goal === "picture"
+          ? { type: "laserImage", interval, dither: true }
+          : goal === "shapes"
+            ? { type: "laserFill", interval }
+            : { type: "laserCut" };
+      operations.push({
+        ...blank,
+        id: nextOperationId++,
+        kind,
+        feed: current?.feed ?? 3000,
+        power: current?.power ?? 50,
+        passes: current?.passes ?? 1,
+      });
+    } else {
+      const { tools } = useToolbox.getState();
+      const rect = artworkRect(s);
+      const shortSide = rect ? Math.min(rect.width, rect.height) : 150;
+      if (goal === "carving") {
+        // The bit's tip sets how much detail survives: the finest tip for
+        // fine work, the widest for a quick draft.
+        const rounded = tools.filter((t) => t.kind === "ball" || t.kind === "taperedBall");
+        const byTip = [...rounded].sort((a, b) => a.diameter - b.diameter);
+        const tool =
+          quality === "fine" ? byTip[0] : quality === "draft" ? byTip.at(-1) : suggestTool("relief", tools, shortSide);
+        // Leave some material under the deepest cut.
+        const depth = Math.max(0.5, Math.min(s.simple.depth, s.thickness - 2));
+        const carving: OperationItem = { ...blank, id: nextOperationId++, kind: { ...DEFAULT_RELIEF, depth } as OperationKind };
+        operations.push(tool ? withTool(carving, tool, material, s.spindleRpm) : carving);
+      } else {
+        operations.push(equip({ ...defaultOperation("cnc"), id: nextOperationId++ }, s));
+      }
+      if (cutOut) {
+        operations.push(equip({ ...blank, id: nextOperationId++, kind: defaultCutout(s.thickness) }, s));
+      }
+      // Two bits cannot be used in one run, so only one part is made at a time.
+      const [main, cut] = operations;
+      if (cut && main.toolId !== cut.toolId) {
+        main.enabled = s.simple.part === "main";
+        cut.enabled = s.simple.part === "cutOut";
+      }
+    }
+
+    set({
+      operations,
+      // Linework is cut in strongly; a photograph more gently, or skin turns rough.
+      detail: s.image.photo ? 0.4 : 0.9,
+      depthFloor: 0.3,
+      ...staleGcode(),
+    });
+
+    // A carving is shaped from estimated depth, which is worked out once per picture.
+    if (goal === "carving") {
+      if (get().depth.status === "none" || get().depth.status === "error") await get().estimateDepth();
+      if (get().depth.status === "ready" && get().heightSource !== "depth") get().setHeightSource("depth");
+    }
+  }
+
   /** Drops any generated G-code; call when one of its inputs changes. */
   function staleGcode(): { gcode: GcodeState } {
     gcodeGeneration++;
@@ -527,6 +652,23 @@ export const useProject = create<ProjectState>((set, get) => {
     depth: NO_DEPTH,
     detail: 0.5,
     depthFloor: 0,
+    mode: storedMode(),
+    simple: { goal: null, quality: "standard", depth: 4, cutOut: false, part: "main" },
+
+    setMode: (mode) => {
+      try {
+        localStorage.setItem(MODE_KEY, mode);
+      } catch {
+        // Not persisted; the choice still applies for this session.
+      }
+      set({ mode });
+      // Going back to simple puts the project back under its automatic setup.
+      if (mode === "simple") void applySimple();
+    },
+    setSimple: (patch) => {
+      set((s) => ({ simple: { ...s.simple, ...patch } }));
+      void applySimple();
+    },
     left: STOCK_MARGIN_MM,
     front: STOCK_MARGIN_MM,
     stockWidth: 300,
@@ -592,10 +734,12 @@ export const useProject = create<ProjectState>((set, get) => {
           error: null,
           exportedTo: null,
           trace: { ...EMPTY_TRACE, settings: trace.settings },
-          step: "trace",
+          // Simple mode needs no tracing decisions, so it goes straight to the job.
+          step: get().mode === "simple" ? "operations" : "trace",
           ...staleGcode(),
         });
         scheduleTrace();
+        if (get().mode === "simple") void applySimple();
       } catch (e) {
         set({ error: message(e) });
       }
@@ -834,6 +978,9 @@ export const useProject = create<ProjectState>((set, get) => {
           cropping: false,
           depth: depthUrl ? { status: "ready", message: null, url: depthUrl } : NO_DEPTH,
           projectId: id,
+          // A saved project keeps exactly the settings it was saved with, so
+          // it opens with every setting showing rather than being set up afresh.
+          mode: "advanced",
           step: "operations",
           error: null,
           exportedTo: null,
@@ -1015,6 +1162,13 @@ export const useProject = create<ProjectState>((set, get) => {
       }
     },
   };
+});
+
+// In simple mode the setup follows the machine and the material's thickness:
+// a different machine offers different goals, and depths depend on thickness.
+useProject.subscribe((s, previous) => {
+  if (s.mode !== "simple") return;
+  if (s.machineKind !== previous.machineKind || s.thickness !== previous.thickness) s.setSimple({});
 });
 
 // Remember the machine between sessions.

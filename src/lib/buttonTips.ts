@@ -37,6 +37,14 @@ const BY_TEXT: Record<string, string> = {
   "Open toolbox": "See and edit your router bits",
   Continue: "Go on to importing a picture",
 
+  Simple: "Choose what you want made and let the settings be picked for you",
+  Advanced: "Show every setting",
+  Draft: "Quickest and coarsest, for a trial run",
+  Standard: "A balance of time and detail",
+  Fine: "The most detail, and the longest job",
+  "1. Main part": "Make the main part now",
+  "2. Cut-out": "Make the cut-out now, after changing the bit",
+
   // Playback
   Paths: "Show the tool's path as lines",
   Result: "Show what the material will look like",

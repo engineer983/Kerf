@@ -4,7 +4,8 @@ import { findMaterial, MATERIALS } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
 import { artworkRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
 import { useToolbox } from "../state/tools";
-import { Checkbox, NumberField, Section, Select, Slider } from "./controls";
+import { Checkbox, NumberField, Section, Segmented, Select, Slider } from "./controls";
+import { SimpleSetup } from "./SimpleSetup";
 
 const ALL_SHAPES = "all";
 
@@ -36,6 +37,8 @@ export function OperationsPanel() {
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
   const operations = useProject((s) => s.operations);
+  const mode = useProject((s) => s.mode);
+  const shaping = useProject((s) => s.depth.status === "working");
   const traced = useProject((s) => s.trace.result);
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
   const actions = useProject.getState();
@@ -63,6 +66,23 @@ export function OperationsPanel() {
 
   return (
     <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-2">
+        <Segmented
+          label="How much to show"
+          value={mode}
+          options={[
+            { value: "simple", label: "Simple" },
+            { value: "advanced", label: "Advanced" },
+          ]}
+          onChange={actions.setMode}
+        />
+        <p className="text-muted">
+          {mode === "simple"
+            ? "Say what you want and the settings are chosen for you."
+            : "Every setting is yours to change. Switching back to Simple replaces them with the automatic setup."}
+        </p>
+      </div>
+      {mode === "simple" && <SimpleSetup />}
       <Section title="Material">
         <Select
           label="Type"
@@ -148,23 +168,24 @@ export function OperationsPanel() {
         </div>
       </Section>
 
-      {operations.map((operation, index) => (
-        <OperationCard
-          key={operation.id}
-          operation={operation}
-          title={`Operation ${index + 1}`}
-          colors={colors}
-          removable={operations.length > 1}
-        />
-      ))}
+      {mode === "advanced" &&
+        operations.map((operation, index) => (
+          <OperationCard
+            key={operation.id}
+            operation={operation}
+            title={`Operation ${index + 1}`}
+            colors={colors}
+            removable={operations.length > 1}
+          />
+        ))}
 
-      {mixedBits && (
+      {mode === "advanced" && mixedBits && (
         <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
           These operations use different bits. Untick "Include in the job" on all but one, run it,
           change the bit, zero Z again, then do the next.
         </p>
       )}
-      <div className="grid grid-cols-2 gap-2">
+      <div className={mode === "advanced" ? "grid grid-cols-2 gap-2" : "hidden"}>
         <button
           onClick={actions.addOperation}
           title="Add another operation to the job"
@@ -185,10 +206,12 @@ export function OperationsPanel() {
       <div className="flex flex-col gap-3">
         <button
           onClick={() => void actions.generateGcode()}
-          disabled={busy || !traced}
+          // Generating while the picture's shape is still being worked out
+          // would quietly carve from brightness instead.
+          disabled={busy || !traced || shaping}
           className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-40"
         >
-          {busy ? "Generating…" : "Generate G-code"}
+          {busy ? "Generating…" : shaping ? "Working out the shape…" : "Generate G-code"}
         </button>
         {error && (
           <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
