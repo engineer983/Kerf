@@ -201,6 +201,24 @@ export const useAssistant = create<AssistantState>((set, get) => {
       }
     },
     saveKey: async (key) => {
+      // A key pasted under the wrong provider would be sent to that provider
+      // on the next request, so an obvious mismatch is refused here.
+      const isAnthropicKey = key.trim().startsWith("sk-ant-");
+      const { providerId } = get();
+      if (isAnthropicKey && providerId !== "anthropic") {
+        set({
+          settingsError:
+            "That looks like an Anthropic (Claude) key. It was not saved. Choose Claude (Anthropic) as the model provider, then paste it there.",
+        });
+        return;
+      }
+      if (!isAnthropicKey && providerId === "anthropic") {
+        set({
+          settingsError:
+            "That does not look like an Anthropic key, which starts with sk-ant-. It was not saved. Check the key, or choose the provider it belongs to.",
+        });
+        return;
+      }
       try {
         await ipc.setApiKey(get().providerId, key);
         set({ hasKey: true, settingsError: null });

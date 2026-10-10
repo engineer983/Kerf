@@ -608,8 +608,10 @@ export const useProject = create<ProjectState>((set, get) => {
 
     set({
       operations,
-      // Linework is cut in strongly; a photograph more gently, or skin turns rough.
-      detail: s.image.photo ? 0.4 : 0.9,
+      // A light touch: enough to bring out linework such as feathers and
+      // lettering without roughening the form. A photograph gets less still,
+      // or skin turns rough.
+      detail: s.image.photo ? 0.1 : 0.15,
       depthFloor: 0.3,
       ...staleGcode(),
     });
@@ -650,7 +652,7 @@ export const useProject = create<ProjectState>((set, get) => {
     cropping: false,
     heightSource: "brightness",
     depth: NO_DEPTH,
-    detail: 0.5,
+    detail: 0.15,
     depthFloor: 0,
     mode: storedMode(),
     simple: { goal: null, quality: "standard", depth: 4, cutOut: false, part: "main" },
