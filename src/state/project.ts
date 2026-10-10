@@ -2,7 +2,14 @@ import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
-import type { Generated, MachineKind, Operation, Traced, TraceSettings } from "../lib/ipc";
+import type {
+  Generated,
+  MachineKind,
+  Operation,
+  Origin,
+  Traced,
+  TraceSettings,
+} from "../lib/ipc";
 
 export type Step = "import" | "trace" | "operations" | "machine";
 
@@ -90,6 +97,10 @@ interface ProjectState {
   maxPowerS: number;
   /** Id of the machine preset in use, or `CUSTOM_PRESET` once any value is edited. */
   machinePreset: string;
+  origin: Origin;
+  /** Vendor commands emitted around every job; set by presets. */
+  startGcode: string;
+  endGcode: string;
   /** Physical width of the artwork in millimetres; height follows the aspect ratio. */
   widthMm: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
@@ -111,6 +122,7 @@ interface ProjectState {
   setBed: (patch: { width?: number; height?: number }) => void;
   setMachineKind: (kind: MachineKind) => void;
   setMaxPowerS: (maxPowerS: number) => void;
+  setOrigin: (origin: Origin) => void;
   applyMachinePreset: (id: string) => void;
   setShowSource: (show: boolean) => void;
   updateTrace: (patch: Partial<TraceSettings>) => void;
@@ -208,6 +220,9 @@ export const useProject = create<ProjectState>((set, get) => {
     machineKind: "laser",
     maxPowerS: 1000,
     machinePreset: CUSTOM_PRESET,
+    origin: "frontLeft",
+    startGcode: "",
+    endGcode: "",
     widthMm: 100,
     left: 0,
     front: 0,
@@ -291,6 +306,7 @@ export const useProject = create<ProjectState>((set, get) => {
         ...staleGcode(),
       }),
     setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
+    setOrigin: (origin) => set({ origin, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
     applyMachinePreset: (id) => {
       const preset = MACHINE_PRESETS.find((p) => p.id === id);
       if (!preset) {
@@ -301,6 +317,9 @@ export const useProject = create<ProjectState>((set, get) => {
         machinePreset: preset.id,
         bed: preset.bed,
         maxPowerS: preset.maxPowerS,
+        origin: preset.origin,
+        startGcode: preset.startGcode,
+        endGcode: preset.endGcode,
         machineKind: preset.kind,
         // Operations are specific to the machine type; keep them when it is unchanged.
         operations: s.machineKind === preset.kind ? s.operations : [defaultOperation(preset.kind)],
@@ -359,6 +378,9 @@ export const useProject = create<ProjectState>((set, get) => {
         const program = await ipc.generateGcode(s.trace.settings, s.widthMm, {
           machine: {
             kind: s.machineKind,
+            origin: s.origin,
+            startGcode: s.startGcode,
+            endGcode: s.endGcode,
             bedWidth: s.bed.width,
             bedHeight: s.bed.height,
             maxPowerS: s.maxPowerS,

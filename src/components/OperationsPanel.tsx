@@ -23,6 +23,9 @@ export function OperationsPanel() {
   const machineKind = useProject((s) => s.machineKind);
   const maxPowerS = useProject((s) => s.maxPowerS);
   const machinePreset = useProject((s) => s.machinePreset);
+  const origin = useProject((s) => s.origin);
+  const startGcode = useProject((s) => s.startGcode);
+  const endGcode = useProject((s) => s.endGcode);
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const operations = useProject((s) => s.operations);
@@ -76,6 +79,26 @@ export function OperationsPanel() {
           value={bed.height}
           onChange={(height) => actions.setBed({ height })}
         />
+        <Select
+          label="X0 Y0 corner"
+          value={origin}
+          options={[
+            { value: "frontLeft", label: "Front left" },
+            { value: "backLeft", label: "Back left" },
+          ]}
+          onChange={actions.setOrigin}
+        />
+        {(startGcode || endGcode) && (
+          <p className="text-muted">
+            Jobs start with <span className="font-mono text-[12px]">{startGcode.replace(/\n/g, " ")}</span>
+            {endGcode && (
+              <>
+                {" "}and end with <span className="font-mono text-[12px]">{endGcode.replace(/\n/g, " ")}</span>
+              </>
+            )}
+            .
+          </p>
+        )}
         {machineKind === "laser" && (
           <NumberField
             label="Full power (S)"

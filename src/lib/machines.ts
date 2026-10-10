@@ -1,4 +1,4 @@
-import type { MachineKind } from "./ipc";
+import type { MachineKind, Origin } from "./ipc";
 
 export interface MachinePreset {
   id: string;
@@ -7,29 +7,41 @@ export interface MachinePreset {
   /** Work area in millimetres. */
   bed: { width: number; height: number };
   maxPowerS: number;
+  origin: Origin;
+  /** Vendor commands the machine needs around every job. */
+  startGcode: string;
+  endGcode: string;
   /** Shown under the preset; say what is unverified or unusual. */
   note?: string;
 }
 
 export const CUSTOM_PRESET = "custom";
 
-// Figures come from published specifications and reviews, not from the machines'
-// own `$$` settings. Compare with `$130`/`$131`/`$30` on the real machine.
 export const MACHINE_PRESETS: MachinePreset[] = [
   {
+    // From published specifications, not from a machine's own `$$` settings.
     id: "x-carve-1000",
     label: "Inventables X-Carve 1000 mm",
     kind: "cnc",
     bed: { width: 750, height: 750 },
     maxPowerS: 1000,
+    origin: "frontLeft",
+    startGcode: "",
+    endGcode: "",
     note: "Work area assumed to be 750 × 750 mm; check $130 and $131 on your machine.",
   },
   {
+    // Bed size, S scale and start/end commands match WeCreat's LightBurn device
+    // profile for firmware 1.0.7. The firmware is not GRBL: it acknowledges
+    // lines with `ok` but has no `$$` settings and no `?` status reports.
     id: "wecreat-vision-pro",
     label: "WeCreat Vision Pro 45W",
     kind: "laser",
     bed: { width: 500, height: 320 },
     maxPowerS: 1000,
-    note: "This machine's firmware is not standard GRBL and the full-power S value is unconfirmed. Treat the G-code as untested: run at low power first and keep the lid closed.",
+    origin: "backLeft",
+    startGcode: "M14S1\nM15S1\nM16",
+    endGcode: "M6",
+    note: "Untested on the machine. Kerf does not set the focus height, so focus the laser first. The Y direction is inferred: check it with a small, low-power, asymmetric test and keep the lid closed.",
   },
 ];

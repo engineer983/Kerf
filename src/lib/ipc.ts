@@ -37,8 +37,14 @@ export interface Traced {
 
 export type MachineKind = "laser" | "cnc";
 
+/** Which bed corner is X0 Y0; from the back-left, Y increases towards the front. */
+export type Origin = "frontLeft" | "backLeft";
+
 export interface Machine {
   kind: MachineKind;
+  origin: Origin;
+  startGcode: string;
+  endGcode: string;
   bedWidth: number;
   bedHeight: number;
   /** The S value that means full power (GRBL `$30`). */

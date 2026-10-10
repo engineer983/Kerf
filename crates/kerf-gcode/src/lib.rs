@@ -9,4 +9,4 @@ pub mod job;
 
 pub use generate::{generate, Bounds, Program};
 pub use geometry::{Artwork, Polyline, Shape};
-pub use job::{Job, Machine, MachineKind, Operation, OperationKind};
+pub use job::{Job, Machine, MachineKind, Operation, OperationKind, Origin};

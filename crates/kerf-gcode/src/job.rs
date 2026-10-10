@@ -9,11 +9,30 @@ pub enum MachineKind {
     Cnc,
 }
 
-/// A GRBL machine whose work origin is the front-left corner of the bed.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Which corner of the bed is X0 Y0. X always increases to the right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Origin {
+    /// Y increases towards the back; the usual GRBL arrangement.
+    #[default]
+    FrontLeft,
+    /// Y increases towards the front, as on machines that home to the back.
+    BackLeft,
+}
+
+/// A machine that accepts GRBL-style G-code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Machine {
     pub kind: MachineKind,
+    #[serde(default)]
+    pub origin: Origin,
+    /// Lines the machine needs before and after every job, such as vendor
+    /// commands. Emitted as given.
+    #[serde(default)]
+    pub start_gcode: String,
+    #[serde(default)]
+    pub end_gcode: String,
     /// Bed size in millimetres.
     pub bed_width: f64,
     pub bed_height: f64,
