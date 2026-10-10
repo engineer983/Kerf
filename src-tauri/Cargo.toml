@@ -1,0 +1,23 @@
+[package]
+name = "kerf"
+description = "Image to SVG to G-code for lasers and CNC routers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "kerf_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+kerf-trace = { path = "../crates/kerf-trace" }
+kerf-gcode = { path = "../crates/kerf-gcode" }
+kerf-grbl = { path = "../crates/kerf-grbl" }
+kerf-ai = { path = "../crates/kerf-ai" }

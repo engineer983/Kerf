@@ -1,0 +1,9 @@
+[package]
+name = "kerf-gcode"
+description = "SVG and raster to G-code generation for Kerf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]

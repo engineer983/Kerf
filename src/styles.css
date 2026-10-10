@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #f4f2ee;
+  --surface: #fbfaf8;
+  --raised: #ffffff;
+  --line: #e3dfd7;
+  --fg: #26231f;
+  --muted: #7d766b;
+  --accent: #c2552d;
+  --accent-fg: #ffffff;
+  --bed: #ffffff;
+  --grid: #ece8e1;
+  --grid-major: #dcd6cc;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #151413;
+  --surface: #1c1b19;
+  --raised: #252320;
+  --line: #312e2a;
+  --fg: #ece8e1;
+  --muted: #9a9388;
+  --accent: #e0734a;
+  --accent-fg: #1a1512;
+  --bed: #1f1e1c;
+  --grid: #2a2825;
+  --grid-major: #383531;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

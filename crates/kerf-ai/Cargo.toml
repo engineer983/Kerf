@@ -1,0 +1,9 @@
+[package]
+name = "kerf-ai"
+description = "Model providers, tool calling and MCP client for the Kerf assistant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
