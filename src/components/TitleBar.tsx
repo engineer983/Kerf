@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Monitor, Moon, Sun, Wrench } from "lucide-react";
+import { MessageSquare, Monitor, Moon, Redo2, Save, Sun, Undo2, Wrench } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
@@ -17,6 +17,8 @@ export function TitleBar() {
   const imageName = useProject((s) => s.image?.name);
   const { theme, setTheme, chatOpen, toggleChat } = useUi();
   const jobRunning = useMachine((s) => jobIsActive(s.job));
+  const canUndo = useProject((s) => s.canUndo);
+  const canRedo = useProject((s) => s.canRedo);
   const isRouter = useProject((s) => s.machineKind === "cnc");
   const deviceName = useProject(
     (s) =>
@@ -48,6 +50,35 @@ export function TitleBar() {
             Stop machine
           </button>
         )}
+        <button
+          onClick={() => void useProject.getState().saveProject()}
+          disabled={!imageName}
+          aria-label="Save project"
+          title="Save this project to Your projects, to open again later"
+          className="rounded-md border border-line p-1.5 text-muted transition-colors hover:text-fg disabled:opacity-30"
+        >
+          <Save size={14} />
+        </button>
+        <div className="flex rounded-md border border-line p-0.5">
+          <button
+            onClick={() => useProject.getState().undo()}
+            disabled={!canUndo}
+            aria-label="Undo"
+            title="Undo the last change (Ctrl+Z)"
+            className="rounded p-1 text-muted transition-colors hover:text-fg disabled:opacity-30"
+          >
+            <Undo2 size={14} />
+          </button>
+          <button
+            onClick={() => useProject.getState().redo()}
+            disabled={!canRedo}
+            aria-label="Redo"
+            title="Redo the change that was undone (Ctrl+Y)"
+            className="rounded p-1 text-muted transition-colors hover:text-fg disabled:opacity-30"
+          >
+            <Redo2 size={14} />
+          </button>
+        </div>
         <button
           onClick={() => useProject.getState().setStep("device")}
           title="Change the machine"

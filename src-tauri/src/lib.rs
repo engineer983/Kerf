@@ -1,3 +1,4 @@
+mod gallery;
 mod machine;
 mod web;
 
@@ -14,18 +15,18 @@ use tauri_plugin_dialog::DialogExt;
 /// Longest side, in pixels, of the copy used for fast preview traces.
 const PREVIEW_MAX_PX: u32 = 1024;
 
-struct LoadedImage {
+pub(crate) struct LoadedImage {
     /// The image as imported, kept so that a crop can be undone.
     original: Arc<DynamicImage>,
     /// The image being worked on: the original, or a crop of it.
-    full: Arc<DynamicImage>,
+    pub(crate) full: Arc<DynamicImage>,
     preview: Arc<DynamicImage>,
     /// Estimated depth for `full` (white is near), if the user has made one.
-    depth: Option<Arc<DynamicImage>>,
+    pub(crate) depth: Option<Arc<DynamicImage>>,
 }
 
 impl LoadedImage {
-    fn new(original: Arc<DynamicImage>, full: DynamicImage) -> Self {
+    pub(crate) fn new(original: Arc<DynamicImage>, full: DynamicImage) -> Self {
         let preview = if full.width().max(full.height()) > PREVIEW_MAX_PX {
             full.thumbnail(PREVIEW_MAX_PX, PREVIEW_MAX_PX)
         } else {
@@ -50,7 +51,7 @@ const GCODE_HEAD_LINES: usize = 60;
 
 #[derive(Default)]
 pub(crate) struct AppState {
-    image: Mutex<Option<LoadedImage>>,
+    pub(crate) image: Mutex<Option<LoadedImage>>,
     /// Text of the most recently generated program, kept here for export and sending.
     pub(crate) gcode: Mutex<Option<String>>,
 }
@@ -226,8 +227,50 @@ fn check_size(width_mm: f64, height_mm: f64) -> Result<(), String> {
 /// Where a relief takes its heights from.
 struct DepthSource {
     depth: Arc<DynamicImage>,
-    /// How much of the photo's fine texture is laid over the depth, 0 to 1.
+    /// How much of the picture's own detail is laid over the depth, 0 to 1.
     detail: f32,
+    /// Depths below this share of the range become a flat background, 0 to 1.
+    floor: f32,
+}
+
+/// The most the picture's own detail can add to or take from a depth relief,
+/// as a share of its full depth.
+const DETAIL_SHARE: f32 = 0.6;
+
+/// Heights for a relief from an estimated depth map (`shape`, white is near)
+/// and the picture it was estimated from.
+///
+/// The depth model gives the broad form but smooths away what is drawn on it,
+/// so the picture's own detail is laid back over the form. Two bands are used:
+/// a fine one for linework such as feathers, hair and fabric, and a wider one
+/// for larger marks such as lettering, which the depth model sees as flat.
+/// Broad light and dark areas are left out of both, so a dark coat does not
+/// become a hollow. Depths below `floor` are flattened into a level background
+/// and the rest stretched over the full depth, so the subject is not squeezed
+/// into a small part of it.
+fn blend_depth(
+    shape: &image::GrayImage,
+    photo: &image::GrayImage,
+    detail: f32,
+    floor: f32,
+) -> Vec<f32> {
+    let longest = shape.width().max(shape.height()) as f32;
+    let fine = image::imageops::blur(photo, (longest / 250.0).max(1.0));
+    let wide = image::imageops::blur(photo, (longest / 30.0).max(2.0));
+    let strength = detail.clamp(0.0, 1.0) * DETAIL_SHARE;
+    let floor = floor.clamp(0.0, 0.95);
+    shape
+        .as_raw()
+        .iter()
+        .zip(photo.as_raw())
+        .zip(fine.as_raw().iter().zip(wide.as_raw()))
+        .map(|((&z, &pixel), (&fine, &wide))| {
+            let form = ((z as f32 / 255.0 - floor) / (1.0 - floor)).max(0.0);
+            let linework = (pixel as f32 - fine as f32) / 255.0;
+            let marks = (fine as f32 - wide as f32) / 255.0;
+            (form + (linework * 1.5 + marks) * strength).clamp(0.0, 1.0)
+        })
+        .collect()
 }
 
 /// The image as heights: white is 1.0, black is 0.0, after the trace
@@ -260,20 +303,7 @@ fn heightmap(
                     .depth
                     .resize_exact(width, height, image::imageops::FilterType::Triangle);
             let shape = kerf_trace::preprocess::grayscale(&stretched, &settings.preprocess);
-            // The photo minus a blurred copy of itself is its fine texture:
-            // hair, fabric and edges, without the broad light and dark areas.
-            let photo = image.to_luma8();
-            let broad = image::imageops::blur(&photo, width.max(height) as f32 / 120.0);
-            let strength = source.detail.clamp(0.0, 1.0) * 0.35;
-            shape
-                .as_raw()
-                .iter()
-                .zip(photo.as_raw().iter().zip(broad.as_raw()))
-                .map(|(&z, (&fine, &smooth))| {
-                    let texture = (fine as f32 - smooth as f32) / 255.0;
-                    (z as f32 / 255.0 + texture * strength).clamp(0.0, 1.0)
-                })
-                .collect()
+            blend_depth(&shape, &image.to_luma8(), source.detail, source.floor)
         }
     };
     Heightmap {
@@ -285,6 +315,16 @@ fn heightmap(
     }
 }
 
+/// How a relief uses the estimated depth map.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DepthOptions {
+    /// Carve from the depth map rather than from brightness.
+    enabled: bool,
+    detail: f32,
+    floor: f32,
+}
+
 /// Traces at full resolution and generates G-code for `job`.
 #[tauri::command]
 async fn generate_gcode(
@@ -292,9 +332,7 @@ async fn generate_gcode(
     width_mm: f64,
     height_mm: f64,
     job: Job,
-    // Carve reliefs from the estimated depth map rather than from brightness.
-    use_depth: bool,
-    detail: f32,
+    depth: DepthOptions,
     state: State<'_, AppState>,
 ) -> Result<Generated, String> {
     check_size(width_mm, height_mm)?;
@@ -304,12 +342,13 @@ async fn generate_gcode(
         .operations
         .iter()
         .any(|o| matches!(o.kind, OperationKind::CncRelief { .. }));
-    let depth = if use_depth && is_relief {
+    let depth = if depth.enabled && is_relief {
         let guard = state.image.lock().unwrap();
-        let depth = guard.as_ref().and_then(|loaded| loaded.depth.clone());
+        let map = guard.as_ref().and_then(|loaded| loaded.depth.clone());
         Some(DepthSource {
-            depth: depth.ok_or("Estimate the depth first, or carve from brightness.")?,
-            detail,
+            depth: map.ok_or("Estimate the depth first, or carve from brightness.")?,
+            detail: depth.detail,
+            floor: depth.floor,
         })
     } else {
         None
@@ -393,8 +432,74 @@ pub fn run() {
             machine::connect_machine,
             machine::disconnect_machine,
             machine::machine_action,
-            web::fetch_page_text
+            web::fetch_page_text,
+            gallery::save_project,
+            gallery::list_projects,
+            gallery::open_project,
+            gallery::project_picture,
+            gallery::delete_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kerf_trace::image::{GrayImage, Luma};
+
+    /// A flat mid-grey form with a picture on it.
+    fn blended(photo: &GrayImage, detail: f32, floor: f32) -> Vec<f32> {
+        let shape = GrayImage::from_pixel(photo.width(), photo.height(), Luma([128]));
+        blend_depth(&shape, photo, detail, floor)
+    }
+
+    #[test]
+    fn detail_carves_thin_lines_into_a_smooth_form() {
+        // A light picture with one thin dark line down the middle.
+        let photo = GrayImage::from_fn(200, 100, |x, _| {
+            Luma([if (99..101).contains(&x) { 20 } else { 220 }])
+        });
+        let plain = blended(&photo, 0.0, 0.0);
+        assert!(
+            plain.iter().all(|&h| (h - 128.0 / 255.0).abs() < 1e-6),
+            "no detail leaves the form untouched"
+        );
+
+        let detailed = blended(&photo, 1.0, 0.0);
+        let at = |x: usize| detailed[50 * 200 + x];
+        // The line is cut into the form; far from it the form is unchanged.
+        assert!(
+            at(100) < at(20) - 0.2,
+            "line {} against surround {}",
+            at(100),
+            at(20)
+        );
+        assert!((at(20) - 128.0 / 255.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn broad_dark_areas_do_not_become_hollows() {
+        // The left half is dark, the right half light: a coat, not a hole.
+        let photo = GrayImage::from_fn(400, 100, |x, _| Luma([if x < 200 { 30 } else { 230 }]));
+        let detailed = blended(&photo, 1.0, 0.0);
+        let at = |x: usize| detailed[50 * 400 + x];
+        // Well inside each half the height is the form's, whatever its shade.
+        assert!(
+            (at(40) - at(360)).abs() < 0.05,
+            "dark {} against light {}",
+            at(40),
+            at(360)
+        );
+    }
+
+    #[test]
+    fn the_floor_flattens_the_background_and_stretches_the_rest() {
+        let photo = GrayImage::from_pixel(4, 1, Luma([128]));
+        let shape = GrayImage::from_fn(4, 1, |x, _| Luma([[0, 51, 153, 255][x as usize]]));
+        let heights = blend_depth(&shape, &photo, 0.0, 0.2);
+        // 0 and 0.2 are both background; 0.6 lands halfway; 1.0 stays the top.
+        assert!(heights[0].abs() < 1e-6 && heights[1].abs() < 1e-6);
+        assert!((heights[2] - 0.5).abs() < 0.01 && (heights[3] - 1.0).abs() < 1e-6);
+    }
 }

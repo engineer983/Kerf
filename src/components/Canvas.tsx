@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Upload } from "lucide-react";
 import { findMaterial, paintMaterial } from "../lib/materials";
 import { Simulation, type Rect } from "../lib/simulation";
+import { setResultCanvas } from "../lib/thumbnail";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
 import { artworkRect, stockRect, useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
@@ -47,6 +48,7 @@ export function Canvas() {
   const mode = usePlayback((s) => s.mode);
   const playing = usePlayback((s) => s.playing);
   const progress = usePlayback((s) => s.progress);
+  const compare = usePlayback((s) => s.compare);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -266,6 +268,46 @@ export function Canvas() {
     simulation.canvas.style.cssText = "display:block;width:100%;height:100%";
     resultHost.current.replaceChildren(simulation.canvas);
   }, [showResult, simulation]);
+
+  // The gallery pictures a project by its simulated result.
+  useEffect(() => {
+    setResultCanvas(simulation?.canvas ?? null);
+    return () => setResultCanvas(null);
+  }, [simulation]);
+
+  // How the previous result ended up, kept so that a change can be compared
+  // against it side by side.
+  const [before, setBefore] = useState<{ canvas: HTMLCanvasElement; width: number; height: number } | null>(null);
+  useEffect(() => {
+    if (!simulation) return;
+    // Runs when this simulation is replaced or dropped.
+    return () => {
+      simulation.seek(1);
+      const copy = document.createElement("canvas");
+      copy.width = simulation.canvas.width;
+      copy.height = simulation.canvas.height;
+      copy.getContext("2d")!.drawImage(simulation.canvas, 0, 0);
+      setBefore({ canvas: copy, width: simulation.setup.stock.width, height: simulation.setup.stock.height });
+    };
+  }, [simulation]);
+
+  // The comparison only makes sense on the same piece of material.
+  const comparable = before !== null && before.width === sw && before.height === sh;
+  const comparing = showResult && compare && comparable;
+  /** Where the divider sits across the material, 0 at the left and 1 at the right. */
+  const [split, setSplit] = useState(0.5);
+  const beforeHost = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!comparing || !beforeHost.current || !before) return;
+    before.canvas.style.cssText = "display:block;width:100%;height:100%";
+    beforeHost.current.replaceChildren(before.canvas);
+  }, [comparing, before]);
+
+  function dragSplit(e: React.PointerEvent) {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId) || !view) return;
+    const [x] = toBed(e);
+    setSplit(Math.min(1, Math.max(0, (x - sx) / sw)));
+  }
   return (
     <main
       ref={containerRef}
@@ -410,6 +452,43 @@ export function Canvas() {
           }}
         />
       )}
+      {view && comparing && (
+        <>
+          {/* The earlier result, shown only to the left of the divider. */}
+          <div
+            ref={beforeHost}
+            className="pointer-events-none absolute"
+            style={{
+              left: (sx - view.x) / px,
+              top: (sy - view.y) / px,
+              width: sw / px,
+              height: sh / px,
+              clipPath: `inset(0 ${(1 - split) * 100}% 0 0)`,
+            }}
+          />
+          <div
+            className="absolute flex w-4 -translate-x-1/2 cursor-ew-resize justify-center"
+            title="Drag to compare the result before and after your changes"
+            style={{ left: (sx + sw * split - view.x) / px, top: (sy - view.y) / px, height: sh / px }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={dragSplit}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <div className="h-full w-0.5 bg-accent shadow" />
+            <div className="absolute top-1/2 h-8 w-3 -translate-y-1/2 rounded-full border border-white bg-accent" />
+          </div>
+          <div
+            className="pointer-events-none absolute flex -translate-y-full justify-between pb-1 text-[11px] font-medium text-muted"
+            style={{ left: (sx - view.x) / px, top: (sy - view.y) / px, width: sw / px }}
+          >
+            <span>Before</span>
+            <span>After</span>
+          </div>
+        </>
+      )}
       {view && showResult && head && (
         <div
           className={`pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 ${
@@ -464,7 +543,7 @@ export function Canvas() {
         </div>
       )}
       {simulation && mode === "3d" && <View3D simulation={simulation} bed={bed} />}
-      {simulation && <PlaybackBar />}
+      {simulation && <PlaybackBar canCompare={comparable} />}
 
       {!image && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">

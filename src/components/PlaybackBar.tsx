@@ -1,4 +1,4 @@
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, SquareSplitHorizontal } from "lucide-react";
 import { SPEEDS, usePlayback, type ViewMode } from "../state/playback";
 
 const MODES: { value: ViewMode; label: string }[] = [
@@ -10,8 +10,8 @@ const MODES: { value: ViewMode; label: string }[] = [
 const icon = "rounded-md p-1.5 text-muted transition-colors hover:text-fg";
 
 /** View switch and transport controls for replaying a generated job. */
-export function PlaybackBar() {
-  const { mode, playing, progress, speed, setMode, setProgress, setSpeed, toggle, finish } =
+export function PlaybackBar({ canCompare }: { canCompare: boolean }) {
+  const { mode, playing, progress, speed, compare, setMode, setProgress, setSpeed, toggle, finish, toggleCompare } =
     usePlayback();
 
   return (
@@ -38,6 +38,20 @@ export function PlaybackBar() {
         ))}
       </div>
 
+      <button
+        className={`${icon} disabled:opacity-30 ${compare && canCompare && mode === "result" ? "text-accent" : ""}`}
+        aria-label="Compare with the previous result"
+        aria-pressed={compare}
+        title={
+          canCompare
+            ? "Show the previous result on one side and the current one on the other"
+            : "Change a setting and generate again to have a previous result to compare with"
+        }
+        disabled={!canCompare}
+        onClick={toggleCompare}
+      >
+        <SquareSplitHorizontal size={15} />
+      </button>
       <button className={icon} aria-label="Back to the start" onClick={() => setProgress(0)}>
         <SkipBack size={15} />
       </button>

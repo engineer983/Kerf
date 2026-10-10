@@ -139,15 +139,14 @@ export function generateGcode(
   size: { widthMm: number; heightMm: number },
   job: Job,
   /** Carve reliefs from the estimated depth map, with this much photo texture (0 to 1). */
-  depth: { use: boolean; detail: number },
+  depth: { enabled: boolean; detail: number; floor: number },
 ): Promise<Generated> {
   return invoke("generate_gcode", {
     settings,
     widthMm: size.widthMm,
     heightMm: size.heightMm,
     job,
-    useDepth: depth.use,
-    detail: depth.detail,
+    depth,
   });
 }
 
@@ -223,6 +222,38 @@ export function machineAction(action: MachineAction): Promise<void> {
 
 export function onMachineEvent(handler: (event: MachineEvent) => void): Promise<() => void> {
   return listen<MachineEvent>("machine", (e) => handler(e.payload));
+}
+
+/** What the gallery shows for a saved project. */
+export interface ProjectMeta {
+  id: string;
+  name: string;
+  savedAt: string;
+  /** A small picture of the result, as a data URL. */
+  thumbnail: string;
+}
+
+/** Saves the picture being worked on, with the UI's record of its settings. */
+export function saveProject(meta: ProjectMeta, settings: string): Promise<void> {
+  return invoke("save_project", { meta, settings });
+}
+
+export function listProjects(): Promise<ProjectMeta[]> {
+  return invoke("list_projects");
+}
+
+/** Makes a saved project's picture the one being worked on; resolves to its settings. */
+export function openProject(id: string): Promise<string> {
+  return invoke("open_project", { id });
+}
+
+/** One of a saved project's pictures, as PNG bytes. */
+export function projectPicture(id: string, which: "image" | "depth"): Promise<ArrayBuffer> {
+  return invoke("project_picture", { id, which });
+}
+
+export function deleteProject(id: string): Promise<void> {
+  return invoke("delete_project", { id });
 }
 
 /** Downloads a web page and returns its visible text. */

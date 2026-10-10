@@ -13,6 +13,9 @@ interface PlaybackState {
   /** 0 at the start of the job, 1 at the end. */
   progress: number;
   speed: number;
+  /** Show the previous result beside the current one, with a divider to drag. */
+  compare: boolean;
+  toggleCompare: () => void;
   setMode: (mode: ViewMode) => void;
   setProgress: (progress: number) => void;
   setSpeed: (speed: number) => void;
@@ -26,6 +29,8 @@ export const usePlayback = create<PlaybackState>((set, get) => ({
   playing: false,
   progress: 1,
   speed: 1,
+  compare: false,
+  toggleCompare: () => set((s) => ({ compare: !s.compare, mode: "result" })),
   setMode: (mode) => set({ mode, playing: mode === "paths" ? false : get().playing }),
   setProgress: (progress) => set({ progress: Math.min(1, Math.max(0, progress)) }),
   setSpeed: (speed) => set({ speed }),

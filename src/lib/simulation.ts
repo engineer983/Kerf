@@ -47,7 +47,7 @@ const LASER_LINE_MM = 0.14;
 const MAX_CANVAS_PX = 4096;
 const MAX_PX_PER_MM = 12;
 /** Cells along the longer side of the height grid used for router jobs. */
-const GRID_CELLS = 768;
+const GRID_CELLS = 1152;
 
 /**
  * Replays a job onto a piece of material. For a laser it draws the marks; for
@@ -272,11 +272,15 @@ export class Simulation {
         const x1 = Math.min(w - 1, Math.floor(cx + reach));
         const y0 = Math.max(0, Math.ceil(cy - reach));
         const y1 = Math.min(h - 1, Math.floor(cy + reach));
+        // This is the simulation's innermost loop, run hundreds of millions of
+        // times on a long job, so it avoids Math.hypot, which is far slower
+        // than a multiply and a square root.
         for (let y = y0; y <= y1; y++) {
+          const dy2 = (y - cy) * (y - cy);
           for (let x = x0; x <= x1; x++) {
-            const r = Math.hypot(x - cx, y - cy) / scale;
-            if (r > radius) continue;
-            const bottom = z + lift(r);
+            const r2 = (x - cx) * (x - cx) + dy2;
+            if (r2 > reach * reach) continue;
+            const bottom = z + lift(Math.sqrt(r2) / scale);
             const index = y * w + x;
             if (bottom < heights[index]) heights[index] = bottom;
           }

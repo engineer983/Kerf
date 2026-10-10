@@ -5,6 +5,7 @@ import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { cutSettings } from "../lib/feeds";
 import { DEFAULT_MATERIAL, findMaterial, type Material } from "../lib/materials";
+import { makeThumbnail } from "../lib/thumbnail";
 import { suggestTool, type Tool } from "../lib/tools";
 import { useToolbox } from "./tools";
 import { usePlayback } from "./playback";
@@ -224,6 +225,8 @@ interface ProjectState {
   depth: DepthState;
   /** How much of the photo's fine texture is laid over a depth relief, 0 to 1. */
   detail: number;
+  /** Share of the depth range, from the far end, flattened into a level background (0 to 0.9). */
+  depthFloor: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
   left: number;
   /**
@@ -261,6 +264,7 @@ interface ProjectState {
   resetCrop: () => Promise<void>;
   setHeightSource: (source: "brightness" | "depth") => void;
   setDetail: (detail: number) => void;
+  setDepthFloor: (depthFloor: number) => void;
   /** Runs the depth model on the image. Downloads the model the first time. */
   estimateDepth: () => Promise<void>;
   setPosition: (patch: { left?: number; front?: number }) => void;
@@ -270,6 +274,24 @@ interface ProjectState {
   setOrigin: (origin: Origin) => void;
   applyMachinePreset: (id: string) => void;
   setShowSource: (show: boolean) => void;
+  /** Identifies this piece of work among the saved projects. */
+  projectId: string | null;
+  /** Saved projects, newest first. */
+  projects: ipc.ProjectMeta[];
+  /** Why the last save or open failed, if it did. */
+  galleryError: string | null;
+  refreshProjects: () => Promise<void>;
+  /** Saves the picture and its settings so the project can be opened again. */
+  saveProject: () => Promise<void>;
+  openProject: (id: string) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
+  /** Whether there is a change to step back from, or forward to. */
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
+  /** Puts back a set of settings saved by the undo history. */
+  restore: (snapshot: Snapshot) => void;
   setMaterial: (id: string) => void;
   setThickness: (thickness: number) => void;
   setStock: (patch: { stockWidth?: number; stockLength?: number }) => void;
@@ -347,7 +369,67 @@ export function traceColors(traced: Traced | null): string[] {
   return [...colors];
 }
 
+/** The settings that undo and redo step through. */
+const UNDOABLE = [
+  "widthMm",
+  "heightMm",
+  "aspectLocked",
+  "left",
+  "front",
+  "stockWidth",
+  "stockLength",
+  "materialId",
+  "thickness",
+  "operations",
+  "heightSource",
+  "detail",
+  "depthFloor",
+] as const;
+
+type Snapshot = Pick<ProjectState, (typeof UNDOABLE)[number]> & { traceSettings: TraceSettings };
+
+function snapshot(s: ProjectState): Snapshot {
+  const picked = Object.fromEntries(UNDOABLE.map((key) => [key, s[key]])) as Pick<
+    ProjectState,
+    (typeof UNDOABLE)[number]
+  >;
+  return { ...picked, traceSettings: s.trace.settings };
+}
+
+const sameSnapshot = (a: Snapshot, b: Snapshot) =>
+  a.traceSettings === b.traceSettings && UNDOABLE.every((key) => a[key] === b[key]);
+
+const HISTORY_LIMIT = 100;
+/** Changes closer together than this, such as a slider being dragged, undo as one step. */
+const SAME_STEP_MS = 600;
+
+const past: Snapshot[] = [];
+const future: Snapshot[] = [];
+let stepping = false;
+let lastChange = 0;
+
+/** Moves one step along the history: from `from`, leaving the current state on `to`. */
+function stepHistory(from: Snapshot[], to: Snapshot[]) {
+  const target = from.pop();
+  if (!target) return;
+  to.push(snapshot(useProject.getState()));
+  stepping = true;
+  useProject.getState().restore(target);
+  stepping = false;
+  useProject.setState({ canUndo: past.length > 0, canRedo: future.length > 0 });
+}
+
 const DEVICE_KEY = "kerf.device";
+const DEVICE_KEYS = [
+  "machinePreset",
+  "machineKind",
+  "bed",
+  "origin",
+  "maxPowerS",
+  "spindleRpm",
+  "startGcode",
+  "endGcode",
+] as const;
 
 /** The machine settings that are remembered between sessions. */
 type Device = Pick<
@@ -443,7 +525,8 @@ export const useProject = create<ProjectState>((set, get) => {
     cropping: false,
     heightSource: "brightness",
     depth: NO_DEPTH,
-    detail: 0.3,
+    detail: 0.5,
+    depthFloor: 0,
     left: STOCK_MARGIN_MM,
     front: STOCK_MARGIN_MM,
     stockWidth: 300,
@@ -504,6 +587,7 @@ export const useProject = create<ProjectState>((set, get) => {
         };
         set({
           ...placed,
+          projectId: `p-${Date.now().toString(36)}`,
           operations: [fresh(machineKind, { ...get(), ...placed })],
           error: null,
           exportedTo: null,
@@ -630,6 +714,7 @@ export const useProject = create<ProjectState>((set, get) => {
 
     setHeightSource: (heightSource) => set({ heightSource, ...staleGcode() }),
     setDetail: (detail) => set({ detail, ...staleGcode() }),
+    setDepthFloor: (depthFloor) => set({ depthFloor, ...staleGcode() }),
 
     estimateDepth: async () => {
       const { image } = get();
@@ -688,6 +773,98 @@ export const useProject = create<ProjectState>((set, get) => {
       }));
     },
     setShowSource: (showSource) => set({ showSource }),
+    projectId: null,
+    projects: [],
+    galleryError: null,
+
+    refreshProjects: async () => {
+      try {
+        set({ projects: await ipc.listProjects() });
+      } catch (e) {
+        set({ galleryError: message(e) });
+      }
+    },
+
+    saveProject: async () => {
+      const s = get();
+      if (!s.image || !s.projectId || !ipc.isTauri()) return;
+      try {
+        const { url: _url, ...image } = s.image;
+        const device = Object.fromEntries(DEVICE_KEYS.map((key) => [key, s[key]]));
+        await ipc.saveProject(
+          {
+            id: s.projectId,
+            name: s.image.name.replace(/\.[^.]+$/, ""),
+            savedAt: new Date().toISOString(),
+            thumbnail: await makeThumbnail(s.image.url),
+          },
+          JSON.stringify({ image, device, settings: snapshot(s), hasDepth: s.depth.status === "ready" }),
+        );
+        set({ galleryError: null });
+        await get().refreshProjects();
+      } catch (e) {
+        set({ galleryError: `The project could not be saved: ${message(e)}` });
+      }
+    },
+
+    openProject: async (id) => {
+      try {
+        const saved = JSON.parse(await ipc.openProject(id)) as {
+          image: Omit<SourceImage, "url">;
+          device: Device;
+          settings: Snapshot;
+          hasDepth: boolean;
+        };
+        const picture = async (which: "image" | "depth") =>
+          URL.createObjectURL(new Blob([await ipc.projectPicture(id, which)], { type: "image/png" }));
+        const url = await picture("image");
+        const depthUrl = saved.hasDepth ? await picture("depth") : null;
+
+        cancelTrace();
+        const previous = get();
+        if (previous.image) URL.revokeObjectURL(previous.image.url);
+        if (previous.uncropped) URL.revokeObjectURL(previous.uncropped.url);
+        if (previous.depth.url) URL.revokeObjectURL(previous.depth.url);
+        // New operations must not reuse the ids of the ones being loaded.
+        nextOperationId = Math.max(nextOperationId, ...saved.settings.operations.map((op) => op.id + 1));
+        set({
+          ...saved.device,
+          image: { ...saved.image, url },
+          uncropped: null,
+          cropping: false,
+          depth: depthUrl ? { status: "ready", message: null, url: depthUrl } : NO_DEPTH,
+          projectId: id,
+          step: "operations",
+          error: null,
+          exportedTo: null,
+          galleryError: null,
+          trace: { ...EMPTY_TRACE, settings: saved.settings.traceSettings },
+        });
+        get().restore(saved.settings);
+        scheduleTrace();
+      } catch (e) {
+        set({ galleryError: `The project could not be opened: ${message(e)}` });
+      }
+    },
+
+    deleteProject: async (id) => {
+      try {
+        await ipc.deleteProject(id);
+        await get().refreshProjects();
+      } catch (e) {
+        set({ galleryError: message(e) });
+      }
+    },
+
+    canUndo: false,
+    canRedo: false,
+    undo: () => stepHistory(past, future),
+    redo: () => stepHistory(future, past),
+    restore: ({ traceSettings, ...rest }) => {
+      const retrace = traceSettings !== get().trace.settings;
+      set((s) => ({ ...rest, trace: { ...s.trace, settings: traceSettings }, ...staleGcode() }));
+      if (retrace) scheduleTrace();
+    },
     setMaterial: (materialId) =>
       set((s) => {
         const next = { ...s, materialId };
@@ -806,10 +983,17 @@ export const useProject = create<ProjectState>((set, get) => {
           },
           offset: [rect.x, rect.y],
           operations: s.operations.filter((op) => op.enabled !== false),
-        }, { use: s.heightSource === "depth" && s.depth.status === "ready", detail: s.detail });
+        }, {
+          enabled: s.heightSource === "depth" && s.depth.status === "ready",
+          detail: s.detail,
+          floor: s.depthFloor,
+        });
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, program } });
         usePlayback.getState().finish();
+        // Keep the project once it has produced something, after the preview
+        // has had a moment to draw so the thumbnail shows the result.
+        setTimeout(() => void get().saveProject(), 800);
       } catch (e) {
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, error: message(e) } });
@@ -841,5 +1025,44 @@ useProject.subscribe((s, previous) => {
     localStorage.setItem(DEVICE_KEY, JSON.stringify(Object.fromEntries(keys.map((key) => [key, s[key]]))));
   } catch {
     // Not persisted; the choice still applies for this session.
+  }
+});
+
+// Record changes for undo.
+useProject.subscribe((s, previous) => {
+  if (stepping) return;
+  const before = snapshot(previous);
+  if (sameSnapshot(before, snapshot(s))) return;
+  if (s.image !== previous.image) {
+    // A different picture, or a crop, starts a new history: the earlier
+    // settings belonged to an image that is no longer there.
+    past.length = 0;
+    future.length = 0;
+  } else {
+    const now = Date.now();
+    if (now - lastChange > SAME_STEP_MS) {
+      past.push(before);
+      if (past.length > HISTORY_LIMIT) past.shift();
+    }
+    lastChange = now;
+    future.length = 0;
+  }
+  const flags = { canUndo: past.length > 0, canRedo: future.length > 0 };
+  if (flags.canUndo !== s.canUndo || flags.canRedo !== s.canRedo) useProject.setState(flags);
+});
+
+// Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z), except while typing in a field, where
+// they keep their usual meaning of undoing the typing.
+window.addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA") && (target as HTMLInputElement).type !== "range" && (target as HTMLInputElement).type !== "checkbox") return;
+  const key = e.key.toLowerCase();
+  if (key === "z" && !e.shiftKey) {
+    e.preventDefault();
+    useProject.getState().undo();
+  } else if (key === "y" || (key === "z" && e.shiftKey)) {
+    e.preventDefault();
+    useProject.getState().redo();
   }
 });

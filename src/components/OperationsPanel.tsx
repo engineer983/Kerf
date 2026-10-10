@@ -234,7 +234,8 @@ function HeightSource() {
   const heightSource = useProject((s) => s.heightSource);
   const depth = useProject((s) => s.depth);
   const detail = useProject((s) => s.detail);
-  const { setHeightSource, setDetail, estimateDepth } = useProject.getState();
+  const depthFloor = useProject((s) => s.depthFloor);
+  const { setHeightSource, setDetail, setDepthFloor, estimateDepth } = useProject.getState();
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-line p-3">
@@ -253,13 +254,22 @@ function HeightSource() {
             <>
               <img src={depth.url} alt="Estimated depth: lighter is nearer" className="w-full rounded-md border border-line" />
               <Slider
-                label="Photo texture"
+                label="Picture detail"
                 min={0}
                 max={1}
                 step={0.05}
                 value={detail}
                 format={(v) => `${Math.round(v * 100)}%`}
                 onChange={setDetail}
+              />
+              <Slider
+                label="Flatten background"
+                min={0}
+                max={0.9}
+                step={0.05}
+                value={depthFloor}
+                format={(v) => `${Math.round(v * 100)}%`}
+                onChange={setDepthFloor}
               />
             </>
           ) : (

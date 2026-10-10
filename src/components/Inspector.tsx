@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { ACCEPTED_IMAGE_TYPES, formatBytes } from "../lib/image";
 import { useProject, type Step } from "../state/project";
 import { DevicePanel } from "./DevicePanel";
+import { Gallery } from "./Gallery";
 import { MachinePanel } from "./MachinePanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { TracePanel } from "./TracePanel";
@@ -43,6 +44,7 @@ function ImportPanel() {
   const error = useProject((s) => s.error);
   const importFile = useProject((s) => s.importFile);
   const clearImage = useProject((s) => s.clearImage);
+  const galleryError = useProject((s) => s.galleryError);
   const input = useRef<HTMLInputElement>(null);
 
   return (
@@ -95,6 +97,12 @@ function ImportPanel() {
       ) : (
         <p className="text-muted">Or drop a file anywhere on the canvas.</p>
       )}
+      {galleryError && (
+        <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
+          {galleryError}
+        </p>
+      )}
+      <Gallery />
     </div>
   );
 }

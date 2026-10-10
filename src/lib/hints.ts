@@ -75,7 +75,8 @@ const BY_LABEL: Record<string, HintContent> = {
   "Line interval": { text: "The gap between one engraved line and the next. Smaller is finer and darker, and takes longer.", demo: "lineInterval" },
   Shading: { text: "How greys are made. Dots uses full-power dots, more of them where it is darker; Varying power changes the laser's strength instead.", demo: "shading" },
   "Height from": { text: "What decides how deep each part is carved: how bright the picture is there, or how near the camera a model estimates it to be.", demo: "heightFrom" },
-  "Photo texture": { text: "How much of the photo's fine detail, such as hair and fabric, is laid over the estimated shape." },
+  "Picture detail": { text: "How strongly the picture's own linework, such as feathers, hair, fabric and lettering, is cut into the estimated shape. The depth model only finds the broad form; this puts the drawing back." },
+  "Flatten background": { text: "Levels off the furthest part of the scene into a flat background, and spreads the subject over the full depth so it stands out more." },
 
   // Cutout
   Offset: { text: "How far outside the artwork the cut line is. A negative number puts it inside.", demo: "offset" },
