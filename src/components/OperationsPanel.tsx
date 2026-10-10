@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { isTauri, type OperationKind } from "../lib/ipc";
+import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { defaultOperation, traceColors, useProject, type OperationItem } from "../state/project";
 import { NumberField, Section, Segmented, Select } from "./controls";
 
@@ -21,6 +22,7 @@ export function OperationsPanel() {
   const bed = useProject((s) => s.bed);
   const machineKind = useProject((s) => s.machineKind);
   const maxPowerS = useProject((s) => s.maxPowerS);
+  const machinePreset = useProject((s) => s.machinePreset);
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const operations = useProject((s) => s.operations);
@@ -34,10 +36,21 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
+  const presetNote = MACHINE_PRESETS.find((p) => p.id === machinePreset)?.note;
 
   return (
     <div className="flex flex-col gap-5">
       <Section title="Machine">
+        <Select
+          label="Preset"
+          value={machinePreset}
+          options={[
+            { value: CUSTOM_PRESET, label: "Custom" },
+            ...MACHINE_PRESETS.map((p) => ({ value: p.id, label: p.label })),
+          ]}
+          onChange={actions.applyMachinePreset}
+        />
+        {presetNote && <p className="text-muted">{presetNote}</p>}
         <Segmented
           label="Machine type"
           value={machineKind}

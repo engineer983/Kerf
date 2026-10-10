@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import * as ipc from "../lib/ipc";
+import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import type { Generated, MachineKind, Operation, Traced, TraceSettings } from "../lib/ipc";
 
 export type Step = "import" | "trace" | "operations" | "machine";
@@ -87,6 +88,8 @@ interface ProjectState {
   bed: { width: number; height: number };
   machineKind: MachineKind;
   maxPowerS: number;
+  /** Id of the machine preset in use, or `CUSTOM_PRESET` once any value is edited. */
+  machinePreset: string;
   /** Physical width of the artwork in millimetres; height follows the aspect ratio. */
   widthMm: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
@@ -108,6 +111,7 @@ interface ProjectState {
   setBed: (patch: { width?: number; height?: number }) => void;
   setMachineKind: (kind: MachineKind) => void;
   setMaxPowerS: (maxPowerS: number) => void;
+  applyMachinePreset: (id: string) => void;
   setShowSource: (show: boolean) => void;
   updateTrace: (patch: Partial<TraceSettings>) => void;
   updatePreprocess: (patch: Partial<TraceSettings["preprocess"]>) => void;
@@ -203,6 +207,7 @@ export const useProject = create<ProjectState>((set, get) => {
     bed: { width: 400, height: 400 },
     machineKind: "laser",
     maxPowerS: 1000,
+    machinePreset: CUSTOM_PRESET,
     widthMm: 100,
     left: 0,
     front: 0,
@@ -272,10 +277,36 @@ export const useProject = create<ProjectState>((set, get) => {
 
     setWidthMm: (widthMm) => set({ widthMm, ...staleGcode() }),
     setPosition: (patch) => set({ ...patch, ...staleGcode() }),
-    setBed: (patch) => set((s) => ({ bed: { ...s.bed, ...patch }, ...staleGcode() })),
+    setBed: (patch) =>
+      set((s) => ({
+        bed: { ...s.bed, ...patch },
+        machinePreset: CUSTOM_PRESET,
+        ...staleGcode(),
+      })),
     setMachineKind: (machineKind) =>
-      set({ machineKind, operations: [defaultOperation(machineKind)], ...staleGcode() }),
-    setMaxPowerS: (maxPowerS) => set({ maxPowerS, ...staleGcode() }),
+      set({
+        machineKind,
+        machinePreset: CUSTOM_PRESET,
+        operations: [defaultOperation(machineKind)],
+        ...staleGcode(),
+      }),
+    setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
+    applyMachinePreset: (id) => {
+      const preset = MACHINE_PRESETS.find((p) => p.id === id);
+      if (!preset) {
+        set({ machinePreset: CUSTOM_PRESET });
+        return;
+      }
+      set((s) => ({
+        machinePreset: preset.id,
+        bed: preset.bed,
+        maxPowerS: preset.maxPowerS,
+        machineKind: preset.kind,
+        // Operations are specific to the machine type; keep them when it is unchanged.
+        operations: s.machineKind === preset.kind ? s.operations : [defaultOperation(preset.kind)],
+        ...staleGcode(),
+      }));
+    },
     setShowSource: (showSource) => set({ showSource }),
 
     updateTrace: (patch) => {

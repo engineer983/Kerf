@@ -53,7 +53,10 @@ export function Canvas() {
     });
   }, [bed, size]);
 
-  // Fit once, when the container first has a size.
+  // A different bed size invalidates the view; clearing it triggers a new fit.
+  useEffect(() => setView(null), [bed.width, bed.height]);
+
+  // Fit when the container first has a size, and after the view is cleared.
   useEffect(() => {
     if (!view) fit();
   }, [view, fit]);
