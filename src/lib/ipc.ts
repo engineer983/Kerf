@@ -81,6 +81,25 @@ export type OperationKind =
       /** Side angle of a tapered ball nose in degrees; 0 for a straight bit. */
       taperAngle?: number;
       shankDiameter?: number;
+    }
+  | {
+      /** Cuts a line around the artwork to full depth, to free the piece. */
+      type: "cncCutout";
+      depth: number;
+      depthPerPass: number;
+      plungeFeed: number;
+      safeZ: number;
+      spindleRpm: number;
+      toolDiameter: number;
+      /** How far outside the artwork the line is; negative is inside. */
+      offset: number;
+      /** Which side of the line the bit runs on. */
+      side: "on" | "inside" | "outside";
+      outline: "rectangle" | "ellipse";
+      cornerRadius: number;
+      tabs: number;
+      tabWidth: number;
+      tabHeight: number;
     };
 
 export interface Operation {
@@ -110,6 +129,8 @@ export interface Generated {
   travelPath: string;
   /** Every move in order: `x, y, z, power` each, in bed coordinates. Power is -1 for a rapid. */
   moves: number[];
+  /** Index in `moves` of the first move of each operation. */
+  operationStarts: number[];
   head: string;
 }
 

@@ -46,6 +46,12 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
+  // Two included router operations with different bits cannot run as one job:
+  // the bit has to be changed, and Z zeroed again, in between.
+  const bitsInUse = new Set(
+    operations.filter((o) => o.enabled !== false && o.toolId).map((o) => o.toolId),
+  );
+  const mixedBits = machineKind === "cnc" && bitsInUse.size > 1;
   const art = artworkRect({ image, widthMm, heightMm, left, front, bed, origin });
   const stock = stockRect({ stockWidth, stockLength, bed, origin });
   const overhangs =
@@ -60,6 +66,7 @@ export function OperationsPanel() {
       <Section title="Material">
         <Select
           label="Type"
+          hint={{ text: "The material you are working on. It sets how the preview looks and, on a router, the cutting speeds." }}
           value={materialId}
           options={MATERIALS.map((m) => ({ value: m.id, label: m.label }))}
           onChange={actions.setMaterial}
@@ -151,12 +158,29 @@ export function OperationsPanel() {
         />
       ))}
 
-      <button
-        onClick={actions.addOperation}
-        className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
-      >
-        Add operation
-      </button>
+      {mixedBits && (
+        <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
+          These operations use different bits. Untick "Include in the job" on all but one, run it,
+          change the bit, zero Z again, then do the next.
+        </p>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={actions.addOperation}
+          title="Add another operation to the job"
+          className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
+        >
+          Add operation
+        </button>
+        <button
+          onClick={actions.addCutout}
+          disabled={machineKind !== "cnc"}
+          title="Add a cut around the artwork, right through the material, to free the piece"
+          className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg disabled:opacity-40"
+        >
+          Add cutout
+        </button>
+      </div>
 
       <div className="flex flex-col gap-3">
         <button
@@ -277,7 +301,8 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
   const openToolbox = useToolbox((s) => s.setOpen);
   const material = useProject((s) => findMaterial(s.materialId));
   const { id, kind } = operation;
-  const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief";
+  const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief" || kind.type === "cncCutout";
+  const thickness = useProject((s) => s.thickness);
   const setKind = (patch: Partial<OperationKind>) =>
     updateOperation(id, { kind: { ...kind, ...patch } as OperationKind });
 
@@ -307,7 +332,9 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           options={[
             { value: "cncProfile", label: "Follow paths" },
             { value: "cncRelief", label: "3D relief" },
+            { value: "cncCutout", label: "Cut out the piece" },
           ]}
+          hint={{ text: "What this operation does: follow the traced lines, carve the picture as a 3D relief, or cut around the artwork to free the piece." }}
           onChange={(type) => setOperationType(id, type)}
         />
       ) : (
@@ -319,9 +346,16 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
             { value: "laserFill", label: "Fill (engrave)" },
             { value: "laserCut", label: "Line (cut)" },
           ]}
+          hint={{ text: "What this operation does: engrave the picture itself with its shading, fill traced shapes solidly, or follow their outlines." }}
           onChange={(type) => setOperationType(id, type)}
         />
       )}
+
+      <Checkbox
+        label="Include in the job"
+        checked={operation.enabled !== false}
+        onChange={(enabled) => updateOperation(id, { enabled })}
+      />
 
       {isCnc && (
         <>
@@ -348,7 +382,7 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         </>
       )}
 
-      {colors.length > 1 && kind.type !== "cncRelief" && kind.type !== "laserImage" && (
+      {colors.length > 1 && (kind.type === "cncProfile" || kind.type === "laserFill" || kind.type === "laserCut") && (
         <Select
           label="Applies to"
           value={operation.color ?? ALL_SHAPES}
@@ -368,8 +402,42 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         onChange={(feed) => updateOperation(id, { feed })}
       />
 
-      {kind.type === "cncProfile" || kind.type === "cncRelief" ? (
+      {kind.type === "cncProfile" || kind.type === "cncRelief" || kind.type === "cncCutout" ? (
         <>
+          {kind.type === "cncCutout" && (
+            <>
+              <NumberField label="Offset" unit="mm" min={-1000} max={1000} value={kind.offset} onChange={(offset) => setKind({ offset })} />
+              <Select
+                label="Cut side"
+                value={kind.side}
+                options={[
+                  { value: "outside", label: "Outside the line" },
+                  { value: "on", label: "On the line" },
+                  { value: "inside", label: "Inside the line" },
+                ]}
+                onChange={(side) => setKind({ side })}
+              />
+              <Select
+                label="Shape"
+                value={kind.outline}
+                options={[
+                  { value: "rectangle", label: "Rectangle" },
+                  { value: "ellipse", label: "Oval" },
+                ]}
+                onChange={(outline) => setKind({ outline })}
+              />
+              {kind.outline === "rectangle" && (
+                <NumberField label="Corner radius" unit="mm" min={0} max={1000} value={kind.cornerRadius} onChange={(cornerRadius) => setKind({ cornerRadius })} />
+              )}
+              <NumberField label="Tabs" min={0} max={40} value={kind.tabs} onChange={(tabs) => setKind({ tabs: Math.round(tabs) })} />
+              {kind.tabs > 0 && (
+                <>
+                  <NumberField label="Tab width" unit="mm" min={0.5} max={100} value={kind.tabWidth} onChange={(tabWidth) => setKind({ tabWidth })} />
+                  <NumberField label="Tab height" unit="mm" min={0.1} max={50} value={kind.tabHeight} onChange={(tabHeight) => setKind({ tabHeight })} />
+                </>
+              )}
+            </>
+          )}
           {kind.type === "cncRelief" && (
             <>
               <HeightSource />
@@ -386,6 +454,11 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
             </>
           )}
           <NumberField label="Depth" unit="mm" min={0.01} max={200} value={kind.depth} onChange={(depth) => setKind({ depth })} />
+          {kind.type === "cncCutout" && Math.abs(kind.depth - thickness) > 0.001 && (
+            <button className="self-start text-accent hover:underline" onClick={() => setKind({ depth: thickness })}>
+              Set to the material's {thickness} mm thickness
+            </button>
+          )}
           <NumberField label="Depth per pass" unit="mm" min={0.01} max={200} value={kind.depthPerPass} onChange={(depthPerPass) => setKind({ depthPerPass })} />
           <NumberField label="Plunge speed" unit="mm/min" min={1} max={100000} value={kind.plungeFeed} onChange={(plungeFeed) => setKind({ plungeFeed })} />
           <NumberField label="Safe height" unit="mm" min={0.1} max={200} value={kind.safeZ} onChange={(safeZ) => setKind({ safeZ })} />
@@ -395,7 +468,9 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
             </p>
           )}
           <p className="text-muted">
-            {kind.type === "cncRelief"
+            {kind.type === "cncCutout"
+              ? "Cuts a line around the artwork, right through the material, to free the piece. Put scrap board underneath, since the bit goes through. Run it last, after any carving."
+              : kind.type === "cncRelief"
               ? "Brightness sets the height, from the material's top (Z0) down to Depth. A photograph's brightness is not its shape, so a photo carves as a rough impression; a depth map or greyscale artwork made for carving gives a true relief. Blur in Trace smooths the surface."
               : "The bit's centre follows the path; there is no tool-width offset yet."}
           </p>

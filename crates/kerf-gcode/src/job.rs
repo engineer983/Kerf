@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::cutout::{Outline, Side};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MachineKind {
@@ -98,6 +100,26 @@ pub enum OperationKind {
         #[serde(default)]
         shank_diameter: f64,
     },
+    /// Cut a line around the artwork to full depth, to free the piece. The
+    /// line is the artwork's rectangle, or the ellipse inside it, moved
+    /// outwards by `offset` (inwards if negative).
+    CncCutout {
+        depth: f64,
+        depth_per_pass: f64,
+        plunge_feed: f64,
+        safe_z: f64,
+        spindle_rpm: f64,
+        tool_diameter: f64,
+        offset: f64,
+        side: Side,
+        outline: Outline,
+        /// Radius of the line's corners, for a rectangle.
+        corner_radius: f64,
+        /// Bridges of material left to hold the piece; zero for none.
+        tabs: u32,
+        tab_width: f64,
+        tab_height: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +214,37 @@ impl Operation {
                 positive(stepover, "Stepover")?;
                 if stepover > tool_diameter {
                     return Err("The stepover cannot be larger than the bit diameter.".into());
+                }
+            }
+            OperationKind::CncCutout {
+                depth,
+                depth_per_pass,
+                plunge_feed,
+                safe_z,
+                spindle_rpm,
+                tool_diameter,
+                offset,
+                corner_radius,
+                tab_width,
+                tab_height,
+                ..
+            } => {
+                if machine.kind != MachineKind::Cnc {
+                    return Err("CNC operations need a CNC machine profile.".into());
+                }
+                positive(depth, "Depth")?;
+                positive(depth_per_pass, "Depth per pass")?;
+                positive(plunge_feed, "Plunge speed")?;
+                positive(safe_z, "Safe height")?;
+                positive(spindle_rpm, "Spindle speed")?;
+                positive(tool_diameter, "Bit diameter")?;
+                let sensible = |v: f64| v.is_finite() && v >= 0.0;
+                if !offset.is_finite()
+                    || !sensible(corner_radius)
+                    || !sensible(tab_width)
+                    || !sensible(tab_height)
+                {
+                    return Err("The cutout's offset, corner radius and tab sizes must be numbers, and not negative except for the offset.".into());
                 }
             }
         }

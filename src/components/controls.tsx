@@ -1,4 +1,11 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
+import { hintFor, type HintContent } from "../lib/hints";
+import { Hint } from "./Hint";
+
+/** Every labelled control explains itself: by a hint given to it, or one found by its label. */
+interface Hinted {
+  hint?: HintContent;
+}
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -9,7 +16,7 @@ export function Section({ title, children }: { title: string; children: ReactNod
   );
 }
 
-interface SliderProps {
+interface SliderProps extends Hinted {
   label: string;
   value: number;
   min: number;
@@ -20,12 +27,14 @@ interface SliderProps {
   onChange: (value: number) => void;
 }
 
-export function Slider({ label, value, min, max, step = 1, disabled, format, onChange }: SliderProps) {
+export function Slider({ label, value, min, max, step = 1, disabled, format, hint, onChange }: SliderProps) {
   const id = useId();
   return (
     <div className={disabled ? "opacity-40" : undefined}>
       <div className="mb-1 flex justify-between">
-        <label htmlFor={id}>{label}</label>
+        <label htmlFor={id}>
+          <Hint hint={hint ?? hintFor(label)}>{label}</Hint>
+        </label>
         <span className="font-mono text-[12px] text-muted">{format ? format(value) : value}</span>
       </div>
       <input
@@ -43,13 +52,13 @@ export function Slider({ label, value, min, max, step = 1, disabled, format, onC
   );
 }
 
-interface CheckboxProps {
+interface CheckboxProps extends Hinted {
   label: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
 }
 
-export function Checkbox({ label, checked, onChange }: CheckboxProps) {
+export function Checkbox({ label, checked, hint, onChange }: CheckboxProps) {
   return (
     <label className="flex items-center gap-2">
       <input
@@ -58,7 +67,7 @@ export function Checkbox({ label, checked, onChange }: CheckboxProps) {
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
-      {label}
+      <Hint hint={hint ?? hintFor(label)}>{label}</Hint>
     </label>
   );
 }
@@ -90,19 +99,19 @@ export function Segmented<T extends string>({ label, value, options, onChange }:
   );
 }
 
-interface SelectProps<T extends string> {
+interface SelectProps<T extends string> extends Hinted {
   label: string;
   value: T;
   options: { value: T; label: string }[];
   onChange: (value: T) => void;
 }
 
-export function Select<T extends string>({ label, value, options, onChange }: SelectProps<T>) {
+export function Select<T extends string>({ label, value, options, hint, onChange }: SelectProps<T>) {
   const id = useId();
   return (
     <div className="flex items-center justify-between gap-3">
       <label htmlFor={id} className="whitespace-nowrap">
-        {label}
+        <Hint hint={hint ?? hintFor(label)}>{label}</Hint>
       </label>
       <select
         id={id}
@@ -120,7 +129,7 @@ export function Select<T extends string>({ label, value, options, onChange }: Se
   );
 }
 
-interface NumberFieldProps {
+interface NumberFieldProps extends Hinted {
   label: string;
   value: number;
   min: number;
@@ -130,7 +139,7 @@ interface NumberFieldProps {
 }
 
 /** Commits on blur or Enter, so half-typed numbers never reach the project. */
-export function NumberField({ label, value, min, max, unit, onChange }: NumberFieldProps) {
+export function NumberField({ label, value, min, max, unit, hint, onChange }: NumberFieldProps) {
   const id = useId();
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
@@ -148,7 +157,9 @@ export function NumberField({ label, value, min, max, unit, onChange }: NumberFi
 
   return (
     <div className="flex items-center justify-between gap-3">
-      <label htmlFor={id}>{label}</label>
+      <label htmlFor={id}>
+        <Hint hint={hint ?? hintFor(label)}>{label}</Hint>
+      </label>
       <div className="flex items-center gap-1.5">
         <input
           id={id}

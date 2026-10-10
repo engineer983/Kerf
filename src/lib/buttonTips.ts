@@ -1,0 +1,86 @@
+/**
+ * Tooltips for buttons, by the text they show. Labelled settings explain
+ * themselves through `hints.ts`; this covers the buttons, so that everything
+ * clickable says what it does when the pointer rests on it.
+ */
+const BY_TEXT: Record<string, string> = {
+  // Workflow rail
+  Device: "Choose the machine you are making this job for",
+  Import: "Bring in a picture to work from",
+  Trace: "Turn the picture into outlines, and adjust its brightness, contrast and blur",
+  Operations: "Choose the material, place the artwork, and decide what the machine does",
+  Machine: "Connect to the machine, move it, and run the job",
+
+  // Title bar
+  Toolbox: "Your router bits and their dimensions",
+  Assistant: "Open the assistant panel (not built yet)",
+
+  // Import and trace
+  "Choose image…": "Pick a PNG, JPEG, WebP, BMP or GIF from your computer",
+  "Replace image…": "Pick a different picture; the current one is dropped",
+  "Remove image": "Clear the picture and start again",
+  Outline: "Trace the dark areas as solid shapes, for cutting or one-colour engraving",
+  Colour: "Trace each colour as its own set of shapes",
+  "Export SVG…": "Save the traced outlines as an SVG file",
+
+  // Operations
+  "Crop…": "Keep only part of the picture",
+  "Cancel crop": "Leave the picture as it is",
+  "Undo crop": "Bring back the whole picture",
+  "Apply crop": "Keep what is inside the frame",
+  Cancel: "Close without changing anything",
+  "Add operation": "Add another operation to the job",
+  "Estimate depth": "Work out how near each part of the photo is, for carving it as a shape",
+  "Generate G-code": "Work out the tool's moves for the included operations",
+  "Export G-code…": "Save the generated program as a file to send to the machine",
+  "Open toolbox": "See and edit your router bits",
+  Continue: "Go on to importing a picture",
+
+  // Playback
+  Paths: "Show the tool's path as lines",
+  Result: "Show what the material will look like",
+  "3D": "Show the material in 3D; drag to turn it, scroll to zoom",
+
+  // Machine
+  Connect: "Open the serial connection to the machine",
+  Disconnect: "Close the connection to the machine",
+  Home: "Send the machine to its home switches to find its position",
+  Unlock: "Clear an alarm lock so the machine will move again",
+  "Zero XY here": "Make the bit's current position X0 Y0 for the job",
+  "Zero Z here": "Make the bit's current height Z0: touch it to the top of the material first",
+  "Frame the job outline": "Move around the edge of the job without cutting, to check it fits",
+  "Start job": "Begin sending the program; click again to confirm",
+  Pause: "Stop moving, keeping the place in the job",
+  Resume: "Carry on from where the job was paused",
+  Stop: "Halt the machine and abandon the job",
+  "Stop machine": "Halt the machine and abandon the job",
+
+  // Toolbox
+  "Add a bit": "Add a new bit to the toolbox",
+  "Read page": "Fetch this product page and fill in the bit's details from it",
+  "Read pasted details": "Fill in the bit's details from the text pasted above",
+  "Remove this bit": "Delete this bit from the toolbox",
+};
+
+function tip(button: HTMLButtonElement) {
+  if (button.title) return;
+  const text = button.getAttribute("aria-label") ?? button.innerText.trim();
+  const known = BY_TEXT[text];
+  // An icon button's accessible name already says what it does.
+  const title = known ?? button.getAttribute("aria-label");
+  if (title) button.title = title;
+}
+
+/** Gives every button a tooltip, now and as the interface changes. */
+export function installButtonTips() {
+  const apply = (root: ParentNode) => root.querySelectorAll("button").forEach(tip);
+  apply(document);
+  new MutationObserver((changes) => {
+    for (const change of changes) {
+      for (const node of change.addedNodes) {
+        if (node instanceof HTMLButtonElement) tip(node);
+        else if (node instanceof HTMLElement) apply(node);
+      }
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+}

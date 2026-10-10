@@ -9,6 +9,17 @@ export interface Rect {
   height: number;
 }
 
+/** What the simulation needs to know about a router bit. */
+export interface BitShape {
+  diameter: number;
+  kind: ToolKind;
+  /** Included angle of a V-bit, in degrees. */
+  angle: number | null;
+  /** Side angle of a tapered ball nose, in degrees. */
+  taperAngle?: number | null;
+  shank?: number;
+}
+
 export interface SimulationSetup {
   /** `x, y, z, power` per move, as produced by the G-code generator. */
   moves: number[];
@@ -18,15 +29,11 @@ export interface SimulationSetup {
   material: Material;
   kind: MachineKind;
   /** The router bit; ignored for lasers. */
-  tool: {
-    diameter: number;
-    kind: ToolKind;
-    /** Included angle of a V-bit, in degrees. */
-    angle: number | null;
-    /** Side angle of a tapered ball nose, in degrees. */
-    taperAngle?: number | null;
-    shank?: number;
-  };
+  tool: BitShape;
+  /** The bit of each operation, in order, when they differ. */
+  tools?: BitShape[];
+  /** Index of the first move of each operation, from the generator. */
+  operationStarts?: number[];
   /**
    * Line spacing of an image engraving, in mm. Its rows are then drawn exactly
    * that wide with square ends, so dots neither overlap nor leave gaps and the
@@ -204,11 +211,8 @@ export class Simulation {
   }
 
   /** Removes the material swept by the bit over segments `from` up to `to`. */
-  private carve(from: number, to: number) {
-    const { moves, stock, tool } = this.setup;
-    const heights = this.heights!;
-    const scale = this.pxPerMm;
-    const [w, h] = [this.gridWidth, this.gridHeight];
+  /** A bit's reach and profile, for removing material. */
+  private shapeOf(tool: BitShape) {
     const tip = tool.diameter / 2;
     const taper = (((tool.taperAngle ?? 0) > 0 ? tool.taperAngle! : 5) * Math.PI) / 180;
     // Where a tapered bit's ball meets its cone, and how high that is.
@@ -220,9 +224,8 @@ export class Simulation {
       tool.kind === "taperedBall"
         ? Math.min((tool.shank ?? Infinity) / 2, tangent - this.deepest * Math.tan(taper) + 0.1)
         : tip;
-    const reach = radius * scale;
-    // How far above its tip the bit's surface is, at a distance from its axis.
     const slope = tool.kind === "vbit" ? 1 / Math.tan((((tool.angle ?? 90) / 2) * Math.PI) / 180) : 0;
+    // How far above its tip the bit's surface is, at a distance from its axis.
     const lift = (r: number) =>
       tool.kind === "ball" || (tool.kind === "taperedBall" && r <= tangent)
         ? tip - Math.sqrt(Math.max(0, tip * tip - r * r))
@@ -231,11 +234,28 @@ export class Simulation {
           : tool.kind === "vbit"
             ? r * slope
             : 0;
+    return { radius, lift };
+  }
+
+  /** Removes the material swept by the bit over segments `from` up to `to`. */
+  private carve(from: number, to: number) {
+    const { moves, stock, tool, tools, operationStarts } = this.setup;
+    const heights = this.heights!;
+    const scale = this.pxPerMm;
+    const [w, h] = [this.gridWidth, this.gridHeight];
+    // Each operation may use its own bit; segments are matched to operations
+    // by where each operation's moves begin.
+    const shapes = (tools && tools.length > 0 ? tools : [tool]).map((t) => this.shapeOf(t));
+    const starts = operationStarts ?? [];
+    let operation = 0;
 
     for (let i = from; i < to; i++) {
       const a = i * 4;
       const b = a + 4;
       if (moves[b + 3] < 0) continue;
+      while (operation + 1 < starts.length && i + 1 >= starts[operation + 1]) operation++;
+      const { radius, lift } = shapes[Math.min(operation, shapes.length - 1)];
+      const reach = radius * scale;
       const [ax, ay, az] = [(moves[a] - stock.x) * scale, (moves[a + 1] - stock.y) * scale, moves[a + 2]];
       const [bx, by, bz] = [(moves[b] - stock.x) * scale, (moves[b + 1] - stock.y) * scale, moves[b + 2]];
       if (az >= 0 && bz >= 0) continue;
@@ -265,7 +285,6 @@ export class Simulation {
     }
     this.shade();
   }
-
   /** Paints the carved surface: lit from the upper left, darker with depth. */
   private shade() {
     const heights = this.heights!;

@@ -41,6 +41,9 @@ pub struct Program {
     /// a rapid move, otherwise 0 to 1 (always 1 for a router). The first entry
     /// is where the job starts.
     pub moves: Vec<f32>,
+    /// The index in `moves` of the first move of each operation, in order, so
+    /// that a preview can tell which bit made which cut.
+    pub operation_starts: Vec<usize>,
 }
 
 pub fn generate(artwork: &Artwork, job: &Job) -> Result<Program, String> {
@@ -69,7 +72,9 @@ pub fn generate_with(
     w.line("G21");
     w.line("G90");
 
+    let mut operation_starts = Vec::with_capacity(job.operations.len());
     for operation in &job.operations {
+        operation_starts.push(w.moves.len() / 4);
         let shapes: Vec<&Shape> = artwork
             .shapes
             .iter()
@@ -109,6 +114,14 @@ pub fn generate_with(
                 let image =
                     heightmap.ok_or("Image engraving needs an image to take shades from.")?;
                 crate::image_engrave::engrave(&mut w, operation, image, job.offset);
+            }
+            OperationKind::CncCutout { .. } => {
+                crate::cutout::cut(
+                    &mut w,
+                    operation,
+                    [artwork.width, artwork.height],
+                    job.offset,
+                )?;
             }
             OperationKind::CncRelief { .. } => {
                 let heightmap =
@@ -151,6 +164,7 @@ pub fn generate_with(
         cut_path: w.cut_path,
         travel_path: w.travel_path,
         moves: w.moves,
+        operation_starts,
     })
 }
 

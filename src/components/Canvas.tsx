@@ -165,6 +165,12 @@ export function Canvas() {
   }
   const px = view?.mmPerPx ?? 1;
 
+  // Ruler numbers are spaced so they stay readable at any zoom: every 10 mm
+  // when zoomed in, further apart when zoomed out.
+  const rulerStep = [10, 20, 50, 100, 200, 500].find((step) => step / px >= 44) ?? 1000;
+  const ticks = (length: number) =>
+    Array.from({ length: Math.floor(length / rulerStep) + 1 }, (_, i) => i * rulerStep);
+
   const material = findMaterial(materialId);
   const stock = stockRect({ stockWidth, stockLength, bed, origin });
   const [sx, sy, sw, sh] = image ? [stock.x, stock.y, stock.width, stock.height] : [0, 0, 0, 0];
@@ -213,6 +219,11 @@ export function Canvas() {
         shank: bit.shank,
       },
       imageInterval,
+      // Each included router operation carves with its own bit.
+      tools: operations
+        .filter((o) => o.enabled !== false)
+        .map((o) => tools.find((t) => t.id === o.toolId) ?? bit),
+      operationStarts: program.operationStarts,
     });
     // The operations' settings are read as they were when the program was made:
     // any change to them clears the program, so they cannot be out of step.
@@ -295,6 +306,40 @@ export function Canvas() {
             stroke="var(--line)"
             strokeWidth={px * 1.5}
           />
+          {/* Numbered lines, measured from the machine's X0 Y0 corner. */}
+          {ticks(bed.width).map((v) => (
+            <g key={`x${v}`}>
+              <line x1={v} x2={v} y1={0} y2={bed.height} stroke="var(--grid-major)" strokeWidth={px * 1.25} />
+              <text
+                x={v}
+                y={origin === "backLeft" ? -6 * px : bed.height + 14 * px}
+                fontSize={10 * px}
+                textAnchor="middle"
+                fill="var(--muted)"
+                className="font-mono"
+              >
+                {v}
+              </text>
+            </g>
+          ))}
+          {ticks(bed.height).map((v) => {
+            const y = origin === "backLeft" ? v : bed.height - v;
+            return (
+              <g key={`y${v}`}>
+                <line x1={0} x2={bed.width} y1={y} y2={y} stroke="var(--grid-major)" strokeWidth={px * 1.25} />
+                <text
+                  x={-6 * px}
+                  y={y + 3.5 * px}
+                  fontSize={10 * px}
+                  textAnchor="end"
+                  fill="var(--muted)"
+                  className="font-mono"
+                >
+                  {v}
+                </text>
+              </g>
+            );
+          })}
           {materialUrl && (
             <image href={materialUrl} x={sx} y={sy} width={sw} height={sh} preserveAspectRatio="none" />
           )}
@@ -323,6 +368,20 @@ export function Canvas() {
               dangerouslySetInnerHTML={{ __html: traced.body }}
             />
           )}
+          {/* The line each cutout follows, before any allowance for the bit's width. */}
+          {placed &&
+            operations.map((o) => {
+              if (o.kind.type !== "cncCutout" || o.enabled === false) return null;
+              const { offset: margin, outline, cornerRadius } = o.kind;
+              const [w, h] = [placed.width + margin * 2, placed.height + margin * 2];
+              if (w <= 0 || h <= 0) return null;
+              const line = { fill: "none", stroke: "var(--fg)", strokeWidth: px * 1.5, strokeDasharray: `${px * 6} ${px * 4}` };
+              return outline === "ellipse" ? (
+                <ellipse key={o.id} cx={placed.x + placed.width / 2} cy={placed.y + placed.height / 2} rx={w / 2} ry={h / 2} {...line} />
+              ) : (
+                <rect key={o.id} x={placed.x - margin} y={placed.y - margin} width={w} height={h} rx={Math.min(cornerRadius, w / 2, h / 2)} {...line} />
+              );
+            })}
           {program && (
             <>
               <path

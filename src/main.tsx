@@ -4,6 +4,9 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
 import { App } from "./App";
+import { installButtonTips } from "./lib/buttonTips";
+
+installButtonTips();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

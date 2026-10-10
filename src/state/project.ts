@@ -51,7 +51,29 @@ export type OperationItem = Operation & {
   id: number;
   /** The toolbox bit used, for router operations. Not sent to the generator. */
   toolId?: string | null;
+  /** False to leave the operation out of the generated G-code. */
+  enabled?: boolean;
 };
+
+/** A cut right through the material, a little outside the artwork, with tabs. */
+export function defaultCutout(thickness: number): OperationKind {
+  return {
+    type: "cncCutout",
+    depth: thickness,
+    depthPerPass: 1,
+    plungeFeed: 200,
+    safeZ: 5,
+    spindleRpm: 16000,
+    toolDiameter: 3.175,
+    offset: 5,
+    side: "outside",
+    outline: "rectangle",
+    cornerRadius: 0,
+    tabs: 4,
+    tabWidth: 6,
+    tabHeight: 1.5,
+  };
+}
 
 let nextOperationId = 1;
 
@@ -88,6 +110,19 @@ export function withTool(op: OperationItem, tool: Tool, material: Material, spin
           plungeFeed: settings.plungeFeed,
           stepover: settings.stepover,
         }),
+      },
+    };
+  }
+  if (op.kind.type === "cncCutout") {
+    return {
+      ...op,
+      toolId: tool.id,
+      feed: settings?.feed ?? op.feed,
+      kind: {
+        ...op.kind,
+        spindleRpm,
+        toolDiameter: tool.diameter,
+        ...(settings && { depthPerPass: settings.depthPerPass, plungeFeed: settings.plungeFeed }),
       },
     };
   }
@@ -247,7 +282,9 @@ interface ProjectState {
   updatePreprocess: (patch: Partial<TraceSettings["preprocess"]>) => void;
   exportSvg: () => Promise<void>;
   addOperation: () => void;
-  updateOperation: (id: number, patch: Partial<Operation>) => void;
+  updateOperation: (id: number, patch: Partial<OperationItem>) => void;
+  /** Adds an operation that cuts the piece free, after the others. */
+  addCutout: () => void;
   removeOperation: (id: number) => void;
   generateGcode: () => Promise<void>;
   exportGcode: () => Promise<void>;
@@ -361,7 +398,9 @@ export const useProject = create<ProjectState>((set, get) => {
 
   /** Gives a router operation the toolbox bit that suits it, with speeds for the material. */
   function equip(op: OperationItem, s: ProjectState = get()): OperationItem {
-    if (op.kind.type !== "cncRelief" && op.kind.type !== "cncProfile") return op;
+    if (op.kind.type !== "cncRelief" && op.kind.type !== "cncProfile" && op.kind.type !== "cncCutout") {
+      return op;
+    }
     const { tools } = useToolbox.getState();
     const rect = artworkRect(s);
     const shortSide = rect ? Math.min(rect.width, rect.height) : 150;
@@ -675,6 +714,8 @@ export const useProject = create<ProjectState>((set, get) => {
           const kind: OperationKind =
             type === "cncRelief"
               ? DEFAULT_RELIEF
+              : type === "cncCutout"
+                ? defaultCutout(s.thickness)
               : type === "cncProfile"
                 ? defaultOperation("cnc").kind
                 : type === "laserImage"
@@ -724,6 +765,18 @@ export const useProject = create<ProjectState>((set, get) => {
         ...staleGcode(),
       })),
 
+    addCutout: () =>
+      set((s) => ({
+        operations: [
+          ...s.operations,
+          equip(
+            { id: nextOperationId++, color: null, kind: defaultCutout(s.thickness), feed: 600, power: 0, passes: 1 },
+            s,
+          ),
+        ],
+        ...staleGcode(),
+      })),
+
     updateOperation: (id, patch) =>
       set((s) => ({
         operations: s.operations.map((op) => (op.id === id ? { ...op, ...patch } : op)),
@@ -752,7 +805,7 @@ export const useProject = create<ProjectState>((set, get) => {
             travelFeed: TRAVEL_FEED,
           },
           offset: [rect.x, rect.y],
-          operations: s.operations,
+          operations: s.operations.filter((op) => op.enabled !== false),
         }, { use: s.heightSource === "depth" && s.depth.status === "ready", detail: s.detail });
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, program } });
