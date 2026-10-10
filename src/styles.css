@@ -60,6 +60,12 @@ body {
   user-select: none;
 }
 
+/* Outline traces are drawn in the accent colour so they read clearly in both
+   themes and over the dimmed original image. */
+.trace-mono path {
+  fill: var(--accent);
+}
+
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

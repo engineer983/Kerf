@@ -9,3 +9,5 @@ rust-version.workspace = true
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 serde.workspace = true
+visioncortex = "0.8.8"
+vtracer = "0.6.5"

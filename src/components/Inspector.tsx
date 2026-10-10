@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { ACCEPTED_IMAGE_TYPES, formatBytes } from "../lib/image";
 import { useProject, type Step } from "../state/project";
+import { TracePanel } from "./TracePanel";
 
 const TITLES: Record<Step, string> = {
   import: "Import",
@@ -9,8 +10,7 @@ const TITLES: Record<Step, string> = {
   machine: "Machine",
 };
 
-const NOT_BUILT: Record<Exclude<Step, "import">, string> = {
-  trace: "Tracing the image into SVG paths is not built yet.",
+const NOT_BUILT: Record<Exclude<Step, "import" | "trace">, string> = {
   operations: "Cut, fill and engrave operations and G-code export are not built yet.",
   machine: "Connecting to and running a GRBL machine is not built yet.",
 };
@@ -21,8 +21,14 @@ export function Inspector() {
   return (
     <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-surface">
       <h2 className="border-b border-line px-5 py-3 text-[13px] font-semibold">{TITLES[step]}</h2>
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        {step === "import" ? <ImportPanel /> : <p className="text-muted">{NOT_BUILT[step]}</p>}
+      <div className="min-h-0 flex-1 overflow-y-auto p-5 [scrollbar-gutter:stable]">
+        {step === "import" ? (
+          <ImportPanel />
+        ) : step === "trace" ? (
+          <TracePanel />
+        ) : (
+          <p className="text-muted">{NOT_BUILT[step]}</p>
+        )}
       </div>
     </aside>
   );
