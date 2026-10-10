@@ -1,11 +1,14 @@
-export type ToolKind = "flat" | "ball" | "vbit";
+export type ToolKind = "flat" | "ball" | "taperedBall" | "vbit";
 
 /** A router bit. Lengths are in millimetres. */
 export interface Tool {
   id: string;
   name: string;
   kind: ToolKind;
-  /** Cutting diameter; for a V-bit, the diameter at its widest. */
+  /**
+   * Cutting diameter. For a V-bit, the diameter at its widest; for a tapered
+   * ball nose, the diameter of the ball at the tip (twice its radius).
+   */
   diameter: number;
   flutes: number;
   /** Length of the cutting edges: the deepest the bit can cut. */
@@ -13,6 +16,8 @@ export interface Tool {
   shank: number;
   /** Included angle in degrees, for V-bits. */
   angle: number | null;
+  /** Angle of each side from the axis in degrees, for tapered ball noses. */
+  taperAngle: number | null;
   brand: string;
   /** Where the details came from, if anywhere. */
   url: string;
@@ -22,13 +27,33 @@ export interface Tool {
 export const TOOL_KIND_LABELS: Record<ToolKind, string> = {
   flat: "Flat end mill",
   ball: "Ball nose",
+  taperedBall: "Tapered ball nose",
   vbit: "V-bit",
 };
 
 const GENERIC = "Generic entry with typical dimensions. Check it against your actual bit.";
 
 function generic(id: string, name: string, kind: ToolKind, diameter: number, cutLength: number, shank: number, angle: number | null = null): Tool {
-  return { id, name, kind, diameter, flutes: 2, cutLength, shank, angle, brand: "", url: "", notes: GENERIC };
+  return { id, name, kind, diameter, flutes: 2, cutLength, shank, angle, taperAngle: null, brand: "", url: "", notes: GENERIC };
+}
+
+/**
+ * The side angle of a tapered ball nose worked out from its dimensions: the
+ * taper runs from the ball at the tip out to the shank over the cutting length.
+ */
+export function taperFromDimensions(tipDiameter: number, shank: number, cutLength: number): number {
+  const rise = Math.max(0, shank / 2 - tipDiameter / 2);
+  const degrees = (Math.atan2(rise, Math.max(0.1, cutLength)) * 180) / Math.PI;
+  return Math.round(Math.max(0.5, degrees) * 100) / 100;
+}
+
+function tapered(id: string, tipRadius: number): Tool {
+  // The usual hobby form: a 1/4" shank tapering over about 30 mm to a small ball.
+  const [shank, cutLength] = [6.35, 30.5];
+  return {
+    ...generic(id, `Tapered ball nose R${tipRadius}`, "taperedBall", tipRadius * 2, cutLength, shank),
+    taperAngle: taperFromDimensions(tipRadius * 2, shank, cutLength),
+  };
 }
 
 // Common hobby-router sizes, so the toolbox is useful before anything is added.
@@ -39,6 +64,9 @@ export const DEFAULT_TOOLS: Tool[] = [
   generic("ball-1-8", '1/8" ball nose', "ball", 3.175, 12.7, 3.175),
   generic("ball-1-16", '1/16" ball nose', "ball", 1.5875, 6.35, 3.175),
   generic("ball-1-4", '1/4" ball nose', "ball", 6.35, 19, 6.35),
+  tapered("tapered-r025", 0.25),
+  tapered("tapered-r05", 0.5),
+  tapered("tapered-r1", 1),
   generic("vbit-60", "60° V-bit", "vbit", 12.7, 11, 6.35, 60),
   generic("vbit-90", "90° V-bit", "vbit", 12.7, 6.35, 6.35, 90),
 ];
@@ -53,6 +81,7 @@ export function blankTool(): Tool {
     cutLength: 12,
     shank: 3.175,
     angle: null,
+    taperAngle: null,
     brand: "",
     url: "",
     notes: "",
@@ -60,14 +89,16 @@ export function blankTool(): Tool {
 }
 
 /**
- * Picks a bit for a job from the toolbox. A relief wants a ball nose sized to
- * the artwork (roughly one sixtieth of its shorter side, so detail survives
- * without the job taking days); following paths wants a flat end mill near 1/8".
+ * Picks a bit for a job from the toolbox. A relief wants a ball nose, plain or
+ * tapered, with a tip sized to the artwork (roughly one sixtieth of its shorter
+ * side, so detail survives without the job taking days); following paths wants
+ * a flat end mill near 1/8".
  */
 export function suggestTool(job: "relief" | "profile", tools: Tool[], artworkShortSide: number): Tool | null {
-  const wantedKind: ToolKind = job === "relief" ? "ball" : "flat";
-  const wantedDiameter = job === "relief" ? Math.min(6.35, Math.max(1.5, artworkShortSide / 60)) : 3.175;
-  const candidates = tools.filter((t) => t.kind === wantedKind);
+  const wantedDiameter = job === "relief" ? Math.min(6.35, Math.max(0.5, artworkShortSide / 60)) : 3.175;
+  const candidates = tools.filter((t) =>
+    job === "relief" ? t.kind === "ball" || t.kind === "taperedBall" : t.kind === "flat",
+  );
   const pool = candidates.length > 0 ? candidates : tools.filter((t) => t.kind !== "vbit");
   if (pool.length === 0) return null;
   return pool.reduce((best, t) =>
@@ -132,7 +163,10 @@ export function parseToolText(raw: string, title = ""): ParsedTool {
   };
   const round = (v: number | null) => (v === null ? null : Math.round(v * 1000) / 1000);
 
-  const kind: ToolKind | null = /ball[\s-]*nose|ballnose|round[\s-]*nose|ball end/.test(text)
+  const ball = /ball[\s-]*nose|ballnose|round[\s-]*nose|ball end/.test(text);
+  const kind: ToolKind | null = ball && /taper/.test(text)
+    ? "taperedBall"
+    : ball
     ? "ball"
     : /v[\s-]*(bit|groove|carv)|engraving bit|chamfer/.test(text)
       ? "vbit"
@@ -141,6 +175,13 @@ export function parseToolText(raw: string, title = ""): ParsedTool {
         : null;
   set("kind", kind, "type");
 
+  // A tapered ball nose is sized by its tip: "0.5mm tip diameter", "0.25mm radius" or "R0.25".
+  const tipDiameter = text.match(/(\d*\.?\d+)\s*mm\s*tip(?:\s*dia)?/);
+  const tipRadius = text.match(/(\d*\.?\d+)\s*mm\s*(?:tip\s*)?radius|\br\s?(\d*\.\d+)\b/);
+  const tip = tipDiameter ? Number(tipDiameter[1]) : tipRadius ? Number(tipRadius[1] ?? tipRadius[2]) * 2 : null;
+  if (tool.kind === "taperedBall" && tip !== null && tip > 0 && tip < 10) {
+    set("diameter", round(tip), "tip diameter");
+  } else
   set(
     "diameter",
     round(
@@ -162,6 +203,15 @@ export function parseToolText(raw: string, title = ""): ParsedTool {
     const word = flutes[1] ?? flutes[2];
     const count = WORD_NUMBERS[word] ?? Number(word);
     if (count >= 1 && count <= 8) set("flutes", count, "flutes");
+  }
+
+  if (tool.kind === "taperedBall") {
+    const side = text.match(/(\d{1,2}(?:\.\d+)?)\s*(?:°|deg)/);
+    if (side && Number(side[1]) > 0 && Number(side[1]) < 45) {
+      set("taperAngle", Number(side[1]), "taper angle");
+    } else if (tool.diameter && tool.shank && tool.cutLength) {
+      set("taperAngle", taperFromDimensions(tool.diameter, tool.shank, tool.cutLength), "taper angle (from the dimensions)");
+    }
   }
 
   if (tool.kind === "vbit") {

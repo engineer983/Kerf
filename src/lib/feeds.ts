@@ -29,17 +29,22 @@ export function cutSettings(tool: Tool, material: Material, spindleRpm: number):
   const { machining } = material;
   if (!machining) return null;
 
-  const size = Math.min(2, Math.max(0.4, tool.diameter / REFERENCE_DIAMETER));
-  // A V-bit cuts with its fragile tip, so it is run more gently.
-  const chipLoad = machining.chipLoad * size * (tool.kind === "vbit" ? 0.7 : 1);
+  // A tapered bit is far stiffer than a straight bit as thin as its tip, so it
+  // is treated as a bit midway between its tip and its shank, up to 1/8".
+  const tapered = tool.kind === "taperedBall";
+  const working = tapered ? Math.min(REFERENCE_DIAMETER, (tool.diameter + tool.shank) / 2) : tool.diameter;
+  const size = Math.min(2, Math.max(0.4, working / REFERENCE_DIAMETER));
+  // A V-bit or a tapered bit cuts with a fragile tip, so it is run more gently.
+  const chipLoad = machining.chipLoad * size * (tool.kind === "vbit" ? 0.7 : tapered ? 0.8 : 1);
   const feed = Math.min(3000, Math.max(100, Math.round((spindleRpm * tool.flutes * chipLoad) / 10) * 10));
-  const depth = Math.min(tool.cutLength, tool.diameter * machining.depthFactor);
+  const depth = Math.min(tool.cutLength, working * machining.depthFactor);
 
   return {
     feed,
     plungeFeed: Math.max(50, Math.round((feed * 0.3) / 10) * 10),
     depthPerPass: Math.max(0.05, Math.round(depth * 100) / 100),
     // A ball nose needs close rows for a smooth surface; a flat end can step further.
-    stepover: Math.round(tool.diameter * (tool.kind === "ball" ? 0.12 : 0.4) * 100) / 100,
+    stepover:
+      Math.round(tool.diameter * (tool.kind === "ball" ? 0.12 : tapered ? 0.25 : 0.4) * 100) / 100,
   };
 }

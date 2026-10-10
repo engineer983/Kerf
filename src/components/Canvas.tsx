@@ -19,7 +19,7 @@ const MARGIN_MM = 30;
 const MIN_MM_PER_PX = 0.01;
 const MAX_MM_PER_PX = 5;
 /** Bit assumed for router jobs whose operation has none chosen. */
-const DEFAULT_BIT = { diameter: 3.175, kind: "flat" as const, angle: null };
+const DEFAULT_BIT = { diameter: 3.175, kind: "flat" as const, angle: null, taperAngle: null, shank: 3.175 };
 
 export function Canvas() {
   const bed = useProject((s) => s.bed);
@@ -150,9 +150,11 @@ export function Canvas() {
           diameter: routing.kind.toolDiameter,
           kind: routing.kind.ballNose ? ("ball" as const) : ("flat" as const),
           angle: null,
+          taperAngle: null,
+          shank: routing.kind.toolDiameter,
         }
       : DEFAULT_BIT);
-  const [bitDiameter, bitKind, bitAngle] = [bit.diameter, bit.kind, bit.angle];
+
   const engraving = operations.find((o) => o.kind.type === "laserImage")?.kind;
   const imageInterval = engraving?.type === "laserImage" ? engraving.interval : undefined;
   const simulation = useMemo(() => {
@@ -163,7 +165,13 @@ export function Canvas() {
       thickness,
       material,
       kind: machineKind,
-      tool: { diameter: bitDiameter, kind: bitKind, angle: bitAngle },
+      tool: {
+        diameter: bit.diameter,
+        kind: bit.kind,
+        angle: bit.angle,
+        taperAngle: bit.taperAngle,
+        shank: bit.shank,
+      },
       imageInterval,
     });
     // The operations' settings are read as they were when the program was made:

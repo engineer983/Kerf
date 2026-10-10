@@ -60,12 +60,12 @@ pub struct Traced {
 }
 
 impl Traced {
-    /// A complete SVG document sized in millimetres, keeping the aspect ratio.
-    pub fn to_svg(&self, width_mm: f64) -> String {
-        let height_mm = width_mm * self.height as f64 / self.width as f64;
+    /// A complete SVG document of the given size in millimetres. The artwork
+    /// is stretched to fit if the size has a different shape from the image.
+    pub fn to_svg(&self, width_mm: f64, height_mm: f64) -> String {
         format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width_mm:.3}mm\" height=\"{height_mm:.3}mm\" viewBox=\"0 0 {} {}\">\n\
+             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width_mm:.3}mm\" height=\"{height_mm:.3}mm\" viewBox=\"0 0 {} {}\" preserveAspectRatio=\"none\">\n\
              {}</svg>\n",
             self.width, self.height, self.body
         )
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn svg_document_is_sized_in_mm() {
         let traced = trace(&rectangle([0, 0, 0, 255]), &TraceSettings::default()).unwrap();
-        let svg = traced.to_svg(100.0);
+        let svg = traced.to_svg(100.0, 75.0);
         assert!(svg.contains("width=\"100.000mm\""));
         assert!(svg.contains("height=\"75.000mm\""));
         assert!(svg.contains("viewBox=\"0 0 64 48\""));

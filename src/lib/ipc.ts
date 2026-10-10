@@ -78,6 +78,9 @@ export type OperationKind =
       ballNose: boolean;
       stepover: number;
       lightIsHigh: boolean;
+      /** Side angle of a tapered ball nose in degrees; 0 for a straight bit. */
+      taperAngle?: number;
+      shankDiameter?: number;
     };
 
 export interface Operation {

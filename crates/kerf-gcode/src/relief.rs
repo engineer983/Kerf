@@ -52,9 +52,50 @@ const SIMPLIFY_TOLERANCE_MM: f64 = 0.01;
 /// Heights within this distance count as equal when skipping finished rows.
 const LEVEL_EPSILON_MM: f64 = 1e-6;
 
+/// The shape of a bit's cutting end.
+#[derive(Debug, Clone, Copy)]
+struct Bit {
+    /// Radius of a flat end, or of the ball at the tip.
+    radius: f64,
+    ball_nose: bool,
+    /// Angle of the sides from the axis in radians; zero for a straight bit.
+    taper: f64,
+}
+
+impl Bit {
+    /// How far above the tip the bit's surface is, at a distance from its axis.
+    fn lift(&self, r: f64) -> f64 {
+        if !self.ball_nose {
+            return 0.0;
+        }
+        // On a tapered bit the ball meets the cone where their slopes match.
+        let tangent = self.radius * self.taper.cos();
+        if self.taper > 0.0 && r > tangent {
+            self.radius * (1.0 - self.taper.sin()) + (r - tangent) / self.taper.tan()
+        } else {
+            let r = r.min(self.radius);
+            self.radius - (self.radius * self.radius - r * r).sqrt()
+        }
+    }
+
+    /// The radius beyond which the bit cannot touch a surface at most `depth`
+    /// deep: a taper keeps widening, but its upper part stays above the work.
+    fn reach(&self, depth: f64, shank_diameter: f64) -> f64 {
+        if !self.ball_nose || self.taper <= 0.0 {
+            return self.radius;
+        }
+        let spread = self.radius * self.taper.cos() + depth * self.taper.tan();
+        if shank_diameter > 0.0 {
+            spread.min(shank_diameter / 2.0).max(self.radius)
+        } else {
+            spread
+        }
+    }
+}
+
 /// Points on the bit's cutting surface: horizontal offset from its axis, and
 /// how far above the tip the surface is there.
-fn tool_profile(radius: f64, ball_nose: bool, spacing: f64) -> Vec<([f64; 2], f64)> {
+fn tool_profile(bit: Bit, radius: f64, spacing: f64) -> Vec<([f64; 2], f64)> {
     let reach = (radius / spacing).ceil() as i64;
     let mut points = Vec::new();
     for iy in -reach..=reach {
@@ -62,16 +103,10 @@ fn tool_profile(radius: f64, ball_nose: bool, spacing: f64) -> Vec<([f64; 2], f6
             let (dx, dy) = (ix as f64 * spacing, iy as f64 * spacing);
             let r = dx.hypot(dy);
             if r <= radius + 1e-9 {
-                let lift = if ball_nose {
-                    // Each sample stands for the cell around it, so use the
-                    // lowest part of the ball over that cell. This errs towards
-                    // leaving material rather than cutting into a wall.
-                    let inner = (r - spacing).max(0.0);
-                    radius - (radius * radius - inner * inner).sqrt()
-                } else {
-                    0.0
-                };
-                points.push(([dx, dy], lift));
+                // Each sample stands for the cell around it, so use the lowest
+                // part of the bit over that cell. This errs towards leaving
+                // material rather than cutting into a wall.
+                points.push(([dx, dy], bit.lift((r - spacing).max(0.0))));
             }
         }
     }
@@ -123,6 +158,8 @@ pub(crate) fn carve(
         ball_nose,
         stepover,
         light_is_high,
+        taper_angle,
+        shank_diameter,
     } = operation.kind
     else {
         return Ok(());
@@ -131,7 +168,12 @@ pub(crate) fn carve(
         return Err("The height map for the relief is empty.".into());
     }
 
-    let radius = tool_diameter / 2.0;
+    let bit = Bit {
+        radius: tool_diameter / 2.0,
+        ball_nose,
+        taper: taper_angle.clamp(0.0, 60.0).to_radians(),
+    };
+    let radius = bit.reach(depth, shank_diameter);
     let pixel = map.width_mm / map.width as f64;
     // Fine enough to follow the image, without sampling far below what the bit can resolve.
     let step_x = pixel
@@ -140,7 +182,7 @@ pub(crate) fn carve(
     // Sample the bit's footprint at least twice per pixel, so no pixel under it
     // is missed; the lower bound keeps very fine images affordable.
     let spacing = (pixel / 2.0).min(radius / 8.0).max(radius / 20.0);
-    let profile = tool_profile(radius, ball_nose, spacing);
+    let profile = tool_profile(bit, radius, spacing);
 
     let columns = (map.width_mm / step_x).ceil() as usize;
     let xs: Vec<f64> = (0..=columns)
@@ -278,6 +320,8 @@ mod tests {
             ball_nose,
             stepover: 1.0,
             light_is_high: true,
+            taper_angle: 0.0,
+            shank_diameter: 0.0,
         }
     }
 
@@ -476,6 +520,8 @@ mod tests {
             ball_nose,
             stepover,
             light_is_high: false,
+            taper_angle: 0.0,
+            shank_diameter: 0.0,
         };
         assert!(generate_with(&empty_artwork(), Some(&dark), &job(flipped)).is_err());
     }
@@ -504,6 +550,90 @@ mod tests {
         assert!(generate_with(&empty_artwork(), Some(&grey), &off_bed)
             .unwrap_err()
             .contains("does not fit"));
+    }
+
+    #[test]
+    fn a_tapered_ball_nose_reaches_into_narrow_slots_but_spares_their_walls() {
+        // A 2 mm wide, 2 mm deep slot. A 3 mm straight bit cannot enter it at
+        // all; a tapered bit with a 0.5 mm ball can reach the bottom.
+        let slot = map(60, 20, |x, _| if (28..32).contains(&x) { 0.0 } else { 1.0 });
+        let tapered = OperationKind::CncRelief {
+            depth: 2.0,
+            depth_per_pass: 2.0,
+            plunge_feed: 200.0,
+            safe_z: 5.0,
+            spindle_rpm: 12000.0,
+            tool_diameter: 0.5,
+            ball_nose: true,
+            stepover: 0.5,
+            light_is_high: true,
+            taper_angle: 5.5,
+            shank_diameter: 6.35,
+        };
+        let program = generate_with(&empty_artwork(), Some(&slot), &job(tapered)).unwrap();
+        let cuts: Vec<_> = moves(&program.text)
+            .into_iter()
+            .filter(|m| !m.rapid)
+            .collect();
+        let deepest = cuts.iter().map(|m| m.position[2]).fold(0.0, f64::min);
+        assert!(deepest < -1.9, "only reached {deepest}");
+
+        // Away from the slot the bit must stay at the surface: its widening
+        // sides would otherwise cut the slot's edges.
+        let bit = Bit {
+            radius: 0.25,
+            ball_nose: true,
+            taper: 5.5_f64.to_radians(),
+        };
+        for m in &cuts {
+            let [x, y, z] = m.position;
+            for i in -40..=40 {
+                let dx = i as f64 * 0.02;
+                let wanted = [-0.2, 0.0, 0.2]
+                    .iter()
+                    .map(|d| -2.0 * (1.0 - slot.sample(x - 10.0 + dx + d, y - 10.0)))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    z + bit.lift(dx.abs()) >= wanted - 0.02,
+                    "bit at ({x}, {z}) cuts below the surface {dx} mm from its axis"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bit_shapes_have_the_expected_profiles() {
+        let flat = Bit {
+            radius: 1.5,
+            ball_nose: false,
+            taper: 0.0,
+        };
+        assert_eq!(flat.lift(1.0), 0.0);
+        let ball = Bit {
+            radius: 1.5,
+            ball_nose: true,
+            taper: 0.0,
+        };
+        assert!((ball.lift(1.5) - 1.5).abs() < 1e-9);
+        assert_eq!(ball.reach(3.0, 0.0), 1.5);
+
+        let angle = 10.0_f64.to_radians();
+        let tapered = Bit {
+            radius: 0.25,
+            ball_nose: true,
+            taper: angle,
+        };
+        // The same as a plain ball near the tip.
+        assert!((tapered.lift(0.1) - (0.25 - (0.25_f64 * 0.25 - 0.01).sqrt())).abs() < 1e-9);
+        // Beyond the ball, the surface rises along the cone.
+        let (near, far) = (tapered.lift(1.0), tapered.lift(2.0));
+        assert!((far - near - 1.0 / angle.tan()).abs() < 1e-9);
+        // The cone starts where the ball leaves off, without a step.
+        let tangent = 0.25 * angle.cos();
+        assert!((tapered.lift(tangent + 1e-9) - tapered.lift(tangent - 1e-9)).abs() < 1e-6);
+        // It spreads with depth, but never past the shank.
+        assert!(tapered.reach(3.0, 0.0) > tapered.reach(1.0, 0.0));
+        assert_eq!(tapered.reach(100.0, 6.35), 3.175);
     }
 
     #[test]

@@ -18,7 +18,15 @@ export interface SimulationSetup {
   material: Material;
   kind: MachineKind;
   /** The router bit; ignored for lasers. */
-  tool: { diameter: number; kind: ToolKind; angle: number | null };
+  tool: {
+    diameter: number;
+    kind: ToolKind;
+    /** Included angle of a V-bit, in degrees. */
+    angle: number | null;
+    /** Side angle of a tapered ball nose, in degrees. */
+    taperAngle?: number | null;
+    shank?: number;
+  };
   /**
    * Line spacing of an image engraving, in mm. Its rows are then drawn exactly
    * that wide with square ends, so dots neither overlap nor leave gaps and the
@@ -201,16 +209,28 @@ export class Simulation {
     const heights = this.heights!;
     const scale = this.pxPerMm;
     const [w, h] = [this.gridWidth, this.gridHeight];
-    const radius = tool.diameter / 2;
+    const tip = tool.diameter / 2;
+    const taper = (((tool.taperAngle ?? 0) > 0 ? tool.taperAngle! : 5) * Math.PI) / 180;
+    // Where a tapered bit's ball meets its cone, and how high that is.
+    const tangent = tip * Math.cos(taper);
+    const tangentHeight = tip * (1 - Math.sin(taper));
+    // A taper widens all the way to the shank, but only the part within the
+    // job's depth can touch the work.
+    const radius =
+      tool.kind === "taperedBall"
+        ? Math.min((tool.shank ?? Infinity) / 2, tangent - this.deepest * Math.tan(taper) + 0.1)
+        : tip;
     const reach = radius * scale;
     // How far above its tip the bit's surface is, at a distance from its axis.
     const slope = tool.kind === "vbit" ? 1 / Math.tan((((tool.angle ?? 90) / 2) * Math.PI) / 180) : 0;
     const lift = (r: number) =>
-      tool.kind === "ball"
-        ? radius - Math.sqrt(Math.max(0, radius * radius - r * r))
-        : tool.kind === "vbit"
-          ? r * slope
-          : 0;
+      tool.kind === "ball" || (tool.kind === "taperedBall" && r <= tangent)
+        ? tip - Math.sqrt(Math.max(0, tip * tip - r * r))
+        : tool.kind === "taperedBall"
+          ? tangentHeight + (r - tangent) / Math.tan(taper)
+          : tool.kind === "vbit"
+            ? r * slope
+            : 0;
 
     for (let i = from; i < to; i++) {
       const a = i * 4;

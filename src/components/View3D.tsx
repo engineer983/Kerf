@@ -71,12 +71,20 @@ function build(container: HTMLDivElement, sim: Simulation, bed: { width: number;
   const wallColor = new THREE.Color().setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace).multiplyScalar(0.8);
   scene.add(new THREE.Mesh(walls, new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.9, side: THREE.DoubleSide })));
 
-  const radius = kind === "cnc" ? tool.diameter / 2 : 0.35;
+  const tapered = kind === "cnc" && tool.kind === "taperedBall";
+  const tipRadius = tool.diameter / 2;
+  // A tapered bit is drawn at its shank size, with a cone down to the tip.
+  const radius = kind !== "cnc" ? 0.35 : tapered ? (tool.shank ?? 6.35) / 2 : tipRadius;
+  const taperLength = tapered
+    ? (radius - tipRadius) / Math.tan((((tool.taperAngle ?? 5) || 5) * Math.PI) / 180)
+    : 0;
   const toolGeometry = new THREE.CylinderGeometry(radius, radius, TOOL_LENGTH_MM, 24);
   // Put the cylinder's bottom at the tool position.
   const tipHeight =
     kind !== "cnc" || tool.kind === "flat"
       ? 0
+      : tapered
+        ? taperLength
       : tool.kind === "ball"
         ? radius
         : radius / Math.tan((((tool.angle ?? 90) / 2) * Math.PI) / 180);
@@ -91,6 +99,11 @@ function build(container: HTMLDivElement, sim: Simulation, bed: { width: number;
     const tip = new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), toolMaterial);
     tip.position.y = radius;
     toolMesh.add(tip);
+  } else if (tapered) {
+    // A cone from the shank down to the small ball at the tip.
+    const cone = new THREE.Mesh(new THREE.CylinderGeometry(radius, tipRadius, taperLength, 24), toolMaterial);
+    cone.position.y = taperLength / 2;
+    toolMesh.add(cone);
   } else if (kind === "cnc" && tool.kind === "vbit") {
     // A cone with its point at the tool position.
     const tip = new THREE.Mesh(new THREE.ConeGeometry(radius, tipHeight, 24), toolMaterial);

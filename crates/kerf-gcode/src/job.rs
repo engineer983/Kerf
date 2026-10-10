@@ -88,6 +88,15 @@ pub enum OperationKind {
         stepover: f64,
         /// Light areas of the image stand proud; otherwise dark areas do.
         light_is_high: bool,
+        /// For a tapered ball nose: the angle of its sides from the axis, in
+        /// degrees. Zero for a straight bit. `tool_diameter` is then the
+        /// diameter of the ball at the tip.
+        #[serde(default)]
+        taper_angle: f64,
+        /// The widest the bit gets, which limits how far a taper spreads.
+        /// Zero if not known.
+        #[serde(default)]
+        shank_diameter: f64,
     },
 }
 

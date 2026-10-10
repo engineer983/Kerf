@@ -16,3 +16,20 @@ serde_json = "1"
 lto = true
 codegen-units = 1
 strip = true
+
+# Tracing and toolpath generation are far too slow unoptimised, so these are
+# built with optimisation even in development.
+[profile.dev.package.kerf-gcode]
+opt-level = 3
+
+[profile.dev.package.kerf-trace]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.visioncortex]
+opt-level = 3
+
+[profile.dev.package.vtracer]
+opt-level = 3

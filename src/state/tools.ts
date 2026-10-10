@@ -2,11 +2,25 @@ import { create } from "zustand";
 import { blankTool, DEFAULT_TOOLS, type Tool } from "../lib/tools";
 
 const STORAGE_KEY = "kerf.tools";
+/** Counts the sets of starting bits; raised when new kinds are added. */
+const STARTER_KEY = "kerf.tools.starters";
+const STARTER_VERSION = 2;
 
 function load(): Tool[] {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
-    if (Array.isArray(stored) && stored.length > 0) return stored as Tool[];
+    if (Array.isArray(stored) && stored.length > 0) {
+      const tools = (stored as Tool[]).map((t) => ({ ...t, taperAngle: t.taperAngle ?? null }));
+      // A toolbox saved before a kind of bit existed gets that kind's starters once.
+      if (Number(localStorage.getItem(STARTER_KEY) ?? 1) < STARTER_VERSION) {
+        for (const starter of DEFAULT_TOOLS) {
+          if (starter.kind === "taperedBall" && !tools.some((t) => t.id === starter.id)) {
+            tools.push(starter);
+          }
+        }
+      }
+      return tools;
+    }
   } catch {
     // Missing or unreadable; fall back to the starting set.
   }
@@ -16,6 +30,7 @@ function load(): Tool[] {
 function save(tools: Tool[]) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tools));
+    localStorage.setItem(STARTER_KEY, String(STARTER_VERSION));
   } catch {
     // Not persisted; the toolbox still works for this session.
   }

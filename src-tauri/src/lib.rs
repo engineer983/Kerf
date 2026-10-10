@@ -15,8 +15,29 @@ use tauri_plugin_dialog::DialogExt;
 const PREVIEW_MAX_PX: u32 = 1024;
 
 struct LoadedImage {
+    /// The image as imported, kept so that a crop can be undone.
+    original: Arc<DynamicImage>,
+    /// The image being worked on: the original, or a crop of it.
     full: Arc<DynamicImage>,
     preview: Arc<DynamicImage>,
+    /// Estimated depth for `full` (white is near), if the user has made one.
+    depth: Option<Arc<DynamicImage>>,
+}
+
+impl LoadedImage {
+    fn new(original: Arc<DynamicImage>, full: DynamicImage) -> Self {
+        let preview = if full.width().max(full.height()) > PREVIEW_MAX_PX {
+            full.thumbnail(PREVIEW_MAX_PX, PREVIEW_MAX_PX)
+        } else {
+            full.clone()
+        };
+        Self {
+            original,
+            full: Arc::new(full),
+            preview: Arc::new(preview),
+            depth: None,
+        }
+    }
 }
 
 /// Curves are flattened to within this distance, in millimetres, for G-code.
@@ -77,15 +98,7 @@ async fn load_image(request: Request<'_>, state: State<'_, AppState>) -> Result<
     let bytes = bytes.clone();
     let loaded = blocking(move || {
         let full = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-        let preview = if full.width().max(full.height()) > PREVIEW_MAX_PX {
-            full.thumbnail(PREVIEW_MAX_PX, PREVIEW_MAX_PX)
-        } else {
-            full.clone()
-        };
-        Ok(LoadedImage {
-            full: Arc::new(full),
-            preview: Arc::new(preview),
-        })
+        Ok(LoadedImage::new(Arc::new(full.clone()), full))
     })
     .await?;
     *state.image.lock().unwrap() = Some(loaded);
@@ -95,6 +108,59 @@ async fn load_image(request: Request<'_>, state: State<'_, AppState>) -> Result<
 #[tauri::command]
 fn clear_image(state: State<'_, AppState>) {
     *state.image.lock().unwrap() = None;
+}
+
+/// Keeps only a rectangle of the image, given in pixels of the current image.
+/// Any depth map is dropped, since it no longer matches.
+#[tauri::command]
+fn crop_image(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut guard = state.image.lock().unwrap();
+    let loaded = guard.as_mut().ok_or("No image is loaded.")?;
+    let (full_width, full_height) = (loaded.full.width(), loaded.full.height());
+    if width == 0 || height == 0 || x >= full_width || y >= full_height {
+        return Err("The crop is outside the image.".into());
+    }
+    let cropped =
+        loaded
+            .full
+            .crop_imm(x, y, width.min(full_width - x), height.min(full_height - y));
+    *loaded = LoadedImage::new(loaded.original.clone(), cropped);
+    Ok(())
+}
+
+/// Undoes any crop, going back to the image as imported.
+#[tauri::command]
+fn reset_crop(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.image.lock().unwrap();
+    let loaded = guard.as_mut().ok_or("No image is loaded.")?;
+    *loaded = LoadedImage::new(loaded.original.clone(), (*loaded.original).clone());
+    Ok(())
+}
+
+/// Takes an encoded greyscale depth picture of the current image (white is
+/// near) as the raw request body. An empty body removes the depth map.
+#[tauri::command]
+async fn set_depth_map(request: Request<'_>, state: State<'_, AppState>) -> Result<(), String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the depth picture as raw bytes.".into());
+    };
+    let depth = if bytes.is_empty() {
+        None
+    } else {
+        let bytes = bytes.clone();
+        Some(Arc::new(
+            blocking(move || image::load_from_memory(&bytes).map_err(|e| e.to_string())).await?,
+        ))
+    };
+    let mut guard = state.image.lock().unwrap();
+    guard.as_mut().ok_or("No image is loaded.")?.depth = depth;
+    Ok(())
 }
 
 #[tauri::command]
@@ -114,12 +180,11 @@ async fn export_svg(
     app: AppHandle,
     settings: TraceSettings,
     width_mm: f64,
+    height_mm: f64,
     suggested_name: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    if !(width_mm.is_finite() && width_mm > 0.0) {
-        return Err("The output width must be greater than zero.".into());
-    }
+    check_size(width_mm, height_mm)?;
     let image = state.image(false)?;
     blocking(move || {
         let Some(target) = app
@@ -132,7 +197,7 @@ async fn export_svg(
             return Ok(None);
         };
         let path = target.into_path().map_err(|e| e.to_string())?;
-        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm);
+        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm);
         std::fs::write(&path, svg)
             .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
         Ok(Some(path.display().to_string()))
@@ -150,9 +215,31 @@ struct Generated {
     head: String,
 }
 
-/// The image as heights for relief carving: white is 1.0, black is 0.0, after
-/// the trace settings' brightness, contrast and blur.
-fn heightmap(image: &DynamicImage, settings: &TraceSettings, width_mm: f64) -> Heightmap {
+fn check_size(width_mm: f64, height_mm: f64) -> Result<(), String> {
+    if width_mm.is_finite() && width_mm > 0.0 && height_mm.is_finite() && height_mm > 0.0 {
+        Ok(())
+    } else {
+        Err("The artwork's width and height must be greater than zero.".into())
+    }
+}
+
+/// Where a relief takes its heights from.
+struct DepthSource {
+    depth: Arc<DynamicImage>,
+    /// How much of the photo's fine texture is laid over the depth, 0 to 1.
+    detail: f32,
+}
+
+/// The image as heights: white is 1.0, black is 0.0, after the trace
+/// settings' brightness, contrast and blur. With a depth source the heights
+/// come from the depth map instead, with the photo's fine texture added.
+fn heightmap(
+    image: &DynamicImage,
+    depth: Option<&DepthSource>,
+    settings: &TraceSettings,
+    width_mm: f64,
+    height_mm: f64,
+) -> Heightmap {
     let resized;
     let image = if image.width().max(image.height()) > RELIEF_MAX_PX {
         resized = image.thumbnail(RELIEF_MAX_PX, RELIEF_MAX_PX);
@@ -160,13 +247,41 @@ fn heightmap(image: &DynamicImage, settings: &TraceSettings, width_mm: f64) -> H
     } else {
         image
     };
-    let gray = kerf_trace::preprocess::grayscale(image, &settings.preprocess);
+    let (width, height) = (image.width(), image.height());
+    let data: Vec<f32> = match depth {
+        None => kerf_trace::preprocess::grayscale(image, &settings.preprocess)
+            .as_raw()
+            .iter()
+            .map(|&v| v as f32 / 255.0)
+            .collect(),
+        Some(source) => {
+            let stretched =
+                source
+                    .depth
+                    .resize_exact(width, height, image::imageops::FilterType::Triangle);
+            let shape = kerf_trace::preprocess::grayscale(&stretched, &settings.preprocess);
+            // The photo minus a blurred copy of itself is its fine texture:
+            // hair, fabric and edges, without the broad light and dark areas.
+            let photo = image.to_luma8();
+            let broad = image::imageops::blur(&photo, width.max(height) as f32 / 120.0);
+            let strength = source.detail.clamp(0.0, 1.0) * 0.35;
+            shape
+                .as_raw()
+                .iter()
+                .zip(photo.as_raw().iter().zip(broad.as_raw()))
+                .map(|(&z, (&fine, &smooth))| {
+                    let texture = (fine as f32 - smooth as f32) / 255.0;
+                    (z as f32 / 255.0 + texture * strength).clamp(0.0, 1.0)
+                })
+                .collect()
+        }
+    };
     Heightmap {
-        width: gray.width() as usize,
-        height: gray.height() as usize,
-        data: gray.as_raw().iter().map(|&v| v as f32 / 255.0).collect(),
+        width: width as usize,
+        height: height as usize,
+        data,
         width_mm,
-        height_mm: width_mm * gray.height() as f64 / gray.width() as f64,
+        height_mm,
     }
 }
 
@@ -175,16 +290,32 @@ fn heightmap(image: &DynamicImage, settings: &TraceSettings, width_mm: f64) -> H
 async fn generate_gcode(
     settings: TraceSettings,
     width_mm: f64,
+    height_mm: f64,
     job: Job,
+    // Carve reliefs from the estimated depth map rather than from brightness.
+    use_depth: bool,
+    detail: f32,
     state: State<'_, AppState>,
 ) -> Result<Generated, String> {
-    if !(width_mm.is_finite() && width_mm > 0.0) {
-        return Err("The output width must be greater than zero.".into());
-    }
+    check_size(width_mm, height_mm)?;
     *state.gcode.lock().unwrap() = None;
     let image = state.image(false)?;
+    let is_relief = job
+        .operations
+        .iter()
+        .any(|o| matches!(o.kind, OperationKind::CncRelief { .. }));
+    let depth = if use_depth && is_relief {
+        let guard = state.image.lock().unwrap();
+        let depth = guard.as_ref().and_then(|loaded| loaded.depth.clone());
+        Some(DepthSource {
+            depth: depth.ok_or("Estimate the depth first, or carve from brightness.")?,
+            detail,
+        })
+    } else {
+        None
+    };
     let (mut program, text) = blocking(move || {
-        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm);
+        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm);
         let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
         let carves_relief = job.operations.iter().any(|o| {
             matches!(
@@ -192,7 +323,8 @@ async fn generate_gcode(
                 OperationKind::CncRelief { .. } | OperationKind::LaserImage { .. }
             )
         });
-        let heightmap = carves_relief.then(|| heightmap(&image, &settings, width_mm));
+        let heightmap = carves_relief
+            .then(|| heightmap(&image, depth.as_ref(), &settings, width_mm, height_mm));
         let mut program = kerf_gcode::generate_with(&artwork, heightmap.as_ref(), &job)?;
         let text = std::mem::take(&mut program.text);
         Ok((program, text))
@@ -250,6 +382,9 @@ pub fn run() {
             app_info,
             load_image,
             clear_image,
+            crop_image,
+            reset_crop,
+            set_depth_map,
             trace_image,
             export_svg,
             generate_gcode,

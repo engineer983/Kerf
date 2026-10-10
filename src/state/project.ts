@@ -79,7 +79,9 @@ export function withTool(op: OperationItem, tool: Tool, material: Material, spin
         ...op.kind,
         spindleRpm,
         toolDiameter: tool.diameter,
-        ballNose: tool.kind === "ball",
+        ballNose: tool.kind === "ball" || tool.kind === "taperedBall",
+        taperAngle: tool.kind === "taperedBall" ? (tool.taperAngle ?? 0) : 0,
+        shankDiameter: tool.shank,
         ...(settings && {
           depthPerPass: settings.depthPerPass,
           plungeFeed: settings.plungeFeed,

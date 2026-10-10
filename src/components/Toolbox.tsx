@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { fetchPageText, isTauri } from "../lib/ipc";
-import { parseToolText, TOOL_KIND_LABELS, type Tool, type ToolKind } from "../lib/tools";
+import {
+  parseToolText,
+  taperFromDimensions,
+  TOOL_KIND_LABELS,
+  type Tool,
+  type ToolKind,
+} from "../lib/tools";
 import { useToolbox } from "../state/tools";
 import { NumberField, Select } from "./controls";
 
@@ -122,12 +128,38 @@ function ToolForm({ tool, update, remove }: ToolFormProps) {
             value: kind,
             label: TOOL_KIND_LABELS[kind],
           }))}
-          onChange={(kind) => set({ kind, angle: kind === "vbit" ? (tool.angle ?? 60) : null })}
+          onChange={(kind) =>
+            set({
+              kind,
+              angle: kind === "vbit" ? (tool.angle ?? 60) : null,
+              taperAngle:
+                kind === "taperedBall"
+                  ? (tool.taperAngle ?? taperFromDimensions(tool.diameter, tool.shank, tool.cutLength))
+                  : null,
+            })
+          }
         />
         <NumberField label="Flutes" min={1} max={8} value={tool.flutes} onChange={(v) => set({ flutes: Math.round(v) })} />
-        <NumberField label="Cutting diameter" unit="mm" min={0.05} max={100} value={tool.diameter} onChange={(diameter) => set({ diameter })} />
+        <NumberField
+          label={tool.kind === "taperedBall" ? "Tip diameter" : "Cutting diameter"}
+          unit="mm"
+          min={0.05}
+          max={100}
+          value={tool.diameter}
+          onChange={(diameter) => set({ diameter })}
+        />
         <NumberField label="Cutting length" unit="mm" min={0.1} max={300} value={tool.cutLength} onChange={(cutLength) => set({ cutLength })} />
         <NumberField label="Shank" unit="mm" min={0.5} max={50} value={tool.shank} onChange={(shank) => set({ shank })} />
+        {tool.kind === "taperedBall" && (
+          <NumberField
+            label="Taper per side"
+            unit="°"
+            min={0.1}
+            max={45}
+            value={tool.taperAngle ?? taperFromDimensions(tool.diameter, tool.shank, tool.cutLength)}
+            onChange={(taperAngle) => set({ taperAngle })}
+          />
+        )}
         {tool.kind === "vbit" && (
           <NumberField label="Angle" unit="°" min={10} max={150} value={tool.angle ?? 60} onChange={(angle) => set({ angle })} />
         )}
