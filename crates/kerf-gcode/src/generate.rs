@@ -105,6 +105,11 @@ pub fn generate_with(
                 let polylines: Vec<&Polyline> = placed.iter().flatten().collect();
                 cnc_profile(&mut w, operation, &polylines);
             }
+            OperationKind::LaserImage { .. } => {
+                let image =
+                    heightmap.ok_or("Image engraving needs an image to take shades from.")?;
+                crate::image_engrave::engrave(&mut w, operation, image, job.offset);
+            }
             OperationKind::CncRelief { .. } => {
                 let heightmap =
                     heightmap.ok_or("A 3D relief needs an image to take heights from.")?;
@@ -335,6 +340,10 @@ pub(crate) struct Writer<'a> {
     pub(crate) z: f64,
     /// Laser power, 0 to 1, recorded with each cutting move.
     pub(crate) power: f64,
+    /// Whether cutting moves are added to the preview path. Image engraving
+    /// turns this off: its hundreds of thousands of short moves would make
+    /// the path too large to draw.
+    pub(crate) sketch: bool,
     moves: Vec<f32>,
 }
 
@@ -352,6 +361,7 @@ impl<'a> Writer<'a> {
             travel_path: String::new(),
             z: 0.0,
             power: 1.0,
+            sketch: true,
             moves: Vec::new(),
         };
         // Jobs are assumed to start with the head at the machine origin.
@@ -418,7 +428,9 @@ impl<'a> Writer<'a> {
     pub(crate) fn cut(&mut self, to: [f64; 2], feed: f64, suffix: &str) {
         let [x, y] = self.machine_xy(to);
         self.line(&format!("G1 X{} Y{}{suffix}", num(x), num(y)));
-        segment(&mut self.cut_path, self.position, to);
+        if self.sketch {
+            segment(&mut self.cut_path, self.position, to);
+        }
         self.include(self.position);
         self.include(to);
         let length = distance(self.position, to);

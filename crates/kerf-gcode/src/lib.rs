@@ -5,6 +5,7 @@
 
 pub mod generate;
 pub mod geometry;
+mod image_engrave;
 pub mod job;
 pub mod relief;
 

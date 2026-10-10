@@ -53,6 +53,15 @@ pub enum OperationKind {
     LaserCut,
     /// Fill closed shapes with horizontal scan lines `interval` millimetres apart.
     LaserFill { interval: f64 },
+    /// Engrave the image itself, line by line, for photographs and shaded
+    /// artwork. Darker areas get more power, up to the operation's power.
+    LaserImage {
+        /// Distance between lines, and the size of one engraved dot.
+        interval: f64,
+        /// Turn shades into a pattern of full-power dots (Floyd–Steinberg),
+        /// which suits materials that do not darken evenly with power.
+        dither: bool,
+    },
     /// Follow each path with a router bit, stepping down to `depth`.
     /// The tool centre runs on the path; there is no tool-radius offset.
     CncProfile {
@@ -118,7 +127,9 @@ impl Operation {
         };
         positive(self.feed, "Speed")?;
         match self.kind {
-            OperationKind::LaserCut | OperationKind::LaserFill { .. } => {
+            OperationKind::LaserCut
+            | OperationKind::LaserFill { .. }
+            | OperationKind::LaserImage { .. } => {
                 if machine.kind != MachineKind::Laser {
                     return Err("Laser operations need a laser machine profile.".into());
                 }
@@ -128,7 +139,9 @@ impl Operation {
                 if self.passes == 0 {
                     return Err("Passes must be at least 1.".into());
                 }
-                if let OperationKind::LaserFill { interval } = self.kind {
+                if let OperationKind::LaserFill { interval }
+                | OperationKind::LaserImage { interval, .. } = self.kind
+                {
                     positive(interval, "Line interval")?;
                 }
             }

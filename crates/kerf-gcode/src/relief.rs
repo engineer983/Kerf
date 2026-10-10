@@ -22,7 +22,7 @@ pub struct Heightmap {
 }
 
 impl Heightmap {
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.width > 0
             && self.height > 0
             && self.data.len() == self.width * self.height
@@ -32,7 +32,7 @@ impl Heightmap {
 
     /// Bilinear sample at a position in millimetres. Positions outside the map
     /// take the nearest edge value, so the carving runs cleanly off its border.
-    fn sample(&self, x_mm: f64, y_mm: f64) -> f64 {
+    pub(crate) fn sample(&self, x_mm: f64, y_mm: f64) -> f64 {
         let fx =
             (x_mm / self.width_mm * self.width as f64 - 0.5).clamp(0.0, (self.width - 1) as f64);
         let fy =

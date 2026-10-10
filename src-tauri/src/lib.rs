@@ -1,4 +1,5 @@
 mod machine;
+mod web;
 
 use std::sync::{Arc, Mutex};
 
@@ -185,10 +186,12 @@ async fn generate_gcode(
     let (mut program, text) = blocking(move || {
         let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm);
         let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
-        let carves_relief = job
-            .operations
-            .iter()
-            .any(|o| matches!(o.kind, OperationKind::CncRelief { .. }));
+        let carves_relief = job.operations.iter().any(|o| {
+            matches!(
+                o.kind,
+                OperationKind::CncRelief { .. } | OperationKind::LaserImage { .. }
+            )
+        });
         let heightmap = carves_relief.then(|| heightmap(&image, &settings, width_mm));
         let mut program = kerf_gcode::generate_with(&artwork, heightmap.as_ref(), &job)?;
         let text = std::mem::take(&mut program.text);
@@ -254,7 +257,8 @@ pub fn run() {
             machine::list_ports,
             machine::connect_machine,
             machine::disconnect_machine,
-            machine::machine_action
+            machine::machine_action,
+            web::fetch_page_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");
