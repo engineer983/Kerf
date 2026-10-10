@@ -26,7 +26,7 @@ fn entry(key_id: &str) -> Result<keyring::Entry, String> {
 }
 
 /// The saved key for a provider, or `None` if there is none.
-fn saved_key(key_id: &str) -> Result<Option<String>, String> {
+pub(crate) fn saved_key(key_id: &str) -> Result<Option<String>, String> {
     match entry(key_id)?.get_password() {
         Ok(key) => Ok(Some(key)),
         Err(keyring::Error::NoEntry) => Ok(None),

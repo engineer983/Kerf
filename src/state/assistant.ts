@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { runTool, SYSTEM_PROMPT, TOOLS } from "../lib/assistantTools";
+import { runTool, SYSTEM_PROMPT, toolActivity, TOOLS } from "../lib/assistantTools";
 import * as ipc from "../lib/ipc";
 import { findProvider, type Protocol } from "../lib/providers";
 import { useProject } from "./project";
@@ -19,6 +19,8 @@ export type Entry =
   | { kind: "assistant"; text: string }
   /** Something the assistant did to the project. */
   | { kind: "action"; text: string; failed: boolean }
+  /** Pictures a search found, to choose from. */
+  | { kind: "pictures"; pictures: ipc.FoundPicture[] }
   | { kind: "notice"; text: string };
 
 interface Settings {
@@ -289,12 +291,13 @@ export const useAssistant = create<AssistantState>((set, get) => {
 
           const results = [];
           for (const call of turn.toolCalls) {
-            set({ activity: "Working on the project…" });
+            set({ activity: toolActivity(call.name) });
             const outcome = await runTool(call.name, call.input);
             // Reading the project is not worth a line in the conversation.
             if (call.name !== "get_project" || outcome.isError) {
               show({ kind: "action", text: outcome.summary, failed: outcome.isError });
             }
+            if (outcome.pictures?.length) show({ kind: "pictures", pictures: outcome.pictures });
             results.push({ id: call.id, content: outcome.content, isError: outcome.isError });
           }
           history.push(...toolResults(target.protocol, results));

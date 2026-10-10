@@ -353,3 +353,40 @@ export function resetCrop(): Promise<void> {
 export function setDepthMap(png: Uint8Array): Promise<void> {
   return invoke("set_depth_map", png);
 }
+
+/** Where pictures are made: an OpenAI-style image service, or a Stable Diffusion web UI. */
+export interface ImageEndpoint {
+  protocol: "openAi" | "webUi";
+  baseUrl: string;
+  model: string;
+}
+
+export type PictureShape = "square" | "wide" | "tall";
+
+/** Makes a picture from a description and returns the image file's bytes. */
+export function generatePicture(endpoint: ImageEndpoint, keyId: string, prompt: string, shape: PictureShape): Promise<ArrayBuffer> {
+  return invoke("generate_picture", { endpoint, keyId, prompt, shape });
+}
+
+/** A picture found on the web that may be adapted and used commercially. */
+export interface FoundPicture {
+  title: string;
+  creator: string;
+  licence: string;
+  needsCredit: boolean;
+  attribution: string;
+  page: string;
+  url: string;
+  thumbnail: string;
+  width: number;
+  height: number;
+}
+
+export function searchPictures(query: string, publicDomainOnly: boolean): Promise<FoundPicture[]> {
+  return invoke("search_pictures", { query, publicDomainOnly });
+}
+
+/** Downloads a found picture, or its thumbnail, as the file's bytes. */
+export function fetchPicture(url: string): Promise<ArrayBuffer> {
+  return invoke("fetch_picture", { url });
+}

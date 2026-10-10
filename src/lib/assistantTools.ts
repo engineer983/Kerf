@@ -1,7 +1,10 @@
+import * as ipc from "./ipc";
 import type { OperationKind } from "./ipc";
 import { findMaterial, MATERIALS } from "./materials";
+import { creditLine, loadAsNewProject, loadFoundPicture, pictureName, toPngFile } from "./pictures";
 import { TOOL_KIND_LABELS } from "./tools";
 import { artworkRect, stockRect, useProject } from "../state/project";
+import { pictureEndpoint, usePictures } from "../state/pictures";
 import { useToolbox } from "../state/tools";
 
 // What the assistant may do. Every tool reads or changes the project through
@@ -21,6 +24,22 @@ export interface ToolOutcome {
   isError: boolean;
   /** A short line for the person, shown in the conversation. */
   summary: string;
+  /** Pictures a search found, shown to the person as thumbnails. */
+  pictures?: ipc.FoundPicture[];
+}
+
+/** What the person is told is happening while a slow tool runs. */
+export function toolActivity(name: string): string {
+  switch (name) {
+    case "generate_picture":
+      return "Making the picture… this can take a minute or two";
+    case "find_pictures":
+      return "Searching for pictures…";
+    case "use_found_picture":
+      return "Downloading the picture…";
+    default:
+      return "Working on the project…";
+  }
 }
 
 const OPERATION_TYPES = ["laserImage", "laserFill", "laserCut", "cncProfile", "cncRelief", "cncCutout"] as const;
@@ -142,13 +161,13 @@ export const TOOLS: ToolSpec[] = [
   {
     name: "new_project",
     description:
-      "Start a new, empty project. The current project is saved first, so nothing is lost. Afterwards there is no picture: either the person imports one, or you draw one with create_picture.",
+      "Start a new, empty project. The current project is saved first, so nothing is lost. Afterwards there is no picture: either the person imports one, or you get one with create_picture, generate_picture or find_pictures.",
     schema: { type: "object", properties: {} },
   },
   {
     name: "create_picture",
     description:
-      "Draw a picture yourself, as SVG, and load it as the project's picture. Use this when the person asks you to make or draw something (a flag, an emblem, lettering, a simple illustration or pattern) rather than supplying a picture. It replaces the current picture and starts a new project. You can only draw what SVG can express; you cannot produce a photograph. For a 3D carving, draw a height map and set heightMap to true: white is the highest point and black the lowest, and smooth gradients between them become smooth slopes, so rolling waves are bands of light and dark gradient, and a raised border is a lighter band. Detail drawn in flat colour with no shading carves flat. For laser engraving or cutting, draw normally in black on white. Give the SVG a viewBox and draw at the proportions of the finished piece.",
+      "Draw a picture yourself, as SVG, and load it as the project's picture. Use this when the person asks you to make or draw something (a flag, an emblem, lettering, a simple illustration or pattern) rather than supplying a picture. It replaces the current picture and starts a new project. You can only draw what SVG can express; for anything realistic use generate_picture or find_pictures instead. For a 3D carving, draw a height map and set heightMap to true: white is the highest point and black the lowest, and smooth gradients between them become smooth slopes, so rolling waves are bands of light and dark gradient, and a raised border is a lighter band. Detail drawn in flat colour with no shading carves flat. For laser engraving or cutting, draw normally in black on white. Give the SVG a viewBox and draw at the proportions of the finished piece.",
     schema: {
       type: "object",
       properties: {
@@ -157,6 +176,42 @@ export const TOOLS: ToolSpec[] = [
         heightMap: { type: "boolean", description: "True if the picture is a greyscale height map for carving: brightness is height." },
       },
       required: ["name", "svg"],
+    },
+  },
+  {
+    name: "generate_picture",
+    description:
+      "Have an image model make a picture from a description, and load it as a new project. Use this for anything realistic or detailed that you could not draw as SVG: an animal, a face, a landscape, a detailed scene. It takes up to a minute or two, and on a hosted service each picture costs the person money, so make one picture per request and do not try again unless they ask. Write the description for the job: for a 3D carving, one clear subject filling the frame, evenly lit, on a plain background, since the shape is then estimated from the picture; for laser engraving, strong contrast and a plain background; for cutting or following lines, bold black line art on pure white with no shading. Fails with an explanation if the person has not set up a way to make pictures.",
+    schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "A short name for the picture, such as 'bald eagle'." },
+        description: { type: "string", description: "What the picture should show and in what style, in a few sentences." },
+        shape: { type: "string", enum: ["square", "wide", "tall"], description: "The picture's proportions. Defaults to square." },
+      },
+      required: ["name", "description"],
+    },
+  },
+  {
+    name: "find_pictures",
+    description:
+      "Search the web for existing pictures that may be adapted and used commercially (public domain and Creative Commons licences that allow it). The person is shown the results as thumbnails and can click one to load it. You get each result's number, title, creator, licence and size, but you cannot see the pictures, so let the person choose unless they asked you to pick. Use plain search words, such as 'bald eagle portrait'.",
+    schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search words." },
+        publicDomainOnly: { type: "boolean", description: "Only pictures that need no credit at all." },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "use_found_picture",
+    description: "Download one of the pictures from the last find_pictures search and load it as a new project.",
+    schema: {
+      type: "object",
+      properties: { number: number("Which result, counting from 1.") },
+      required: ["number"],
     },
   },
   {
@@ -454,7 +509,7 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
   new_project: async () => {
     await useProject.getState().newProject();
     return {
-      content: "A new, empty project is open. There is no picture yet: the person can import one, or you can draw one with create_picture.",
+      content: "A new, empty project is open. There is no picture yet: the person can import one, or you can draw, make or find one.",
       summary: "Started a new project",
     };
   },
@@ -501,17 +556,61 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       URL.revokeObjectURL(url);
     }
 
-    const before = useProject.getState();
-    // What was being worked on is kept before it is replaced.
-    if (before.image) await before.saveProject();
-    await useProject.getState().importFile(new File([png], `${name}.png`, { type: "image/png" }), { drawnHeightMap: heightMap });
-    const after = useProject.getState();
-    if (after.error || !after.image || after.image === before.image) {
-      throw new ToolError(after.error ?? "The picture could not be loaded.");
+    const image = await loadAsNewProject(new File([png], `${name}.png`, { type: "image/png" }), { drawnHeightMap: heightMap });
+    return {
+      content: `The picture "${name}" is loaded (${image.width} x ${image.height} pixels) as a new project${heightMap ? ", and a carving will take its height from brightness" : ""}. Look at the project to see how it was set up.`,
+      summary: `Drew a picture: ${name}`,
+    };
+  },
+
+  generate_picture: async (input) => {
+    if (typeof input.description !== "string" || !input.description.trim()) throw new ToolError("description is required.");
+    const name = pictureName(input.name, "generated picture");
+    const shape = choice(input, "shape", ["square", "wide", "tall"] as const) ?? "square";
+    const target = pictureEndpoint();
+    if ("problem" in target) {
+      throw new ToolError(
+        `${target.problem} The person can set this up under Pictures in the assistant's settings (the cog at the top of this panel): a hosted image service with their own key, or an image model on their own computer. Until then you can draw with create_picture or search with find_pictures.`,
+      );
+    }
+    const bytes = await ipc.generatePicture(target.endpoint, target.keyId, input.description.trim().slice(0, 4000), shape);
+    const image = await loadAsNewProject(await toPngFile(bytes, name));
+    return {
+      content: `The picture "${name}" was made and is loaded (${image.width} x ${image.height} pixels) as a new project. You cannot see it; the person can. Look at the project to see how it was set up.`,
+      summary: `Made a picture: ${name}`,
+    };
+  },
+
+  find_pictures: async (input) => {
+    if (typeof input.query !== "string" || !input.query.trim()) throw new ToolError("query is required.");
+    if (!usePictures.getState().webSearch) {
+      throw new ToolError("Searching the web for pictures is switched off. The person can switch it on under Pictures in the assistant's settings.");
+    }
+    const found = await ipc.searchPictures(input.query.trim().slice(0, 200), flag(input, "publicDomainOnly") ?? false);
+    usePictures.getState().setFound(found);
+    if (found.length === 0) {
+      return { content: "Nothing was found. Try fewer or different words.", summary: `Found no pictures for "${input.query.trim()}"` };
     }
     return {
-      content: `The picture "${name}" is loaded (${after.image.width} x ${after.image.height} pixels) as a new project${heightMap ? ", and a carving will take its height from brightness" : ""}. Look at the project to see how it was set up.`,
-      summary: `Drew a picture: ${name}`,
+      content: JSON.stringify({
+        note: "The person can see these as thumbnails and click one to load it. You cannot see them.",
+        results: found.map((p, i) => ({ number: i + 1, title: p.title, creator: p.creator || null, licence: p.licence, creditRequired: p.needsCredit, pixels: [p.width, p.height] })),
+      }),
+      summary: `Found ${found.length} picture${found.length === 1 ? "" : "s"} for "${input.query.trim()}"`,
+      pictures: found,
+    };
+  },
+
+  use_found_picture: async (input) => {
+    const { found } = usePictures.getState();
+    if (found.length === 0) throw new ToolError("There are no search results. Search with find_pictures first.");
+    const index = num(input, "number", 1, found.length);
+    if (index === undefined || !Number.isInteger(index)) throw new ToolError(`number must be a whole number from 1 to ${found.length}.`);
+    const picture = found[index - 1];
+    const image = await loadFoundPicture(picture);
+    return {
+      content: `Loaded ${creditLine(picture)} (${image.width} x ${image.height} pixels) as a new project. ${picture.needsCredit ? `Tell the person the credit to give: ${picture.attribution || creditLine(picture)}` : "No credit is required."} Source: ${picture.page}`,
+      summary: `Loaded ${creditLine(picture)}`,
     };
   },
 
@@ -572,7 +671,15 @@ To free the finished piece on a router, add a cutout last: outside the line, dep
 
 Before you finish, check that the artwork fits on the material, that no depth exceeds the bit's cutting length, and that a relief does not go through the material.
 
-You can start a new project, and you can make the picture yourself by drawing it as SVG. When the person asks you to create something rather than giving you a picture, draw it: start a new project if one is open, draw the picture, then set the job up and generate as usual. Drawing suits flags, emblems, lettering, patterns and simple illustrations. It cannot produce a photograph or a realistic likeness; if that is what they want, say so and ask them to import a picture instead. For a carving, draw a height map, where brightness is height, and think about the shape in relief: what is highest, what is lowest, and how the surface slopes between. Draw it carefully, with enough gradient stops that curves look smooth, and at the proportions of the real thing. After drawing, say briefly what you drew so the person knows what to expect, since they will see it appear on the canvas.
+You can start a new project, and when the person asks you to create something rather than giving you a picture, you have three ways to get one. Choose by what they want, get the picture, then set the job up and generate as usual.
+
+Draw it yourself as SVG when it is made of shapes: flags, emblems, lettering, patterns, simple illustrations. This is free and immediate. For a carving, draw a height map, where brightness is height, and think about the shape in relief: what is highest, what is lowest, and how the surface slopes between. Draw it carefully, with enough gradient stops that curves look smooth, and at the proportions of the real thing.
+
+Have an image model make it when it should look realistic or richly detailed: animals, people, scenery. This only works if the person has set up a way to make pictures, and on a hosted service each picture costs them money, so make one and let them judge it rather than making several.
+
+Search the web when they want a real photograph or an existing artwork, or when making pictures is not set up. Results are limited to pictures that may be adapted and used commercially. The person sees thumbnails and picks one; you cannot see them. When a picture needs credit, pass on the credit line you are given, and mention that they should check the source page if they plan to sell the piece.
+
+You cannot see a picture that was made or found unless the person has let you see the project's picture, so do not describe it as if you had. Say what you asked for, and ask them how it looks.
 
 You cannot connect to, move, start or stop a machine, and you should say so plainly if asked. Never suggest that a job is safe to leave running unattended.
 

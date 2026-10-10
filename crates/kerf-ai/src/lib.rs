@@ -14,7 +14,10 @@
 
 mod anthropic;
 mod http;
+mod images;
 mod openai;
+
+pub use images::{generate_image, Generated, ImageEndpoint, ImageProtocol, Shape};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

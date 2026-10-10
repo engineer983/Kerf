@@ -1,6 +1,7 @@
 mod assistant;
 mod gallery;
 mod machine;
+mod pictures;
 mod web;
 
 use std::sync::{Arc, Mutex};
@@ -443,7 +444,10 @@ pub fn run() {
             assistant::has_api_key,
             assistant::delete_api_key,
             assistant::assistant_send,
-            assistant::assistant_models
+            assistant::assistant_models,
+            pictures::generate_picture,
+            pictures::search_pictures,
+            pictures::fetch_picture
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");

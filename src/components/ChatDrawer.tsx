@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Settings, SquarePen, TriangleAlert, X } from "lucide-react";
-import { isTauri } from "../lib/ipc";
+import { fetchPicture, isTauri, type FoundPicture } from "../lib/ipc";
+import { creditLine, loadFoundPicture } from "../lib/pictures";
 import { findProvider, PROVIDERS } from "../lib/providers";
 import { useAssistant, type Entry } from "../state/assistant";
+import { findPictureSource, OFF, PICTURE_SOURCES, usePictures } from "../state/pictures";
 import { useUi } from "../state/ui";
 
 const field = "w-full rounded-md border border-line bg-raised px-2 py-1.5 select-text";
@@ -10,6 +12,7 @@ const quiet = "rounded-lg border border-line px-3 py-1.5 transition-colors hover
 const iconButton = "rounded p-1 text-muted hover:text-fg";
 
 const SUGGESTIONS = [
+  "Start a new project and make me a picture of a bald eagle to carve.",
   "Set this up to look as realistic as possible.",
   "I want a clean, bold version of this. Set it up.",
   "This job takes too long. Make it faster.",
@@ -202,6 +205,8 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
         </span>
       </label>
 
+      <PictureSettings />
+
       <p className="text-muted">
         The assistant can read and change this project's settings, and every change can be undone. It
         cannot connect to, move or start a machine. What you type, and the project's settings, are sent
@@ -215,6 +220,183 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
         </button>
       )}
     </div>
+  );
+}
+
+/** Where the assistant gets pictures it cannot draw itself. */
+function PictureSettings() {
+  const p = usePictures();
+  const source = findPictureSource(p.sourceId);
+  const [key, setKey] = useState("");
+
+  useEffect(() => {
+    void usePictures.getState().refreshKey();
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-4 border-t border-line pt-4">
+      <div>
+        <h3 className="text-[11px] font-semibold tracking-wider text-muted uppercase">Pictures</h3>
+        <p className="mt-1 text-muted">
+          The assistant can always draw simple pictures itself. For realistic ones it can use an image
+          model, or search the web.
+        </p>
+      </div>
+
+      <label className="flex flex-col gap-1">
+        Make pictures with
+        <select className={field} value={source?.id ?? OFF} onChange={(e) => p.setSource(e.target.value)}>
+          <option value={OFF}>Nothing (off)</option>
+          {PICTURE_SOURCES.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      {source && (
+        <>
+          <p className="text-muted">{source.note}</p>
+          {source.addressEditable && (
+            <label className="flex flex-col gap-1">
+              Image server address
+              <input
+                className={`${field} font-mono text-[12px]`}
+                placeholder="http://localhost:8080/v1"
+                value={p.baseUrls[source.id] ?? source.baseUrl}
+                onChange={(e) => p.setBaseUrl(e.target.value)}
+              />
+            </label>
+          )}
+          {source.keyId && (
+            <div className="flex flex-col gap-2">
+              <label className="flex flex-col gap-1">
+                Image service key{source.needsKey ? "" : " (if the server needs one)"}
+                <input
+                  type="password"
+                  className={`${field} font-mono text-[12px]`}
+                  placeholder={p.hasKey ? "A key is saved. Type a new one to replace it." : "Paste your key"}
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                />
+              </label>
+              <div className="flex gap-2">
+                <button
+                  className={quiet}
+                  disabled={!key.trim()}
+                  title="Save the image service's key in this computer's credential store"
+                  onClick={() => {
+                    void p.saveKey(key);
+                    setKey("");
+                  }}
+                >
+                  Save image key
+                </button>
+                <button
+                  className={quiet}
+                  disabled={!p.hasKey}
+                  title="Delete the image service's saved key from this computer"
+                  onClick={() => void p.removeKey()}
+                >
+                  Remove image key
+                </button>
+              </div>
+              {p.hasKey && <p className="text-muted">A key is saved.</p>}
+            </div>
+          )}
+          <label className="flex flex-col gap-1">
+            Image model
+            <input
+              className={`${field} font-mono text-[12px]`}
+              placeholder={source.needsKey ? "The image model's name" : "Empty uses the server's own choice"}
+              value={p.models[source.id] ?? source.defaultModel}
+              onChange={(e) => p.setModel(e.target.value)}
+            />
+          </label>
+          <p className="text-muted">The description of the picture is sent to this service, and nothing else.</p>
+        </>
+      )}
+
+      {p.error && (
+        <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
+          {p.error}
+        </p>
+      )}
+
+      <label className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          className="mt-0.5 accent-accent"
+          checked={p.webSearch}
+          onChange={(e) => p.setWebSearch(e.target.checked)}
+        />
+        <span>
+          Let the assistant search the web for pictures
+          <span className="block text-muted">
+            Searches Openverse for public-domain and Creative Commons pictures that may be adapted and
+            used commercially. Free, with no key. The search words are sent to openverse.org.
+          </span>
+        </span>
+      </label>
+    </div>
+  );
+}
+
+/** One picture a search found: click to load it as a new project. */
+function FoundCard({ picture, number }: { picture: FoundPicture; number: number }) {
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const busy = useAssistant((s) => s.busy);
+
+  useEffect(() => {
+    if (!picture.thumbnail) return;
+    let url: string | null = null;
+    let gone = false;
+    fetchPicture(picture.thumbnail)
+      .then((bytes) => {
+        if (gone) return;
+        url = URL.createObjectURL(new Blob([bytes]));
+        setThumbnail(url);
+      })
+      // Without a thumbnail the card still shows the title and can be chosen.
+      .catch(() => {});
+    return () => {
+      gone = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [picture.thumbnail]);
+
+  async function choose() {
+    setLoading(true);
+    const show = (entry: Entry) => useAssistant.setState((s) => ({ entries: [...s.entries, entry] }));
+    try {
+      await loadFoundPicture(picture);
+      show({ kind: "action", text: `Loaded ${creditLine(picture)}`, failed: false });
+    } catch (e) {
+      show({ kind: "action", text: `Could not load that picture: ${e instanceof Error ? e.message : String(e)}`, failed: true });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <button
+      onClick={() => void choose()}
+      disabled={busy || loading}
+      title={`Use this picture. ${creditLine(picture)}`}
+      className="flex flex-col overflow-hidden rounded-lg border border-line text-left transition-colors hover:border-accent disabled:opacity-50"
+    >
+      <span className="flex aspect-[4/3] w-full items-center justify-center bg-raised text-muted">
+        {thumbnail ? <img src={thumbnail} alt={picture.title} className="h-full w-full object-cover" /> : loading ? "…" : number}
+      </span>
+      <span className="flex flex-col gap-0.5 px-2 py-1.5 text-[11px]">
+        <span className="truncate text-fg">
+          {number}. {loading ? "Loading…" : picture.title}
+        </span>
+        <span className="truncate text-muted">{[picture.creator, picture.licence].filter(Boolean).join(" · ")}</span>
+      </span>
+    </button>
   );
 }
 
@@ -308,6 +490,14 @@ function Bubble({ entry }: { entry: Entry }) {
           {entry.failed ? <TriangleAlert size={13} className="mt-0.5 shrink-0" /> : <Check size={13} className="mt-0.5 shrink-0" />}
           {entry.text}
         </p>
+      );
+    case "pictures":
+      return (
+        <div className="grid grid-cols-2 gap-2">
+          {entry.pictures.map((picture, i) => (
+            <FoundCard key={picture.url} picture={picture} number={i + 1} />
+          ))}
+        </div>
       );
     case "notice":
       return (
