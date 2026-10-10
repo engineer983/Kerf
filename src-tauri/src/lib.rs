@@ -1,3 +1,4 @@
+mod assistant;
 mod gallery;
 mod machine;
 mod web;
@@ -437,7 +438,12 @@ pub fn run() {
             gallery::list_projects,
             gallery::open_project,
             gallery::project_picture,
-            gallery::delete_project
+            gallery::delete_project,
+            assistant::set_api_key,
+            assistant::has_api_key,
+            assistant::delete_api_key,
+            assistant::assistant_send,
+            assistant::assistant_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");

@@ -13,7 +13,8 @@ const BY_TEXT: Record<string, string> = {
 
   // Title bar
   Toolbox: "Your router bits and their dimensions",
-  Assistant: "Open the assistant panel (not built yet)",
+  Assistant: "Ask questions about your project, or ask for changes to be made",
+  Done: "Go back to the conversation",
 
   // Import and trace
   "Choose image…": "Pick a PNG, JPEG, WebP, BMP or GIF from your computer",

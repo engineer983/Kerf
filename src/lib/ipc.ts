@@ -224,6 +224,56 @@ export function onMachineEvent(handler: (event: MachineEvent) => void): Promise<
   return listen<MachineEvent>("machine", (e) => handler(e.payload));
 }
 
+/** Where the assistant sends requests, and which model it asks for. */
+export interface Endpoint {
+  protocol: "anthropic" | "openAi";
+  baseUrl: string;
+  model: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+}
+
+/** One reply from the model. */
+export interface AssistantTurn {
+  text: string;
+  toolCalls: { id: string; name: string; input: unknown }[];
+  /** The reply in the provider's own format, to append to the history as is. */
+  message: unknown;
+  stop: { type: "done" } | { type: "toolUse" } | { type: "truncated" } | { type: "refused"; explanation: string };
+  model: string;
+}
+
+/** Sends the conversation to the model. The key is looked up on the backend by `keyId`. */
+export function assistantSend(
+  endpoint: Endpoint,
+  keyId: string,
+  system: string,
+  messages: unknown[],
+  tools: { name: string; description: string; schema: unknown }[],
+): Promise<AssistantTurn> {
+  return invoke("assistant_send", { endpoint, keyId, system, messages, tools });
+}
+
+export function assistantModels(endpoint: Endpoint, keyId: string): Promise<ModelInfo[]> {
+  return invoke("assistant_models", { endpoint, keyId });
+}
+
+/** Saves an API key in the operating system's credential store. It cannot be read back. */
+export function setApiKey(keyId: string, key: string): Promise<void> {
+  return invoke("set_api_key", { keyId, key });
+}
+
+export function hasApiKey(keyId: string): Promise<boolean> {
+  return invoke("has_api_key", { keyId });
+}
+
+export function deleteApiKey(keyId: string): Promise<void> {
+  return invoke("delete_api_key", { keyId });
+}
+
 /** What the gallery shows for a saved project. */
 export interface ProjectMeta {
   id: string;
