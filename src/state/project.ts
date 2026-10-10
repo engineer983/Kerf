@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import * as ipc from "../lib/ipc";
-import type { Traced, TraceSettings } from "../lib/ipc";
+import type { Generated, MachineKind, Operation, Traced, TraceSettings } from "../lib/ipc";
 
 export type Step = "import" | "trace" | "operations" | "machine";
 
@@ -29,6 +29,40 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
   layerDifference: 16,
 };
 
+/** An operation plus a stable key for list rendering. */
+export type OperationItem = Operation & { id: number };
+
+let nextOperationId = 1;
+
+// Conservative starting points; real values depend on the machine and material.
+export function defaultOperation(kind: MachineKind): OperationItem {
+  const id = nextOperationId++;
+  return kind === "laser"
+    ? {
+        id,
+        color: null,
+        kind: { type: "laserFill", interval: 0.1 },
+        feed: 3000,
+        power: 50,
+        passes: 1,
+      }
+    : {
+        id,
+        color: null,
+        kind: {
+          type: "cncProfile",
+          depth: 1,
+          depthPerPass: 0.5,
+          plungeFeed: 200,
+          safeZ: 5,
+          spindleRpm: 12000,
+        },
+        feed: 600,
+        power: 0,
+        passes: 1,
+      };
+}
+
 interface TraceState {
   settings: TraceSettings;
   result: Traced | null;
@@ -38,26 +72,51 @@ interface TraceState {
   error: string | null;
 }
 
+interface GcodeState {
+  /** Null whenever anything it was generated from has changed since. */
+  program: Generated | null;
+  busy: boolean;
+  error: string | null;
+  exportedTo: string | null;
+}
+
 interface ProjectState {
   step: Step;
   image: SourceImage | null;
   /** Work area in millimetres. */
   bed: { width: number; height: number };
+  machineKind: MachineKind;
+  maxPowerS: number;
   /** Physical width of the artwork in millimetres; height follows the aspect ratio. */
   widthMm: number;
+  /** Distance of the artwork's left edge from the bed's left edge, in mm. */
+  left: number;
+  /** Distance of the artwork's front (bottom) edge from the bed's front edge, in mm. */
+  front: number;
   showSource: boolean;
   error: string | null;
   trace: TraceState;
   /** Path of the last exported SVG, for confirmation in the UI. */
   exportedTo: string | null;
+  operations: OperationItem[];
+  gcode: GcodeState;
   setStep: (step: Step) => void;
   importFile: (file: File) => Promise<void>;
   clearImage: () => void;
   setWidthMm: (widthMm: number) => void;
+  setPosition: (patch: { left?: number; front?: number }) => void;
+  setBed: (patch: { width?: number; height?: number }) => void;
+  setMachineKind: (kind: MachineKind) => void;
+  setMaxPowerS: (maxPowerS: number) => void;
   setShowSource: (show: boolean) => void;
   updateTrace: (patch: Partial<TraceSettings>) => void;
   updatePreprocess: (patch: Partial<TraceSettings["preprocess"]>) => void;
   exportSvg: () => Promise<void>;
+  addOperation: () => void;
+  updateOperation: (id: number, patch: Partial<Operation>) => void;
+  removeOperation: (id: number) => void;
+  generateGcode: () => Promise<void>;
+  exportGcode: () => Promise<void>;
 }
 
 const EMPTY_TRACE: TraceState = {
@@ -68,15 +127,36 @@ const EMPTY_TRACE: TraceState = {
   error: null,
 };
 
+const EMPTY_GCODE: GcodeState = { program: null, busy: false, error: null, exportedTo: null };
+
 const PREVIEW_DELAY_MS = 120;
 const REFINE_DELAY_MS = 500;
+const TRAVEL_FEED = 6000;
 
 let traceTimer: ReturnType<typeof setTimeout> | undefined;
-// Bumped on every request so that a slow, outdated trace cannot overwrite a newer one.
+// Bumped on every request so that a slow, outdated result cannot overwrite a newer one.
 let traceGeneration = 0;
+let gcodeGeneration = 0;
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Where the artwork sits on the bed, in bed coordinates (mm, Y down from the back). */
+export function artworkRect(s: Pick<ProjectState, "image" | "widthMm" | "left" | "front" | "bed">) {
+  if (!s.image) return null;
+  const height = (s.widthMm * s.image.height) / s.image.width;
+  return { x: s.left, y: s.bed.height - s.front - height, width: s.widthMm, height };
+}
+
+/** Distinct fill colours in a trace, lower-cased, in first-seen order. */
+export function traceColors(traced: Traced | null): string[] {
+  if (!traced) return [];
+  const colors = new Set<string>();
+  for (const match of traced.body.matchAll(/fill="(#[0-9a-fA-F]{6})"/g)) {
+    colors.add(match[1].toLowerCase());
+  }
+  return [...colors];
 }
 
 export const useProject = create<ProjectState>((set, get) => {
@@ -111,15 +191,27 @@ export const useProject = create<ProjectState>((set, get) => {
     traceGeneration++;
   }
 
+  /** Drops any generated G-code; call when one of its inputs changes. */
+  function staleGcode(): { gcode: GcodeState } {
+    gcodeGeneration++;
+    return { gcode: EMPTY_GCODE };
+  }
+
   return {
     step: "import",
     image: null,
     bed: { width: 400, height: 400 },
+    machineKind: "laser",
+    maxPowerS: 1000,
     widthMm: 100,
+    left: 0,
+    front: 0,
     showSource: true,
     error: null,
     trace: EMPTY_TRACE,
     exportedTo: null,
+    operations: [defaultOperation("laser")],
+    gcode: EMPTY_GCODE,
 
     setStep: (step) => set({ step }),
 
@@ -142,16 +234,21 @@ export const useProject = create<ProjectState>((set, get) => {
         const previous = get().image;
         if (previous) URL.revokeObjectURL(previous.url);
 
-        // Start at half the bed, whichever side is the tighter fit.
+        // Start centred at half the bed, whichever side is the tighter fit.
         const { bed, trace } = get();
         const scale = Math.min((bed.width * 0.5) / image.width, (bed.height * 0.5) / image.height);
+        const widthMm = Math.round(image.width * scale);
+        const heightMm = (widthMm * image.height) / image.width;
         set({
           image,
-          widthMm: Math.round(image.width * scale),
+          widthMm,
+          left: Math.round((bed.width - widthMm) / 2),
+          front: Math.round((bed.height - heightMm) / 2),
           error: null,
           exportedTo: null,
           trace: { ...EMPTY_TRACE, settings: trace.settings },
           step: "trace",
+          ...staleGcode(),
         });
         scheduleTrace();
       } catch (e) {
@@ -169,14 +266,23 @@ export const useProject = create<ProjectState>((set, get) => {
         error: null,
         exportedTo: null,
         trace: { ...EMPTY_TRACE, settings: s.trace.settings },
+        ...staleGcode(),
       }));
     },
 
-    setWidthMm: (widthMm) => set({ widthMm }),
+    setWidthMm: (widthMm) => set({ widthMm, ...staleGcode() }),
+    setPosition: (patch) => set({ ...patch, ...staleGcode() }),
+    setBed: (patch) => set((s) => ({ bed: { ...s.bed, ...patch }, ...staleGcode() })),
+    setMachineKind: (machineKind) =>
+      set({ machineKind, operations: [defaultOperation(machineKind)], ...staleGcode() }),
+    setMaxPowerS: (maxPowerS) => set({ maxPowerS, ...staleGcode() }),
     setShowSource: (showSource) => set({ showSource }),
 
     updateTrace: (patch) => {
-      set((s) => ({ trace: { ...s.trace, settings: { ...s.trace.settings, ...patch } } }));
+      set((s) => ({
+        trace: { ...s.trace, settings: { ...s.trace.settings, ...patch } },
+        ...staleGcode(),
+      }));
       scheduleTrace();
     },
 
@@ -194,6 +300,62 @@ export const useProject = create<ProjectState>((set, get) => {
         if (path) set((s) => ({ exportedTo: path, trace: { ...s.trace, error: null } }));
       } catch (e) {
         set((s) => ({ trace: { ...s.trace, error: message(e) } }));
+      }
+    },
+
+    addOperation: () =>
+      set((s) => ({
+        operations: [...s.operations, defaultOperation(s.machineKind)],
+        ...staleGcode(),
+      })),
+
+    updateOperation: (id, patch) =>
+      set((s) => ({
+        operations: s.operations.map((op) => (op.id === id ? { ...op, ...patch } : op)),
+        ...staleGcode(),
+      })),
+
+    removeOperation: (id) =>
+      set((s) => ({ operations: s.operations.filter((op) => op.id !== id), ...staleGcode() })),
+
+    generateGcode: async () => {
+      const s = get();
+      const rect = artworkRect(s);
+      if (!rect) return;
+      const generation = ++gcodeGeneration;
+      set({ gcode: { ...EMPTY_GCODE, busy: true } });
+      try {
+        const program = await ipc.generateGcode(s.trace.settings, s.widthMm, {
+          machine: {
+            kind: s.machineKind,
+            bedWidth: s.bed.width,
+            bedHeight: s.bed.height,
+            maxPowerS: s.maxPowerS,
+            travelFeed: TRAVEL_FEED,
+          },
+          offset: [rect.x, rect.y],
+          operations: s.operations,
+        });
+        if (generation !== gcodeGeneration) return;
+        set({ gcode: { ...EMPTY_GCODE, program } });
+      } catch (e) {
+        if (generation !== gcodeGeneration) return;
+        set({ gcode: { ...EMPTY_GCODE, error: message(e) } });
+      }
+    },
+
+    exportGcode: async () => {
+      const { image, gcode } = get();
+      if (!image || !gcode.program) return;
+      const generation = gcodeGeneration;
+      const suggestedName = `${image.name.replace(/\.[^.]+$/, "")}.gcode`;
+      try {
+        const path = await ipc.exportGcode(suggestedName);
+        if (path && generation === gcodeGeneration) {
+          set((s) => ({ gcode: { ...s.gcode, exportedTo: path, error: null } }));
+        }
+      } catch (e) {
+        set((s) => ({ gcode: { ...s.gcode, error: message(e) } }));
       }
     },
   };

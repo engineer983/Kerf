@@ -90,6 +90,34 @@ export function Segmented<T extends string>({ label, value, options, onChange }:
   );
 }
 
+interface SelectProps<T extends string> {
+  label: string;
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+}
+
+export function Select<T extends string>({ label, value, options, onChange }: SelectProps<T>) {
+  const id = useId();
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <label htmlFor={id}>{label}</label>
+      <select
+        id={id}
+        className="w-36 rounded-md border border-line bg-raised px-2 py-1"
+        value={value}
+        onChange={(e) => onChange(e.target.value as T)}
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 interface NumberFieldProps {
   label: string;
   value: number;

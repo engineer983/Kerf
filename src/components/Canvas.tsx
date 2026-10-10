@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Upload } from "lucide-react";
-import { useProject } from "../state/project";
+import { artworkRect, useProject } from "../state/project";
 
 /** Top-left corner of the visible area in mm, and the zoom as mm per screen pixel. */
 interface View {
@@ -21,6 +21,9 @@ export function Canvas() {
   const showSource = useProject((s) => s.showSource);
   const traced = useProject((s) => s.trace.result);
   const traceMode = useProject((s) => s.trace.settings.mode);
+  const left = useProject((s) => s.left);
+  const front = useProject((s) => s.front);
+  const program = useProject((s) => s.gcode.program);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -97,7 +100,7 @@ export function Canvas() {
     if (file) void importFile(file);
   }
 
-  const placed = image && placeImage(image, widthMm, bed);
+  const placed = artworkRect({ image, widthMm, left, front, bed });
   const px = view?.mmPerPx ?? 1;
 
   return (
@@ -161,8 +164,22 @@ export function Canvas() {
               viewBox={`0 0 ${traced.width} ${traced.height}`}
               preserveAspectRatio="none"
               className={traceMode === "outline" ? "trace-mono" : undefined}
+              opacity={program ? 0.15 : 1}
               dangerouslySetInnerHTML={{ __html: traced.body }}
             />
+          )}
+          {program && (
+            <>
+              <path
+                d={program.travelPath}
+                fill="none"
+                stroke="var(--muted)"
+                strokeWidth={px}
+                strokeDasharray={`${px * 4} ${px * 4}`}
+                opacity={0.6}
+              />
+              <path d={program.cutPath} fill="none" stroke="var(--accent)" strokeWidth={px * 1.25} />
+            </>
           )}
         </svg>
       )}
@@ -189,12 +206,3 @@ export function Canvas() {
   );
 }
 
-/** Centres the artwork on the bed at its physical size. */
-function placeImage(
-  image: { width: number; height: number },
-  widthMm: number,
-  bed: { width: number; height: number },
-) {
-  const height = (widthMm * image.height) / image.width;
-  return { x: (bed.width - widthMm) / 2, y: (bed.height - height) / 2, width: widthMm, height };
-}

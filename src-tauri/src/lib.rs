@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use kerf_gcode::{Artwork, Job, Program};
 use kerf_trace::image::{self, DynamicImage};
 use kerf_trace::{TraceSettings, Traced};
 use serde::Serialize;
@@ -15,9 +16,16 @@ struct LoadedImage {
     preview: Arc<DynamicImage>,
 }
 
+/// Curves are flattened to within this distance, in millimetres, for G-code.
+const FLATTEN_TOLERANCE_MM: f64 = 0.05;
+/// Lines of G-code returned to the UI as a preview.
+const GCODE_HEAD_LINES: usize = 60;
+
 #[derive(Default)]
 struct AppState {
     image: Mutex<Option<LoadedImage>>,
+    /// Text of the most recently generated program, kept here for export.
+    gcode: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -126,6 +134,79 @@ async fn export_svg(
     .await
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Generated {
+    /// Statistics and preview paths; `text` is emptied and held in [`AppState`].
+    #[serde(flatten)]
+    program: Program,
+    /// The first lines of the program.
+    head: String,
+}
+
+/// Traces at full resolution and generates G-code for `job`.
+#[tauri::command]
+async fn generate_gcode(
+    settings: TraceSettings,
+    width_mm: f64,
+    job: Job,
+    state: State<'_, AppState>,
+) -> Result<Generated, String> {
+    if !(width_mm.is_finite() && width_mm > 0.0) {
+        return Err("The output width must be greater than zero.".into());
+    }
+    *state.gcode.lock().unwrap() = None;
+    let image = state.image(false)?;
+    let (mut program, text) = blocking(move || {
+        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm);
+        let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
+        let mut program = kerf_gcode::generate(&artwork, &job)?;
+        let text = std::mem::take(&mut program.text);
+        Ok((program, text))
+    })
+    .await?;
+    let head = text
+        .lines()
+        .take(GCODE_HEAD_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    program.text.clear();
+    *state.gcode.lock().unwrap() = Some(text);
+    Ok(Generated { program, head })
+}
+
+/// Writes the last generated program where the user chooses.
+/// Returns the saved path, or `None` if the dialog was cancelled.
+#[tauri::command]
+async fn export_gcode(
+    app: AppHandle,
+    suggested_name: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let text = state
+        .gcode
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Generate the G-code first.")?;
+    blocking(move || {
+        let Some(target) = app
+            .dialog()
+            .file()
+            .add_filter("G-code", &["gcode", "nc"])
+            .set_file_name(suggested_name)
+            .blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = target.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&path, text)
+            .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -136,7 +217,9 @@ pub fn run() {
             load_image,
             clear_image,
             trace_image,
-            export_svg
+            export_svg,
+            generate_gcode,
+            export_gcode
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");
