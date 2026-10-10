@@ -7,3 +7,5 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
+serialport = { version = "4.10.1", default-features = false }

@@ -20,5 +20,5 @@ serde.workspace = true
 serde_json.workspace = true
 kerf-trace = { path = "../crates/kerf-trace" }
 kerf-gcode = { path = "../crates/kerf-gcode" }
-kerf-grbl = { path = "../crates/kerf-grbl" }
+kerf-grbl = { version = "0.1.0", path = "../crates/kerf-grbl" }
 kerf-ai = { path = "../crates/kerf-ai" }
