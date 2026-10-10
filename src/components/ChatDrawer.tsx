@@ -10,9 +10,10 @@ const quiet = "rounded-lg border border-line px-3 py-1.5 transition-colors hover
 const iconButton = "rounded p-1 text-muted hover:text-fg";
 
 const SUGGESTIONS = [
-  "What would you change to get more detail?",
+  "Set this up to look as realistic as possible.",
+  "I want a clean, bold version of this. Set it up.",
   "This job takes too long. Make it faster.",
-  "Explain what each of my settings does.",
+  "Add a cut to free the piece when it is done.",
 ];
 
 export function ChatDrawer() {
@@ -184,10 +185,28 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
         </p>
       )}
 
+      <label className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          className="mt-0.5 accent-accent"
+          checked={a.sharePicture}
+          onChange={(e) => a.setSharePicture(e.target.checked)}
+        />
+        <span>
+          Let the assistant see the picture
+          <span className="block text-muted">
+            Sends a small copy of your picture to the provider at the start of each conversation, so
+            it can judge the subject and choose settings to suit. The model must be one that accepts
+            images.
+          </span>
+        </span>
+      </label>
+
       <p className="text-muted">
         The assistant can read and change this project's settings, and every change can be undone. It
         cannot connect to, move or start a machine. What you type, and the project's settings, are sent
-        to the provider you chose; the picture itself is not.
+        to the provider you chose
+        {a.sharePicture ? ", along with a small copy of the picture." : "; the picture itself is not."}
       </p>
 
       {onDone && (
@@ -220,7 +239,7 @@ function Conversation() {
       <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-5">
         {entries.length === 0 && (
           <div className="flex flex-col gap-3 text-muted">
-            <p>Ask about your project, or ask for a change and the assistant will make it.</p>
+            <p>Say what you want the result to be, and the assistant will set everything up for it.</p>
             {SUGGESTIONS.map((suggestion) => (
               <button
                 key={suggestion}

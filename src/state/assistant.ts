@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { runTool, SYSTEM_PROMPT, TOOLS } from "../lib/assistantTools";
 import * as ipc from "../lib/ipc";
 import { findProvider, type Protocol } from "../lib/providers";
+import { useProject } from "./project";
 
 // Version 2: an address is only remembered for providers whose address can be
 // changed. Settings saved under the first key are discarded, since they could
@@ -26,6 +27,8 @@ interface Settings {
   models: Record<string, string>;
   /** The address used for each provider, where it differs from the preset. */
   baseUrls: Record<string, string>;
+  /** Send a small copy of the picture with the first message, so the model can see it. */
+  sharePicture: boolean;
 }
 
 function loadSettings(): Settings {
@@ -33,12 +36,17 @@ function loadSettings(): Settings {
     localStorage.removeItem(OLD_SETTINGS_KEY);
     const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
     if (stored && typeof stored.providerId === "string") {
-      return { providerId: stored.providerId, models: stored.models ?? {}, baseUrls: stored.baseUrls ?? {} };
+      return {
+        providerId: stored.providerId,
+        models: stored.models ?? {},
+        baseUrls: stored.baseUrls ?? {},
+        sharePicture: stored.sharePicture === true,
+      };
     }
   } catch {
     // Unreadable; start from the defaults.
   }
-  return { providerId: "anthropic", models: {}, baseUrls: {} };
+  return { providerId: "anthropic", models: {}, baseUrls: {}, sharePicture: false };
 }
 
 interface AssistantState extends Settings {
@@ -55,6 +63,7 @@ interface AssistantState extends Settings {
   setProvider: (id: string) => void;
   setModel: (model: string) => void;
   setBaseUrl: (url: string) => void;
+  setSharePicture: (share: boolean) => void;
   saveKey: (key: string) => Promise<void>;
   removeKey: () => Promise<void>;
   loadModels: () => Promise<void>;
@@ -69,6 +78,48 @@ function message(e: unknown): string {
 
 /** A person's message, in the provider's format. Both protocols share this shape. */
 const userMessage = (text: string) => ({ role: "user", content: text });
+
+/** Longest side, in pixels, of the copy of the picture a model is shown. */
+const SHARED_PICTURE_PX = 1024;
+
+/** The project's picture as a small JPEG, base64-encoded, or null if there is none. */
+async function pictureForModel(): Promise<string | null> {
+  const { image } = useProject.getState();
+  if (!image) return null;
+  const picture = new Image();
+  picture.src = image.url;
+  await picture.decode();
+  const scale = Math.min(1, SHARED_PICTURE_PX / Math.max(picture.naturalWidth, picture.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(picture.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(picture.naturalHeight * scale));
+  const ctx = canvas.getContext("2d")!;
+  // Transparent areas become white, as they are treated everywhere else.
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(picture, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+}
+
+/** A person's message with the picture attached, in the provider's format. */
+function userMessageWithPicture(protocol: Protocol, text: string, jpeg: string) {
+  const note = `${text}\n\n(The picture in the project is attached.)`;
+  return protocol === "anthropic"
+    ? {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: jpeg } },
+          { type: "text", text: note },
+        ],
+      }
+    : {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpeg}` } },
+          { type: "text", text: note },
+        ],
+      };
+}
 
 /** The results of the model's tool calls, in the provider's format. */
 function toolResults(protocol: Protocol, results: { id: string; content: string; isError: boolean }[]): unknown[] {
@@ -91,9 +142,9 @@ function toolResults(protocol: Protocol, results: { id: string; content: string;
 
 export const useAssistant = create<AssistantState>((set, get) => {
   const persist = () => {
-    const { providerId, models, baseUrls } = get();
+    const { providerId, models, baseUrls, sharePicture } = get();
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ providerId, models, baseUrls }));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ providerId, models, baseUrls, sharePicture }));
     } catch {
       // Not persisted; the choice still applies for this session.
     }
@@ -133,6 +184,11 @@ export const useAssistant = create<AssistantState>((set, get) => {
     },
     setBaseUrl: (url) => {
       set((s) => ({ baseUrls: { ...s.baseUrls, [s.providerId]: url }, available: [] }));
+      persist();
+    },
+
+    setSharePicture: (sharePicture) => {
+      set({ sharePicture });
       persist();
     },
 
@@ -181,8 +237,20 @@ export const useAssistant = create<AssistantState>((set, get) => {
         return;
       }
 
-      const history = [...get().history, userMessage(question)];
-      set({ busy: true, activity: "Thinking…", history });
+      set({ busy: true, activity: "Thinking…" });
+      // The picture goes with the first message of a conversation only: the
+      // model keeps it in view from there, and resending it would cost more.
+      let first: unknown = userMessage(question);
+      if (get().sharePicture && get().history.length === 0) {
+        try {
+          const jpeg = await pictureForModel();
+          if (jpeg) first = userMessageWithPicture(target.protocol, question, jpeg);
+        } catch {
+          // The question is still worth asking without the picture.
+        }
+      }
+      const history = [...get().history, first];
+      set({ history });
       try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
           const turn = await ipc.assistantSend(target, get().providerId, SYSTEM_PROMPT, history, TOOLS);
@@ -221,8 +289,8 @@ export const useAssistant = create<AssistantState>((set, get) => {
         show({ kind: "notice", text: message(e) });
         // A question that got no reply at all is dropped from the history, so
         // that asking again does not send it twice.
-        const last = history.at(-1) as { role?: string; content?: unknown } | undefined;
-        if (last?.role === "user" && last.content === question) set({ history: history.slice(0, -1) });
+        const last = history.at(-1);
+        if (last === first) set({ history: history.slice(0, -1) });
       } finally {
         set({ busy: false, activity: null });
       }
