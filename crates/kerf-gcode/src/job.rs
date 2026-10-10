@@ -62,6 +62,24 @@ pub enum OperationKind {
         safe_z: f64,
         spindle_rpm: f64,
     },
+    /// Carve the image as a 3D relief: brightness sets the height of the
+    /// surface, from the stock top (Z0) down to `depth`. The bit sweeps the
+    /// area in parallel rows, kept high enough that it never cuts below the
+    /// surface anywhere under it.
+    CncRelief {
+        depth: f64,
+        depth_per_pass: f64,
+        plunge_feed: f64,
+        safe_z: f64,
+        spindle_rpm: f64,
+        tool_diameter: f64,
+        /// A ball-nose bit; otherwise a flat end mill.
+        ball_nose: bool,
+        /// Distance between rows.
+        stepover: f64,
+        /// Light areas of the image stand proud; otherwise dark areas do.
+        light_is_high: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +147,30 @@ impl Operation {
                 positive(plunge_feed, "Plunge speed")?;
                 positive(safe_z, "Safe height")?;
                 positive(spindle_rpm, "Spindle speed")?;
+            }
+            OperationKind::CncRelief {
+                depth,
+                depth_per_pass,
+                plunge_feed,
+                safe_z,
+                spindle_rpm,
+                tool_diameter,
+                stepover,
+                ..
+            } => {
+                if machine.kind != MachineKind::Cnc {
+                    return Err("CNC operations need a CNC machine profile.".into());
+                }
+                positive(depth, "Depth")?;
+                positive(depth_per_pass, "Depth per pass")?;
+                positive(plunge_feed, "Plunge speed")?;
+                positive(safe_z, "Safe height")?;
+                positive(spindle_rpm, "Spindle speed")?;
+                positive(tool_diameter, "Bit diameter")?;
+                positive(stepover, "Stepover")?;
+                if stepover > tool_diameter {
+                    return Err("The stepover cannot be larger than the bit diameter.".into());
+                }
             }
         }
         Ok(())

@@ -2,7 +2,7 @@ mod machine;
 
 use std::sync::{Arc, Mutex};
 
-use kerf_gcode::{Artwork, Job, Program};
+use kerf_gcode::{Artwork, Heightmap, Job, OperationKind, Program};
 use kerf_trace::image::{self, DynamicImage};
 use kerf_trace::{TraceSettings, Traced};
 use serde::Serialize;
@@ -20,6 +20,9 @@ struct LoadedImage {
 
 /// Curves are flattened to within this distance, in millimetres, for G-code.
 const FLATTEN_TOLERANCE_MM: f64 = 0.05;
+/// Longest side, in pixels, of the height map used for relief carving. A
+/// router bit cannot resolve more, and the carving time grows with it.
+const RELIEF_MAX_PX: u32 = 1500;
 /// Lines of G-code returned to the UI as a preview.
 const GCODE_HEAD_LINES: usize = 60;
 
@@ -146,6 +149,26 @@ struct Generated {
     head: String,
 }
 
+/// The image as heights for relief carving: white is 1.0, black is 0.0, after
+/// the trace settings' brightness, contrast and blur.
+fn heightmap(image: &DynamicImage, settings: &TraceSettings, width_mm: f64) -> Heightmap {
+    let resized;
+    let image = if image.width().max(image.height()) > RELIEF_MAX_PX {
+        resized = image.thumbnail(RELIEF_MAX_PX, RELIEF_MAX_PX);
+        &resized
+    } else {
+        image
+    };
+    let gray = kerf_trace::preprocess::grayscale(image, &settings.preprocess);
+    Heightmap {
+        width: gray.width() as usize,
+        height: gray.height() as usize,
+        data: gray.as_raw().iter().map(|&v| v as f32 / 255.0).collect(),
+        width_mm,
+        height_mm: width_mm * gray.height() as f64 / gray.width() as f64,
+    }
+}
+
 /// Traces at full resolution and generates G-code for `job`.
 #[tauri::command]
 async fn generate_gcode(
@@ -162,7 +185,12 @@ async fn generate_gcode(
     let (mut program, text) = blocking(move || {
         let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm);
         let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
-        let mut program = kerf_gcode::generate(&artwork, &job)?;
+        let carves_relief = job
+            .operations
+            .iter()
+            .any(|o| matches!(o.kind, OperationKind::CncRelief { .. }));
+        let heightmap = carves_relief.then(|| heightmap(&image, &settings, width_mm));
+        let mut program = kerf_gcode::generate_with(&artwork, heightmap.as_ref(), &job)?;
         let text = std::mem::take(&mut program.text);
         Ok((program, text))
     })

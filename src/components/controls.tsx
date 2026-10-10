@@ -101,10 +101,12 @@ export function Select<T extends string>({ label, value, options, onChange }: Se
   const id = useId();
   return (
     <div className="flex items-center justify-between gap-3">
-      <label htmlFor={id}>{label}</label>
+      <label htmlFor={id} className="whitespace-nowrap">
+        {label}
+      </label>
       <select
         id={id}
-        className="w-44 min-w-0 rounded-md border border-line bg-raised px-2 py-1"
+        className="max-w-44 min-w-0 flex-1 rounded-md border border-line bg-raised px-2 py-1"
         value={value}
         onChange={(e) => onChange(e.target.value as T)}
       >

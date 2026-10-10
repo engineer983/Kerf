@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use crate::geometry::{distance, Artwork, Polyline, Shape};
 use crate::job::{Job, Machine, Operation, OperationKind, Origin};
+use crate::relief::Heightmap;
 
 /// Seconds to wait for the spindle to reach speed before cutting.
-const SPINDLE_DWELL_S: f64 = 2.0;
+pub(crate) const SPINDLE_DWELL_S: f64 = 2.0;
 /// Slack when checking the job against the bed, for rounding in the artwork.
 const BED_SLACK_MM: f64 = 0.01;
 
@@ -38,6 +39,15 @@ pub struct Program {
 }
 
 pub fn generate(artwork: &Artwork, job: &Job) -> Result<Program, String> {
+    generate_with(artwork, None, job)
+}
+
+/// Like [`generate`], with the height map that 3D relief operations carve.
+pub fn generate_with(
+    artwork: &Artwork,
+    heightmap: Option<&Heightmap>,
+    job: &Job,
+) -> Result<Program, String> {
     if job.operations.is_empty() {
         return Err("Add at least one operation.".into());
     }
@@ -89,6 +99,11 @@ pub fn generate(artwork: &Artwork, job: &Job) -> Result<Program, String> {
             OperationKind::CncProfile { .. } => {
                 let polylines: Vec<&Polyline> = placed.iter().flatten().collect();
                 cnc_profile(&mut w, operation, &polylines);
+            }
+            OperationKind::CncRelief { .. } => {
+                let heightmap =
+                    heightmap.ok_or("A 3D relief needs an image to take heights from.")?;
+                crate::relief::carve(&mut w, operation, heightmap, job.offset)?;
             }
         }
     }
@@ -289,7 +304,7 @@ fn order_by_travel<'a>(polylines: &[&'a Polyline], from: [f64; 2]) -> Vec<&'a Po
 }
 
 /// Formats a number with up to three decimals and no trailing zeros.
-fn num(value: f64) -> String {
+pub(crate) fn num(value: f64) -> String {
     let text = format!("{value:.3}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
     if text == "-0" {
@@ -301,14 +316,14 @@ fn num(value: f64) -> String {
 
 /// Accumulates G-code text along with statistics and preview paths.
 /// Positions are in bed coordinates (Y down); output is in machine coordinates.
-struct Writer<'a> {
-    machine: &'a Machine,
+pub(crate) struct Writer<'a> {
+    pub(crate) machine: &'a Machine,
     out: String,
     position: [f64; 2],
     bounds: Option<Bounds>,
     cut_mm: f64,
     travel_mm: f64,
-    seconds: f64,
+    pub(crate) seconds: f64,
     cut_path: String,
     travel_path: String,
 }
@@ -331,7 +346,7 @@ impl<'a> Writer<'a> {
         writer
     }
 
-    fn line(&mut self, text: &str) {
+    pub(crate) fn line(&mut self, text: &str) {
         self.out.push_str(text);
         self.out.push('\n');
     }
@@ -372,7 +387,7 @@ impl<'a> Writer<'a> {
         b.max_y = b.max_y.max(y);
     }
 
-    fn travel(&mut self, to: [f64; 2], suffix: &str) {
+    pub(crate) fn travel(&mut self, to: [f64; 2], suffix: &str) {
         let length = distance(self.position, to);
         if length < 1e-9 {
             return;
@@ -385,7 +400,7 @@ impl<'a> Writer<'a> {
         self.position = to;
     }
 
-    fn cut(&mut self, to: [f64; 2], feed: f64, suffix: &str) {
+    pub(crate) fn cut(&mut self, to: [f64; 2], feed: f64, suffix: &str) {
         let [x, y] = self.machine_xy(to);
         self.line(&format!("G1 X{} Y{}{suffix}", num(x), num(y)));
         segment(&mut self.cut_path, self.position, to);

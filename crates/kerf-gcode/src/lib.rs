@@ -6,7 +6,9 @@
 pub mod generate;
 pub mod geometry;
 pub mod job;
+pub mod relief;
 
-pub use generate::{generate, Bounds, Program};
+pub use generate::{generate, generate_with, Bounds, Program};
 pub use geometry::{Artwork, Polyline, Shape};
 pub use job::{Job, Machine, MachineKind, Operation, OperationKind, Origin};
+pub use relief::Heightmap;

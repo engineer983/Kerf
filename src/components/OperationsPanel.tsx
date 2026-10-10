@@ -6,6 +6,20 @@ import { NumberField, Section, Segmented, Select } from "./controls";
 
 const ALL_SHAPES = "all";
 
+// A conservative starting point for a 1/8" ball-nose bit in wood.
+const DEFAULT_RELIEF: OperationKind = {
+  type: "cncRelief",
+  depth: 3,
+  depthPerPass: 1,
+  plungeFeed: 200,
+  safeZ: 5,
+  spindleRpm: 12000,
+  toolDiameter: 3.175,
+  ballNose: true,
+  stepover: 0.5,
+  lightIsHigh: true,
+};
+
 function formatDuration(seconds: number): string {
   const total = Math.round(seconds);
   const h = Math.floor(total / 3600);
@@ -203,6 +217,7 @@ interface OperationCardProps {
 function OperationCard({ operation, title, colors, removable }: OperationCardProps) {
   const { updateOperation, removeOperation } = useProject.getState();
   const { id, kind } = operation;
+  const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief";
   const setKind = (patch: Partial<OperationKind>) =>
     updateOperation(id, { kind: { ...kind, ...patch } as OperationKind });
 
@@ -221,7 +236,21 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         )}
       </div>
 
-      {kind.type !== "cncProfile" && (
+      {isCnc ? (
+        <Select
+          label="Type"
+          value={kind.type}
+          options={[
+            { value: "cncProfile", label: "Follow paths" },
+            { value: "cncRelief", label: "3D relief" },
+          ]}
+          onChange={(type) =>
+            updateOperation(id, {
+              kind: type === "cncRelief" ? DEFAULT_RELIEF : defaultOperation("cnc").kind,
+            })
+          }
+        />
+      ) : (
         <Select
           label="Type"
           value={kind.type}
@@ -236,7 +265,7 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           }
         />
       )}
-      {colors.length > 1 && (
+      {colors.length > 1 && kind.type !== "cncRelief" && (
         <Select
           label="Applies to"
           value={operation.color ?? ALL_SHAPES}
@@ -256,14 +285,42 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         onChange={(feed) => updateOperation(id, { feed })}
       />
 
-      {kind.type === "cncProfile" ? (
+      {isCnc ? (
         <>
+          {kind.type === "cncRelief" && (
+            <>
+              <NumberField label="Bit diameter" unit="mm" min={0.1} max={50} value={kind.toolDiameter} onChange={(toolDiameter) => setKind({ toolDiameter })} />
+              <Select
+                label="Bit shape"
+                value={kind.ballNose ? "ball" : "flat"}
+                options={[
+                  { value: "ball", label: "Ball nose" },
+                  { value: "flat", label: "Flat end" },
+                ]}
+                onChange={(shape) => setKind({ ballNose: shape === "ball" })}
+              />
+              <NumberField label="Stepover" unit="mm" min={0.02} max={50} value={kind.stepover} onChange={(stepover) => setKind({ stepover })} />
+              <Select
+                label="Raised areas"
+                value={kind.lightIsHigh ? "light" : "dark"}
+                options={[
+                  { value: "light", label: "Light parts" },
+                  { value: "dark", label: "Dark parts" },
+                ]}
+                onChange={(side) => setKind({ lightIsHigh: side === "light" })}
+              />
+            </>
+          )}
           <NumberField label="Depth" unit="mm" min={0.01} max={200} value={kind.depth} onChange={(depth) => setKind({ depth })} />
           <NumberField label="Depth per pass" unit="mm" min={0.01} max={200} value={kind.depthPerPass} onChange={(depthPerPass) => setKind({ depthPerPass })} />
           <NumberField label="Plunge speed" unit="mm/min" min={1} max={100000} value={kind.plungeFeed} onChange={(plungeFeed) => setKind({ plungeFeed })} />
           <NumberField label="Safe height" unit="mm" min={0.1} max={200} value={kind.safeZ} onChange={(safeZ) => setKind({ safeZ })} />
           <NumberField label="Spindle" unit="rpm" min={1} max={100000} value={kind.spindleRpm} onChange={(spindleRpm) => setKind({ spindleRpm })} />
-          <p className="text-muted">The bit's centre follows the path; there is no tool-width offset yet.</p>
+          <p className="text-muted">
+            {kind.type === "cncRelief"
+              ? "Brightness sets the height, from the stock top (Z0) down to Depth. Brightness, contrast and blur in Trace shape the surface. Each level is cut at the full bit width with no separate roughing bit, so keep Depth per pass modest."
+              : "The bit's centre follows the path; there is no tool-width offset yet."}
+          </p>
         </>
       ) : (
         <>

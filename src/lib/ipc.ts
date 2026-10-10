@@ -63,6 +63,19 @@ export type OperationKind =
       plungeFeed: number;
       safeZ: number;
       spindleRpm: number;
+    }
+  | {
+      /** Carves the image as a relief; brightness sets the surface height. */
+      type: "cncRelief";
+      depth: number;
+      depthPerPass: number;
+      plungeFeed: number;
+      safeZ: number;
+      spindleRpm: number;
+      toolDiameter: number;
+      ballNose: boolean;
+      stepover: number;
+      lightIsHigh: boolean;
     };
 
 export interface Operation {
