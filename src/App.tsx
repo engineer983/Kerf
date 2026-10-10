@@ -3,6 +3,7 @@ import { Rail } from "./components/Rail";
 import { Canvas } from "./components/Canvas";
 import { Inspector } from "./components/Inspector";
 import { ChatDrawer } from "./components/ChatDrawer";
+import { Toolbox } from "./components/Toolbox";
 import { useUi } from "./state/ui";
 
 export function App() {
@@ -17,6 +18,7 @@ export function App() {
         <Inspector />
         {chatOpen && <ChatDrawer />}
       </div>
+      <Toolbox />
     </div>
   );
 }

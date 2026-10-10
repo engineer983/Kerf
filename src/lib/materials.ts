@@ -11,25 +11,31 @@ export interface Material {
   engrave: Rgb;
   /** A typical sheet thickness in millimetres, used as the default. */
   thickness: number;
+  /**
+   * How the material routs on a light hobby machine, or null if it is not
+   * routed. `chipLoad` is millimetres per cutting edge per turn for a 1/8"
+   * bit; `depthFactor` is depth per pass as a fraction of bit diameter.
+   */
+  machining: { chipLoad: number; depthFactor: number } | null;
 }
 
 // Colours are for preview only; they are not cutting settings.
 export const MATERIALS: Material[] = [
-  { id: "birch-ply", label: "Birch plywood", base: [222, 196, 150], grain: "wood", engrave: [70, 42, 20], thickness: 3 },
-  { id: "basswood", label: "Basswood", base: [232, 214, 178], grain: "wood", engrave: [84, 52, 26], thickness: 3 },
-  { id: "maple", label: "Maple", base: [230, 205, 165], grain: "wood", engrave: [78, 48, 24], thickness: 19 },
-  { id: "cherry", label: "Cherry", base: [176, 112, 74], grain: "wood", engrave: [52, 28, 16], thickness: 19 },
-  { id: "walnut", label: "Walnut", base: [110, 74, 48], grain: "wood", engrave: [36, 22, 14], thickness: 19 },
-  { id: "pine", label: "Pine", base: [226, 190, 128], grain: "wood", engrave: [80, 46, 20], thickness: 19 },
-  { id: "bamboo", label: "Bamboo", base: [214, 186, 120], grain: "wood", engrave: [74, 46, 20], thickness: 5 },
-  { id: "mdf", label: "MDF", base: [188, 160, 120], grain: "speckle", engrave: [62, 40, 22], thickness: 6 },
-  { id: "cardboard", label: "Cardboard", base: [176, 142, 100], grain: "speckle", engrave: [66, 44, 26], thickness: 3 },
-  { id: "leather", label: "Leather", base: [140, 90, 50], grain: "speckle", engrave: [56, 32, 16], thickness: 2 },
-  { id: "black-acrylic", label: "Black acrylic", base: [28, 28, 30], grain: "none", engrave: [190, 190, 196], thickness: 3 },
-  { id: "white-acrylic", label: "White acrylic", base: [240, 240, 238], grain: "none", engrave: [150, 150, 150], thickness: 3 },
-  { id: "slate", label: "Slate", base: [58, 62, 66], grain: "speckle", engrave: [172, 174, 178], thickness: 6 },
-  { id: "anodized", label: "Anodised aluminium", base: [34, 36, 40], grain: "none", engrave: [226, 228, 232], thickness: 2 },
-  { id: "foam", label: "Rigid foam", base: [236, 172, 182], grain: "speckle", engrave: [150, 96, 104], thickness: 25 },
+  { id: "birch-ply", label: "Birch plywood", base: [222, 196, 150], grain: "wood", engrave: [70, 42, 20], thickness: 3, machining: { chipLoad: 0.024, depthFactor: 0.22 } },
+  { id: "basswood", label: "Basswood", base: [232, 214, 178], grain: "wood", engrave: [84, 52, 26], thickness: 3, machining: { chipLoad: 0.03, depthFactor: 0.36 } },
+  { id: "maple", label: "Maple", base: [230, 205, 165], grain: "wood", engrave: [78, 48, 24], thickness: 19, machining: { chipLoad: 0.024, depthFactor: 0.22 } },
+  { id: "cherry", label: "Cherry", base: [176, 112, 74], grain: "wood", engrave: [52, 28, 16], thickness: 19, machining: { chipLoad: 0.024, depthFactor: 0.22 } },
+  { id: "walnut", label: "Walnut", base: [110, 74, 48], grain: "wood", engrave: [36, 22, 14], thickness: 19, machining: { chipLoad: 0.024, depthFactor: 0.22 } },
+  { id: "pine", label: "Pine", base: [226, 190, 128], grain: "wood", engrave: [80, 46, 20], thickness: 19, machining: { chipLoad: 0.03, depthFactor: 0.36 } },
+  { id: "bamboo", label: "Bamboo", base: [214, 186, 120], grain: "wood", engrave: [74, 46, 20], thickness: 5, machining: { chipLoad: 0.024, depthFactor: 0.22 } },
+  { id: "mdf", label: "MDF", base: [188, 160, 120], grain: "speckle", engrave: [62, 40, 22], thickness: 6, machining: { chipLoad: 0.032, depthFactor: 0.36 } },
+  { id: "cardboard", label: "Cardboard", base: [176, 142, 100], grain: "speckle", engrave: [66, 44, 26], thickness: 3, machining: null },
+  { id: "leather", label: "Leather", base: [140, 90, 50], grain: "speckle", engrave: [56, 32, 16], thickness: 2, machining: null },
+  { id: "black-acrylic", label: "Black acrylic", base: [28, 28, 30], grain: "none", engrave: [190, 190, 196], thickness: 3, machining: { chipLoad: 0.02, depthFactor: 0.18 } },
+  { id: "white-acrylic", label: "White acrylic", base: [240, 240, 238], grain: "none", engrave: [150, 150, 150], thickness: 3, machining: { chipLoad: 0.02, depthFactor: 0.18 } },
+  { id: "slate", label: "Slate", base: [58, 62, 66], grain: "speckle", engrave: [172, 174, 178], thickness: 6, machining: null },
+  { id: "anodized", label: "Anodised aluminium", base: [34, 36, 40], grain: "none", engrave: [226, 228, 232], thickness: 2, machining: { chipLoad: 0.004, depthFactor: 0.025 } },
+  { id: "foam", label: "Rigid foam", base: [236, 172, 182], grain: "speckle", engrave: [150, 96, 104], thickness: 25, machining: { chipLoad: 0.05, depthFactor: 1 } },
 ];
 
 export const DEFAULT_MATERIAL = MATERIALS[0];
@@ -67,7 +73,7 @@ export function paintMaterial(canvas: HTMLCanvasElement, material: Material, pxP
     for (let i = 0; i < streaks; i++) {
       const y = next() * height;
       const darker = next() < 0.7;
-      ctx.strokeStyle = darker ? `rgba(60, 30, 5, ${0.03 + next() * 0.09})` : `rgba(255, 245, 220, ${0.03 + next() * 0.08})`;
+      ctx.strokeStyle = darker ? `rgba(60, 30, 5, ${0.02 + next() * 0.05})` : `rgba(255, 245, 220, ${0.02 + next() * 0.05})`;
       ctx.lineWidth = Math.max(1, (0.2 + next() * 1.4) * pxPerMm);
       const wave = (1 + next() * 3) * pxPerMm;
       const period = (60 + next() * 160) * pxPerMm;

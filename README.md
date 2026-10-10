@@ -2,7 +2,7 @@
 
 An open-source desktop app that takes an image (PNG, JPEG, WebP, BMP, GIF) to SVG, and from SVG to G-code, for laser engravers and CNC routers.
 
-> **Status: early development.** Working today: image import, outline and colour tracing with live preview, SVG export, and G-code generation (laser line, laser fill, CNC profile, and CNC 3D relief carving from image brightness) with a toolpath preview and export. There is also a GRBL sender (connect, jog, home, zero, frame, start, pause, stop, console) that has only been tested against a simulated controller. Not built yet: raster photo engraving, centerline tracing, material presets and the AI assistant. Neither the generated G-code nor the sender has been run on a real machine: start with low power or an air cut, and keep a hand on the machine's own stop.
+> **Status: early development.** Working today: image import, outline and colour tracing with live preview, SVG export, and G-code generation (laser line, fill and photo engraving; CNC profile and 3D relief carving from image brightness), a toolbox of router bits with calculated starting speeds, materials, and a playback, finished-look and 3D preview with a toolpath preview and export. There is also a GRBL sender (connect, jog, home, zero, frame, start, pause, stop, console) that has only been tested against a simulated controller. Not built yet: raster photo engraving, centerline tracing, material presets and the AI assistant. Neither the generated G-code nor the sender has been run on a real machine: start with low power or an air cut, and keep a hand on the machine's own stop.
 
 ## Goals
 

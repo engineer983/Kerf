@@ -2,12 +2,16 @@ import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
-import { DEFAULT_MATERIAL, findMaterial } from "../lib/materials";
+import { cutSettings } from "../lib/feeds";
+import { DEFAULT_MATERIAL, findMaterial, type Material } from "../lib/materials";
+import { suggestTool, type Tool } from "../lib/tools";
+import { useToolbox } from "./tools";
 import { usePlayback } from "./playback";
 import type {
   Generated,
   MachineKind,
   Operation,
+  OperationKind,
   Origin,
   Traced,
   TraceSettings,
@@ -21,6 +25,8 @@ export interface SourceImage {
   width: number;
   height: number;
   bytes: number;
+  /** Continuous-tone, like a photograph, rather than line art. */
+  photo: boolean;
 }
 
 export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
@@ -40,22 +46,75 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
 };
 
 /** An operation plus a stable key for list rendering. */
-export type OperationItem = Operation & { id: number };
+export type OperationItem = Operation & {
+  id: number;
+  /** The toolbox bit used, for router operations. Not sent to the generator. */
+  toolId?: string | null;
+};
 
 let nextOperationId = 1;
 
+export const DEFAULT_RELIEF: OperationKind = {
+  type: "cncRelief",
+  depth: 3,
+  depthPerPass: 1,
+  plungeFeed: 200,
+  safeZ: 5,
+  spindleRpm: 16000,
+  toolDiameter: 3.175,
+  ballNose: true,
+  stepover: 0.4,
+  lightIsHigh: true,
+};
+
+/** Sets an operation's bit, and the speeds that suit it in `material`. */
+export function withTool(op: OperationItem, tool: Tool, material: Material, spindleRpm: number): OperationItem {
+  const settings = cutSettings(tool, material, spindleRpm);
+  if (op.kind.type === "cncRelief") {
+    return {
+      ...op,
+      toolId: tool.id,
+      feed: settings?.feed ?? op.feed,
+      kind: {
+        ...op.kind,
+        spindleRpm,
+        toolDiameter: tool.diameter,
+        ballNose: tool.kind === "ball",
+        ...(settings && {
+          depthPerPass: settings.depthPerPass,
+          plungeFeed: settings.plungeFeed,
+          stepover: settings.stepover,
+        }),
+      },
+    };
+  }
+  if (op.kind.type === "cncProfile") {
+    return {
+      ...op,
+      toolId: tool.id,
+      feed: settings?.feed ?? op.feed,
+      kind: {
+        ...op.kind,
+        spindleRpm,
+        ...(settings && { depthPerPass: settings.depthPerPass, plungeFeed: settings.plungeFeed }),
+      },
+    };
+  }
+  return op;
+}
+
 // Conservative starting points; real values depend on the machine and material.
-export function defaultOperation(kind: MachineKind): OperationItem {
+// A photograph gets the operation that reproduces shading: image engraving on
+// a laser, a relief on a router. Line art gets a fill or a path-following cut.
+export function defaultOperation(kind: MachineKind, photo = false): OperationItem {
   const id = nextOperationId++;
-  return kind === "laser"
-    ? {
-        id,
-        color: null,
-        kind: { type: "laserFill", interval: 0.1 },
-        feed: 3000,
-        power: 50,
-        passes: 1,
-      }
+  if (kind === "laser") {
+    return photo
+      ? { id, color: null, kind: { type: "laserImage", interval: 0.15, dither: true }, feed: 3000, power: 60, passes: 1 }
+      : { id, color: null, kind: { type: "laserFill", interval: 0.1 }, feed: 3000, power: 50, passes: 1 };
+  }
+  return photo
+    ? { id, color: null, kind: DEFAULT_RELIEF, feed: 600, power: 0, passes: 1 }
     : {
         id,
         color: null,
@@ -65,7 +124,7 @@ export function defaultOperation(kind: MachineKind): OperationItem {
           depthPerPass: 0.5,
           plungeFeed: 200,
           safeZ: 5,
-          spindleRpm: 12000,
+          spindleRpm: 16000,
         },
         feed: 600,
         power: 0,
@@ -107,8 +166,16 @@ interface ProjectState {
   widthMm: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
   left: number;
-  /** Distance of the artwork's front (bottom) edge from the bed's front edge, in mm. */
+  /**
+   * Distance of the artwork from the bed edge on the machine's origin side:
+   * from the front for a front-left origin, from the back for a back-left one.
+   */
   front: number;
+  /** Size of the piece of material, which sits in the bed's origin corner. */
+  stockWidth: number;
+  stockLength: number;
+  /** Router speed in rpm, used to work out feeds. */
+  spindleRpm: number;
   showSource: boolean;
   /** The material shown in previews; it does not change the G-code. */
   materialId: string;
@@ -133,6 +200,12 @@ interface ProjectState {
   setShowSource: (show: boolean) => void;
   setMaterial: (id: string) => void;
   setThickness: (thickness: number) => void;
+  setStock: (patch: { stockWidth?: number; stockLength?: number }) => void;
+  setSpindleRpm: (spindleRpm: number) => void;
+  /** Changes what an operation does, giving it a suitable bit and speeds. */
+  setOperationType: (id: number, type: OperationKind["type"]) => void;
+  /** Changes an operation's bit and recalculates its speeds. */
+  setOperationTool: (id: number, toolId: string) => void;
   updateTrace: (patch: Partial<TraceSettings>) => void;
   updatePreprocess: (patch: Partial<TraceSettings["preprocess"]>) => void;
   exportSvg: () => Promise<void>;
@@ -167,11 +240,23 @@ function message(e: unknown): string {
 }
 
 /** Where the artwork sits on the bed, in bed coordinates (mm, Y down from the back). */
-export function artworkRect(s: Pick<ProjectState, "image" | "widthMm" | "left" | "front" | "bed">) {
+export function artworkRect(
+  s: Pick<ProjectState, "image" | "widthMm" | "left" | "front" | "bed" | "origin">,
+) {
   if (!s.image) return null;
   const height = (s.widthMm * s.image.height) / s.image.width;
-  return { x: s.left, y: s.bed.height - s.front - height, width: s.widthMm, height };
+  const y = s.origin === "backLeft" ? s.front : s.bed.height - s.front - height;
+  return { x: s.left, y, width: s.widthMm, height };
 }
+
+/** Where the piece of material sits: in the bed's origin corner. */
+export function stockRect(s: Pick<ProjectState, "stockWidth" | "stockLength" | "bed" | "origin">) {
+  const y = s.origin === "backLeft" ? 0 : s.bed.height - s.stockLength;
+  return { x: 0, y, width: s.stockWidth, height: s.stockLength };
+}
+
+/** Gap left around the artwork when the material size is set automatically, in mm. */
+const STOCK_MARGIN_MM = 10;
 
 /** Distinct fill colours in a trace, lower-cased, in first-seen order. */
 export function traceColors(traced: Traced | null): string[] {
@@ -215,6 +300,22 @@ export const useProject = create<ProjectState>((set, get) => {
     traceGeneration++;
   }
 
+  /** Gives a router operation the toolbox bit that suits it, with speeds for the material. */
+  function equip(op: OperationItem, s: ProjectState = get()): OperationItem {
+    if (op.kind.type !== "cncRelief" && op.kind.type !== "cncProfile") return op;
+    const { tools } = useToolbox.getState();
+    const rect = artworkRect(s);
+    const shortSide = rect ? Math.min(rect.width, rect.height) : 150;
+    const job = op.kind.type === "cncRelief" ? "relief" : "profile";
+    const tool = tools.find((t) => t.id === op.toolId) ?? suggestTool(job, tools, shortSide);
+    return tool ? withTool(op, tool, findMaterial(s.materialId), s.spindleRpm) : op;
+  }
+
+  /** A starting operation for the machine and the kind of image loaded. */
+  function fresh(kind: MachineKind, s: ProjectState = get()): OperationItem {
+    return equip(defaultOperation(kind, s.image?.photo ?? false), s);
+  }
+
   /** Drops any generated G-code; call when one of its inputs changes. */
   function staleGcode(): { gcode: GcodeState } {
     gcodeGeneration++;
@@ -232,8 +333,11 @@ export const useProject = create<ProjectState>((set, get) => {
     startGcode: "",
     endGcode: "",
     widthMm: 100,
-    left: 0,
-    front: 0,
+    left: STOCK_MARGIN_MM,
+    front: STOCK_MARGIN_MM,
+    stockWidth: 300,
+    stockLength: 200,
+    spindleRpm: 16000,
     showSource: true,
     materialId: DEFAULT_MATERIAL.id,
     thickness: DEFAULT_MATERIAL.thickness,
@@ -264,16 +368,23 @@ export const useProject = create<ProjectState>((set, get) => {
         const previous = get().image;
         if (previous) URL.revokeObjectURL(previous.url);
 
-        // Start centred at half the bed, whichever side is the tighter fit.
-        const { bed, trace } = get();
+        // Start at half the bed, whichever side is the tighter fit, on a piece
+        // of material just larger than the artwork in the origin corner.
+        const { bed, trace, machineKind } = get();
         const scale = Math.min((bed.width * 0.5) / image.width, (bed.height * 0.5) / image.height);
         const widthMm = Math.round(image.width * scale);
         const heightMm = (widthMm * image.height) / image.width;
-        set({
+        const placed = {
           image,
           widthMm,
-          left: Math.round((bed.width - widthMm) / 2),
-          front: Math.round((bed.height - heightMm) / 2),
+          left: STOCK_MARGIN_MM,
+          front: STOCK_MARGIN_MM,
+          stockWidth: widthMm + STOCK_MARGIN_MM * 2,
+          stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
+        };
+        set({
+          ...placed,
+          operations: [fresh(machineKind, { ...get(), ...placed })],
           error: null,
           exportedTo: null,
           trace: { ...EMPTY_TRACE, settings: trace.settings },
@@ -312,7 +423,7 @@ export const useProject = create<ProjectState>((set, get) => {
       set({
         machineKind,
         machinePreset: CUSTOM_PRESET,
-        operations: [defaultOperation(machineKind)],
+        operations: [fresh(machineKind)],
         ...staleGcode(),
       }),
     setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
@@ -332,13 +443,54 @@ export const useProject = create<ProjectState>((set, get) => {
         endGcode: preset.endGcode,
         machineKind: preset.kind,
         // Operations are specific to the machine type; keep them when it is unchanged.
-        operations: s.machineKind === preset.kind ? s.operations : [defaultOperation(preset.kind)],
+        operations: s.machineKind === preset.kind ? s.operations : [fresh(preset.kind, s)],
         ...staleGcode(),
       }));
     },
     setShowSource: (showSource) => set({ showSource }),
-    setMaterial: (materialId) => set({ materialId, thickness: findMaterial(materialId).thickness }),
+    setMaterial: (materialId) =>
+      set((s) => {
+        const next = { ...s, materialId };
+        // Speeds depend on the material, so router operations are recalculated.
+        return {
+          materialId,
+          thickness: findMaterial(materialId).thickness,
+          operations: s.operations.map((op) => equip(op, next)),
+          ...staleGcode(),
+        };
+      }),
     setThickness: (thickness) => set({ thickness }),
+    setStock: (patch) => set(patch),
+    setSpindleRpm: (spindleRpm) =>
+      set((s) => ({
+        spindleRpm,
+        operations: s.operations.map((op) => equip(op, { ...s, spindleRpm })),
+        ...staleGcode(),
+      })),
+    setOperationType: (id, type) =>
+      set((s) => ({
+        operations: s.operations.map((op) => {
+          if (op.id !== id) return op;
+          const kind: OperationKind =
+            type === "cncRelief"
+              ? DEFAULT_RELIEF
+              : type === "cncProfile"
+                ? defaultOperation("cnc").kind
+                : type === "laserImage"
+                  ? { type, interval: 0.15, dither: true }
+                  : type === "laserFill"
+                    ? { type, interval: 0.1 }
+                    : { type: "laserCut" };
+          // The old bit may not suit the new job, so a fresh one is suggested.
+          return equip({ ...op, kind, toolId: null }, s);
+        }),
+        ...staleGcode(),
+      })),
+    setOperationTool: (id, toolId) =>
+      set((s) => ({
+        operations: s.operations.map((op) => (op.id === id ? equip({ ...op, toolId }, s) : op)),
+        ...staleGcode(),
+      })),
 
     updateTrace: (patch) => {
       set((s) => ({
@@ -367,7 +519,7 @@ export const useProject = create<ProjectState>((set, get) => {
 
     addOperation: () =>
       set((s) => ({
-        operations: [...s.operations, defaultOperation(s.machineKind)],
+        operations: [...s.operations, fresh(s.machineKind, s)],
         ...staleGcode(),
       })),
 

@@ -3,7 +3,8 @@ import { Upload } from "lucide-react";
 import { findMaterial, paintMaterial } from "../lib/materials";
 import { Simulation } from "../lib/simulation";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
-import { artworkRect, useProject } from "../state/project";
+import { artworkRect, stockRect, useProject } from "../state/project";
+import { useToolbox } from "../state/tools";
 import { PlaybackBar } from "./PlaybackBar";
 import { View3D } from "./View3D";
 
@@ -17,10 +18,8 @@ interface View {
 const MARGIN_MM = 30;
 const MIN_MM_PER_PX = 0.01;
 const MAX_MM_PER_PX = 5;
-/** How far the piece of material extends beyond the artwork on each side, in mm. */
-const STOCK_MARGIN_MM = 10;
-/** Bit assumed for path-following router jobs, which do not ask for one. */
-const DEFAULT_BIT = { diameter: 3.175, ballNose: false };
+/** Bit assumed for router jobs whose operation has none chosen. */
+const DEFAULT_BIT = { diameter: 3.175, kind: "flat" as const, angle: null };
 
 export function Canvas() {
   const bed = useProject((s) => s.bed);
@@ -37,6 +36,10 @@ export function Canvas() {
   const thickness = useProject((s) => s.thickness);
   const machineKind = useProject((s) => s.machineKind);
   const operations = useProject((s) => s.operations);
+  const origin = useProject((s) => s.origin);
+  const stockWidth = useProject((s) => s.stockWidth);
+  const stockLength = useProject((s) => s.stockLength);
+  const tools = useToolbox((s) => s.tools);
   const mode = usePlayback((s) => s.mode);
   const playing = usePlayback((s) => s.playing);
   const progress = usePlayback((s) => s.progress);
@@ -119,18 +122,12 @@ export function Canvas() {
     if (file) void importFile(file);
   }
 
-  const placed = artworkRect({ image, widthMm, left, front, bed });
+  const placed = artworkRect({ image, widthMm, left, front, bed, origin });
   const px = view?.mmPerPx ?? 1;
 
   const material = findMaterial(materialId);
-  const [sx, sy, sw, sh] = placed
-    ? [
-        placed.x - STOCK_MARGIN_MM,
-        placed.y - STOCK_MARGIN_MM,
-        placed.width + STOCK_MARGIN_MM * 2,
-        placed.height + STOCK_MARGIN_MM * 2,
-      ]
-    : [0, 0, 0, 0];
+  const stock = stockRect({ stockWidth, stockLength, bed, origin });
+  const [sx, sy, sw, sh] = image ? [stock.x, stock.y, stock.width, stock.height] : [0, 0, 0, 0];
 
   // The bare material, as an image for the 2D view.
   const materialUrl = useMemo(() => {
@@ -143,9 +140,21 @@ export function Canvas() {
     return canvas.toDataURL();
   }, [material, sw, sh]);
 
-  const relief = operations.find((o) => o.kind.type === "cncRelief")?.kind;
-  const bitDiameter = relief?.type === "cncRelief" ? relief.toolDiameter : DEFAULT_BIT.diameter;
-  const bitIsBall = relief?.type === "cncRelief" ? relief.ballNose : DEFAULT_BIT.ballNose;
+  // The preview carves with one bit: the first router operation's.
+  const routing = operations.find((o) => o.kind.type === "cncRelief" || o.kind.type === "cncProfile");
+  const chosen = tools.find((t) => t.id === routing?.toolId);
+  const bit =
+    chosen ??
+    (routing?.kind.type === "cncRelief"
+      ? {
+          diameter: routing.kind.toolDiameter,
+          kind: routing.kind.ballNose ? ("ball" as const) : ("flat" as const),
+          angle: null,
+        }
+      : DEFAULT_BIT);
+  const [bitDiameter, bitKind, bitAngle] = [bit.diameter, bit.kind, bit.angle];
+  const engraving = operations.find((o) => o.kind.type === "laserImage")?.kind;
+  const imageInterval = engraving?.type === "laserImage" ? engraving.interval : undefined;
   const simulation = useMemo(() => {
     if (!program || sw <= 0 || sh <= 0) return null;
     return new Simulation({
@@ -154,9 +163,13 @@ export function Canvas() {
       thickness,
       material,
       kind: machineKind,
-      tool: { diameter: bitDiameter, ballNose: bitIsBall },
+      tool: { diameter: bitDiameter, kind: bitKind, angle: bitAngle },
+      imageInterval,
     });
-  }, [program, sx, sy, sw, sh, thickness, material, machineKind, bitDiameter, bitIsBall]);
+    // The operations' settings are read as they were when the program was made:
+    // any change to them clears the program, so they cannot be out of step.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [program, sx, sy, sw, sh, thickness, material, machineKind]);
 
   // Tool position for the 2D marker, refreshed whenever the playback point moves.
   const [head, setHead] = useState<{ x: number; y: number; cutting: boolean } | null>(null);

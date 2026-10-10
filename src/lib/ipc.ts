@@ -56,6 +56,8 @@ export interface Machine {
 export type OperationKind =
   | { type: "laserCut" }
   | { type: "laserFill"; interval: number }
+  /** Engraves the picture itself; `dither` turns shades into full-power dots. */
+  | { type: "laserImage"; interval: number; dither: boolean }
   | {
       type: "cncProfile";
       depth: number;
@@ -188,6 +190,11 @@ export function machineAction(action: MachineAction): Promise<void> {
 
 export function onMachineEvent(handler: (event: MachineEvent) => void): Promise<() => void> {
   return listen<MachineEvent>("machine", (e) => handler(e.payload));
+}
+
+/** Downloads a web page and returns its visible text. */
+export function fetchPageText(url: string): Promise<{ title: string; text: string }> {
+  return invoke("fetch_page_text", { url });
 }
 
 /** Returns null when the UI runs in a plain browser (`pnpm dev`) with no Rust backend. */

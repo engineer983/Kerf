@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Monitor, Moon, Sun } from "lucide-react";
+import { MessageSquare, Monitor, Moon, Sun, Wrench } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
 import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
+import { useToolbox } from "../state/tools";
 import { useUi, type ThemeChoice } from "../state/ui";
 
 const THEMES: { value: ThemeChoice; label: string; icon: typeof Sun }[] = [
@@ -40,6 +41,13 @@ export function TitleBar() {
             Stop machine
           </button>
         )}
+        <button
+          onClick={() => useToolbox.getState().setOpen(true)}
+          className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:text-fg"
+        >
+          <Wrench size={14} />
+          Toolbox
+        </button>
         <div className="flex rounded-md border border-line p-0.5" role="radiogroup" aria-label="Theme">
           {THEMES.map(({ value, label, icon: Icon }) => (
             <button

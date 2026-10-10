@@ -1,5 +1,6 @@
 import type { MachineKind } from "./ipc";
 import { css, paintMaterial, type Material } from "./materials";
+import type { ToolKind } from "./tools";
 
 export interface Rect {
   x: number;
@@ -17,15 +18,21 @@ export interface SimulationSetup {
   material: Material;
   kind: MachineKind;
   /** The router bit; ignored for lasers. */
-  tool: { diameter: number; ballNose: boolean };
+  tool: { diameter: number; kind: ToolKind; angle: number | null };
+  /**
+   * Line spacing of an image engraving, in mm. Its rows are then drawn exactly
+   * that wide with square ends, so dots neither overlap nor leave gaps and the
+   * picture keeps its tones.
+   */
+  imageInterval?: number;
 }
 
 /** Width of a laser mark in millimetres. */
 const LASER_LINE_MM = 0.14;
-const MAX_CANVAS_PX = 2048;
-const MAX_PX_PER_MM = 8;
+const MAX_CANVAS_PX = 4096;
+const MAX_PX_PER_MM = 12;
 /** Cells along the longer side of the height grid used for router jobs. */
-const GRID_CELLS = 512;
+const GRID_CELLS = 768;
 
 /**
  * Replays a job onto a piece of material. For a laser it draws the marks; for
@@ -53,14 +60,13 @@ export class Simulation {
   /** Distance travelled by the end of each move. */
   private readonly travelled: Float64Array;
   private readonly basePixels: Uint8ClampedArray | null = null;
-  private readonly stamp: { dx: number; dy: number; lift: number }[] = [];
   private readonly deepest: number;
   /** Segments already drawn or cut. */
   private applied = 0;
 
   constructor(setup: SimulationSetup) {
     this.setup = setup;
-    const { moves, stock, material, kind, tool } = setup;
+    const { moves, stock, material, kind } = setup;
     this.segments = Math.max(0, moves.length / 4 - 1);
 
     this.travelled = new Float64Array(this.segments + 1);
@@ -81,17 +87,6 @@ export class Simulation {
       this.gridHeight = Math.max(2, Math.round(stock.height * this.pxPerMm));
       this.heights = new Float32Array(this.gridWidth * this.gridHeight);
 
-      // The bit's footprint in grid cells, with how far above the tip each part is.
-      const radius = tool.diameter / 2;
-      const reach = Math.ceil(radius * this.pxPerMm);
-      for (let dy = -reach; dy <= reach; dy++) {
-        for (let dx = -reach; dx <= reach; dx++) {
-          const r = Math.hypot(dx, dy) / this.pxPerMm;
-          if (r > radius) continue;
-          const lift = tool.ballNose ? radius - Math.sqrt(radius * radius - r * r) : 0;
-          this.stamp.push({ dx, dy, lift });
-        }
-      }
       this.canvas.width = this.base.width = this.gridWidth;
       this.canvas.height = this.base.height = this.gridHeight;
     } else {
@@ -162,12 +157,12 @@ export class Simulation {
 
   /** Draws the laser marks of segments `from` up to `to`. */
   private burn(from: number, to: number) {
-    const { moves, stock, material } = this.setup;
+    const { moves, stock, material, imageInterval } = this.setup;
     const ctx = this.canvas.getContext("2d")!;
     const scale = this.pxPerMm;
-    ctx.lineCap = "round";
+    ctx.lineCap = imageInterval ? "butt" : "round";
     ctx.lineJoin = "round";
-    ctx.lineWidth = Math.max(1, LASER_LINE_MM * scale);
+    ctx.lineWidth = imageInterval ? imageInterval * scale : Math.max(1, LASER_LINE_MM * scale);
     ctx.strokeStyle = css(material.engrave);
 
     // Consecutive marks at one power are drawn as one stroke, so that a
@@ -202,10 +197,20 @@ export class Simulation {
 
   /** Removes the material swept by the bit over segments `from` up to `to`. */
   private carve(from: number, to: number) {
-    const { moves, stock } = this.setup;
+    const { moves, stock, tool } = this.setup;
     const heights = this.heights!;
     const scale = this.pxPerMm;
     const [w, h] = [this.gridWidth, this.gridHeight];
+    const radius = tool.diameter / 2;
+    const reach = radius * scale;
+    // How far above its tip the bit's surface is, at a distance from its axis.
+    const slope = tool.kind === "vbit" ? 1 / Math.tan((((tool.angle ?? 90) / 2) * Math.PI) / 180) : 0;
+    const lift = (r: number) =>
+      tool.kind === "ball"
+        ? radius - Math.sqrt(Math.max(0, radius * radius - r * r))
+        : tool.kind === "vbit"
+          ? r * slope
+          : 0;
 
     for (let i = from; i < to; i++) {
       const a = i * 4;
@@ -214,19 +219,27 @@ export class Simulation {
       const [ax, ay, az] = [(moves[a] - stock.x) * scale, (moves[a + 1] - stock.y) * scale, moves[a + 2]];
       const [bx, by, bz] = [(moves[b] - stock.x) * scale, (moves[b + 1] - stock.y) * scale, moves[b + 2]];
       if (az >= 0 && bz >= 0) continue;
-      // Half a cell per step, so the bit's path leaves no gaps.
-      const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) * 2));
+      // One cell per step, so the bit's path leaves no gaps.
+      const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay)));
       for (let s = 0; s <= steps; s++) {
         const t = s / steps;
-        const cx = Math.round(ax + (bx - ax) * t);
-        const cy = Math.round(ay + (by - ay) * t);
+        // Distances are measured from the bit's true position, not the nearest
+        // cell, so rows of a carving do not show up as false ridges.
+        const cx = ax + (bx - ax) * t;
+        const cy = ay + (by - ay) * t;
         const z = az + (bz - az) * t;
-        for (const { dx, dy, lift } of this.stamp) {
-          const x = cx + dx;
-          const y = cy + dy;
-          if (x < 0 || y < 0 || x >= w || y >= h) continue;
-          const index = y * w + x;
-          if (z + lift < heights[index]) heights[index] = z + lift;
+        const x0 = Math.max(0, Math.ceil(cx - reach));
+        const x1 = Math.min(w - 1, Math.floor(cx + reach));
+        const y0 = Math.max(0, Math.ceil(cy - reach));
+        const y1 = Math.min(h - 1, Math.floor(cy + reach));
+        for (let y = y0; y <= y1; y++) {
+          for (let x = x0; x <= x1; x++) {
+            const r = Math.hypot(x - cx, y - cy) / scale;
+            if (r > radius) continue;
+            const bottom = z + lift(r);
+            const index = y * w + x;
+            if (bottom < heights[index]) heights[index] = bottom;
+          }
         }
       }
     }
@@ -242,8 +255,10 @@ export class Simulation {
     const image = ctx.createImageData(w, h);
     const out = image.data;
     const depthScale = this.deepest < 0 ? 1 / -this.deepest : 0;
-    const slope = this.pxPerMm * 0.9;
+    const perMm = this.pxPerMm;
     const { thickness } = this.setup;
+    // Light from the upper left, fairly low, as from a window or a desk lamp.
+    const [lx, ly, lz] = [-0.48, -0.56, 0.68];
 
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -256,11 +271,15 @@ export class Simulation {
           out[o] = out[o + 1] = out[o + 2] = 24;
           continue;
         }
-        const left = heights[index - (x > 0 ? 1 : 0)];
-        const up = heights[index - (y > 0 ? w : 0)];
-        // Surfaces that face the light (rising towards the lower right) are brighter.
-        const light = Math.min(1.3, Math.max(0.5, 1 + ((z - left) + (z - up)) * slope * 0.35));
-        const shade = light * (1 - 0.3 * Math.min(1, -z * depthScale));
+        // The surface normal, from the slope across the neighbouring cells.
+        const dzdx = ((heights[index + (x < w - 1 ? 1 : 0)] - heights[index - (x > 0 ? 1 : 0)]) * perMm) / 2;
+        const dzdy = ((heights[index + (y < h - 1 ? w : 0)] - heights[index - (y > 0 ? w : 0)]) * perMm) / 2;
+        const length = Math.sqrt(dzdx * dzdx + dzdy * dzdy + 1);
+        // Diffuse light, scaled so that a flat surface keeps the material's own colour.
+        const diffuse = Math.max(0, (-dzdx * lx - dzdy * ly + lz) / length) / lz;
+        const light = 0.3 + 0.7 * Math.min(1.5, diffuse);
+        // Deep areas catch less light from the sky, so they sit a little darker.
+        const shade = light * (1 - 0.22 * Math.min(1, -z * depthScale));
         out[o] = base[o] * shade;
         out[o + 1] = base[o + 1] * shade;
         out[o + 2] = base[o + 2] * shade;

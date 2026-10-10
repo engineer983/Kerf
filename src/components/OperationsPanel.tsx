@@ -1,25 +1,13 @@
 import { X } from "lucide-react";
 import { isTauri, type OperationKind } from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
-import { MATERIALS } from "../lib/materials";
-import { defaultOperation, traceColors, useProject, type OperationItem } from "../state/project";
+import { findMaterial, MATERIALS } from "../lib/materials";
+import { TOOL_KIND_LABELS } from "../lib/tools";
+import { artworkRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
+import { useToolbox } from "../state/tools";
 import { NumberField, Section, Segmented, Select } from "./controls";
 
 const ALL_SHAPES = "all";
-
-// A conservative starting point for a 1/8" ball-nose bit in wood.
-const DEFAULT_RELIEF: OperationKind = {
-  type: "cncRelief",
-  depth: 3,
-  depthPerPass: 1,
-  plungeFeed: 200,
-  safeZ: 5,
-  spindleRpm: 12000,
-  toolDiameter: 3.175,
-  ballNose: true,
-  stepover: 0.5,
-  lightIsHigh: true,
-};
 
 function formatDuration(seconds: number): string {
   const total = Math.round(seconds);
@@ -45,6 +33,10 @@ export function OperationsPanel() {
   const endGcode = useProject((s) => s.endGcode);
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
+  const widthMm = useProject((s) => s.widthMm);
+  const stockWidth = useProject((s) => s.stockWidth);
+  const stockLength = useProject((s) => s.stockLength);
+  const spindleRpm = useProject((s) => s.spindleRpm);
   const operations = useProject((s) => s.operations);
   const traced = useProject((s) => s.trace.result);
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
@@ -57,6 +49,14 @@ export function OperationsPanel() {
 
   const colors = traceColors(traced);
   const presetNote = MACHINE_PRESETS.find((p) => p.id === machinePreset)?.note;
+  const art = artworkRect({ image, widthMm, left, front, bed, origin });
+  const stock = stockRect({ stockWidth, stockLength, bed, origin });
+  const overhangs =
+    art !== null &&
+    (art.x < stock.x - 0.01 ||
+      art.y < stock.y - 0.01 ||
+      art.x + art.width > stock.x + stock.width + 0.01 ||
+      art.y + art.height > stock.y + stock.height + 0.01);
 
   return (
     <div className="flex flex-col gap-5">
@@ -125,6 +125,16 @@ export function OperationsPanel() {
             onChange={actions.setMaxPowerS}
           />
         )}
+        {machineKind === "cnc" && (
+          <NumberField
+            label="Router speed"
+            unit="rpm"
+            min={1000}
+            max={60000}
+            value={spindleRpm}
+            onChange={actions.setSpindleRpm}
+          />
+        )}
       </Section>
 
       <Section title="Material">
@@ -142,8 +152,32 @@ export function OperationsPanel() {
           value={thickness}
           onChange={actions.setThickness}
         />
+        <NumberField
+          label="Width"
+          unit="mm"
+          min={1}
+          max={5000}
+          value={stockWidth}
+          onChange={(value) => actions.setStock({ stockWidth: value })}
+        />
+        <NumberField
+          label="Length"
+          unit="mm"
+          min={1}
+          max={5000}
+          value={stockLength}
+          onChange={(value) => actions.setStock({ stockLength: value })}
+        />
+        {overhangs && (
+          <p role="alert" className="text-accent">
+            The artwork reaches past the edge of the material.
+          </p>
+        )}
         <p className="text-muted">
-          For the preview only. Speed, power and depth are not set from the material.
+          The material sits in the {origin === "backLeft" ? "back" : "front"}-left corner of the bed.
+          {machineKind === "cnc"
+            ? " Router speeds are worked out from the material and the bit."
+            : " Laser speed and power are yours to set; the material only changes the preview."}
         </p>
       </Section>
 
@@ -157,7 +191,7 @@ export function OperationsPanel() {
           onChange={(value) => actions.setPosition({ left: value })}
         />
         <NumberField
-          label="From front"
+          label={origin === "backLeft" ? "From back" : "From front"}
           unit="mm"
           min={-5000}
           max={5000}
@@ -238,11 +272,19 @@ interface OperationCardProps {
 }
 
 function OperationCard({ operation, title, colors, removable }: OperationCardProps) {
-  const { updateOperation, removeOperation } = useProject.getState();
+  const { updateOperation, removeOperation, setOperationType, setOperationTool } =
+    useProject.getState();
+  const tools = useToolbox((s) => s.tools);
+  const openToolbox = useToolbox((s) => s.setOpen);
+  const material = useProject((s) => findMaterial(s.materialId));
   const { id, kind } = operation;
   const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief";
   const setKind = (patch: Partial<OperationKind>) =>
     updateOperation(id, { kind: { ...kind, ...patch } as OperationKind });
+
+  // A relief is generated for flat and ball-nose bits only.
+  const usable = kind.type === "cncRelief" ? tools.filter((t) => t.kind !== "vbit") : tools;
+  const tool = tools.find((t) => t.id === operation.toolId);
 
   return (
     <section className="flex flex-col gap-3 rounded-xl border border-line p-4">
@@ -267,28 +309,47 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
             { value: "cncProfile", label: "Follow paths" },
             { value: "cncRelief", label: "3D relief" },
           ]}
-          onChange={(type) =>
-            updateOperation(id, {
-              kind: type === "cncRelief" ? DEFAULT_RELIEF : defaultOperation("cnc").kind,
-            })
-          }
+          onChange={(type) => setOperationType(id, type)}
         />
       ) : (
         <Select
           label="Type"
           value={kind.type}
           options={[
+            { value: "laserImage", label: "Image (photo)" },
             { value: "laserFill", label: "Fill (engrave)" },
             { value: "laserCut", label: "Line (cut)" },
           ]}
-          onChange={(type) =>
-            updateOperation(id, {
-              kind: type === "laserFill" ? defaultOperation("laser").kind : { type: "laserCut" },
-            })
-          }
+          onChange={(type) => setOperationType(id, type)}
         />
       )}
-      {colors.length > 1 && kind.type !== "cncRelief" && (
+
+      {isCnc && (
+        <>
+          <Select
+            label="Bit"
+            value={operation.toolId ?? ""}
+            options={[
+              ...(tool ? [] : [{ value: "", label: "Choose a bit" }]),
+              ...usable.map((t) => ({ value: t.id, label: t.name })),
+            ]}
+            onChange={(toolId) => toolId && setOperationTool(id, toolId)}
+          />
+          <p className="text-muted">
+            {tool
+              ? `${TOOL_KIND_LABELS[tool.kind]}, ${tool.diameter} mm, ${tool.flutes} flute${tool.flutes === 1 ? "" : "s"}. `
+              : ""}
+            {material.machining
+              ? `The speeds below were worked out for this bit in ${material.label.toLowerCase()}. They are starting points: try them on scrap.`
+              : `${material.label} is not a routing material, so the speeds below were not calculated.`}{" "}
+            <button className="text-accent hover:underline" onClick={() => openToolbox(true)}>
+              Open toolbox
+            </button>
+          </p>
+        </>
+      )}
+
+      {colors.length > 1 && kind.type !== "cncRelief" && kind.type !== "laserImage" && (
         <Select
           label="Applies to"
           value={operation.color ?? ALL_SHAPES}
@@ -308,20 +369,10 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         onChange={(feed) => updateOperation(id, { feed })}
       />
 
-      {isCnc ? (
+      {kind.type === "cncProfile" || kind.type === "cncRelief" ? (
         <>
           {kind.type === "cncRelief" && (
             <>
-              <NumberField label="Bit diameter" unit="mm" min={0.1} max={50} value={kind.toolDiameter} onChange={(toolDiameter) => setKind({ toolDiameter })} />
-              <Select
-                label="Bit shape"
-                value={kind.ballNose ? "ball" : "flat"}
-                options={[
-                  { value: "ball", label: "Ball nose" },
-                  { value: "flat", label: "Flat end" },
-                ]}
-                onChange={(shape) => setKind({ ballNose: shape === "ball" })}
-              />
               <NumberField label="Stepover" unit="mm" min={0.02} max={50} value={kind.stepover} onChange={(stepover) => setKind({ stepover })} />
               <Select
                 label="Raised areas"
@@ -338,10 +389,14 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           <NumberField label="Depth per pass" unit="mm" min={0.01} max={200} value={kind.depthPerPass} onChange={(depthPerPass) => setKind({ depthPerPass })} />
           <NumberField label="Plunge speed" unit="mm/min" min={1} max={100000} value={kind.plungeFeed} onChange={(plungeFeed) => setKind({ plungeFeed })} />
           <NumberField label="Safe height" unit="mm" min={0.1} max={200} value={kind.safeZ} onChange={(safeZ) => setKind({ safeZ })} />
-          <NumberField label="Spindle" unit="rpm" min={1} max={100000} value={kind.spindleRpm} onChange={(spindleRpm) => setKind({ spindleRpm })} />
+          {tool && kind.depth > tool.cutLength && (
+            <p role="alert" className="text-accent">
+              Depth is more than this bit's {tool.cutLength} mm cutting length.
+            </p>
+          )}
           <p className="text-muted">
             {kind.type === "cncRelief"
-              ? "Brightness sets the height, from the stock top (Z0) down to Depth. Brightness, contrast and blur in Trace shape the surface. Each level is cut at the full bit width with no separate roughing bit, so keep Depth per pass modest."
+              ? "Brightness sets the height, from the material's top (Z0) down to Depth. A photograph's brightness is not its shape, so a photo carves as a rough impression; a depth map or greyscale artwork made for carving gives a true relief. Blur in Trace smooths the surface."
               : "The bit's centre follows the path; there is no tool-width offset yet."}
           </p>
         </>
@@ -349,8 +404,25 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         <>
           <NumberField label="Power" unit="%" min={0} max={100} value={operation.power} onChange={(power) => updateOperation(id, { power })} />
           <NumberField label="Passes" min={1} max={100} value={operation.passes} onChange={(passes) => updateOperation(id, { passes: Math.round(passes) })} />
-          {kind.type === "laserFill" && (
+          {(kind.type === "laserFill" || kind.type === "laserImage") && (
             <NumberField label="Line interval" unit="mm" min={0.02} max={10} value={kind.interval} onChange={(interval) => setKind({ interval })} />
+          )}
+          {kind.type === "laserImage" && (
+            <>
+              <Select
+                label="Shading"
+                value={kind.dither ? "dither" : "grey"}
+                options={[
+                  { value: "dither", label: "Dots (dithered)" },
+                  { value: "grey", label: "Varying power" },
+                ]}
+                onChange={(mode) => setKind({ dither: mode === "dither" })}
+              />
+              <p className="text-muted">
+                Engraves the picture itself, so photographs keep their shading. Brightness and
+                contrast in Trace adjust it. Dots suit wood, which does not darken evenly with power.
+              </p>
+            </>
           )}
         </>
       )}

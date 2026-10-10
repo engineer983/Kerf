@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { Simulation } from "../lib/simulation";
 
 /** Vertices along the longer side of the carved surface. */
-const SURFACE_VERTICES = 320;
+const SURFACE_VERTICES = 512;
 const TOOL_LENGTH_MM = 30;
 
 interface Scene3D {
@@ -74,16 +74,28 @@ function build(container: HTMLDivElement, sim: Simulation, bed: { width: number;
   const radius = kind === "cnc" ? tool.diameter / 2 : 0.35;
   const toolGeometry = new THREE.CylinderGeometry(radius, radius, TOOL_LENGTH_MM, 24);
   // Put the cylinder's bottom at the tool position.
-  toolGeometry.translate(0, TOOL_LENGTH_MM / 2 + (kind === "cnc" && tool.ballNose ? radius : 0), 0);
+  const tipHeight =
+    kind !== "cnc" || tool.kind === "flat"
+      ? 0
+      : tool.kind === "ball"
+        ? radius
+        : radius / Math.tan((((tool.angle ?? 90) / 2) * Math.PI) / 180);
+  toolGeometry.translate(0, TOOL_LENGTH_MM / 2 + tipHeight, 0);
   const toolMaterial =
     kind === "cnc"
       ? new THREE.MeshStandardMaterial({ color: 0xb8bcc4, metalness: 0.7, roughness: 0.35 })
       : new THREE.MeshBasicMaterial({ color: 0xff3b2f, transparent: true, opacity: 0.75 });
   const toolMesh = new THREE.Group();
   toolMesh.add(new THREE.Mesh(toolGeometry, toolMaterial));
-  if (kind === "cnc" && tool.ballNose) {
+  if (kind === "cnc" && tool.kind === "ball") {
     const tip = new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), toolMaterial);
     tip.position.y = radius;
+    toolMesh.add(tip);
+  } else if (kind === "cnc" && tool.kind === "vbit") {
+    // A cone with its point at the tool position.
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(radius, tipHeight, 24), toolMaterial);
+    tip.rotation.x = Math.PI;
+    tip.position.y = tipHeight / 2;
     toolMesh.add(tip);
   }
   scene.add(toolMesh);
