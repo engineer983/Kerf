@@ -13,6 +13,8 @@ export interface MachinePreset {
   endGcode: string;
   /** Shown under the preset; say what is unverified or unusual. */
   note?: string;
+  /** True when Kerf must not connect to the machine, only write G-code files for it. */
+  exportOnly?: boolean;
 }
 
 export const CUSTOM_PRESET = "custom";
@@ -42,6 +44,7 @@ export const MACHINE_PRESETS: MachinePreset[] = [
     origin: "backLeft",
     startGcode: "M14S1\nM15S1\nM16",
     endGcode: "M6",
-    note: "Untested on the machine. Kerf does not set the focus height, so focus the laser first. The Y direction is inferred: check it with a small, low-power, asymmetric test and keep the lid closed.",
+    exportOnly: true,
+    note: "Export only. Untested on the machine. Kerf does not set the focus height, so focus the laser first. The Y direction is inferred: check it with a small, low-power, asymmetric test and keep the lid closed.",
   },
 ];

@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { ACCEPTED_IMAGE_TYPES, formatBytes } from "../lib/image";
 import { useProject, type Step } from "../state/project";
+import { MachinePanel } from "./MachinePanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { TracePanel } from "./TracePanel";
 
@@ -11,8 +12,6 @@ const TITLES: Record<Step, string> = {
   machine: "Machine",
 };
 
-const MACHINE_NOT_BUILT =
-  "Connecting to and running a GRBL machine is not built yet. Export the G-code from Operations and send it with another sender for now.";
 
 export function Inspector() {
   const step = useProject((s) => s.step);
@@ -28,7 +27,7 @@ export function Inspector() {
         ) : step === "operations" ? (
           <OperationsPanel />
         ) : (
-          <p className="text-muted">{MACHINE_NOT_BUILT}</p>
+          <MachinePanel />
         )}
       </div>
     </aside>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { MessageSquare, Monitor, Moon, Sun } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
+import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
 import { useUi, type ThemeChoice } from "../state/ui";
 
@@ -13,6 +14,7 @@ const THEMES: { value: ThemeChoice; label: string; icon: typeof Sun }[] = [
 export function TitleBar() {
   const imageName = useProject((s) => s.image?.name);
   const { theme, setTheme, chatOpen, toggleChat } = useUi();
+  const jobRunning = useMachine((s) => jobIsActive(s.job));
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -29,6 +31,15 @@ export function TitleBar() {
       <span className="truncate text-muted">{imageName ?? "Untitled project"}</span>
 
       <div className="ml-auto flex items-center gap-2">
+        {jobRunning && (
+          // Always in view while the machine is cutting, whichever step is open.
+          <button
+            onClick={() => void useMachine.getState().act({ type: "stopJob" })}
+            className="rounded-md bg-accent px-3 py-1 font-semibold text-accent-fg"
+          >
+            Stop machine
+          </button>
+        )}
         <div className="flex rounded-md border border-line p-0.5" role="radiogroup" aria-label="Theme">
           {THEMES.map(({ value, label, icon: Icon }) => (
             <button

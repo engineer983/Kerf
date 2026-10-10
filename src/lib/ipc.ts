@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 export { isTauri };
 
@@ -103,6 +104,75 @@ export function generateGcode(
 /** Resolves to the saved path, or null if the user cancelled. */
 export function exportGcode(suggestedName: string): Promise<string | null> {
   return invoke("export_gcode", { suggestedName });
+}
+
+export interface PortInfo {
+  name: string;
+  description: string | null;
+}
+
+export type MachineState =
+  | "idle"
+  | "run"
+  | "hold"
+  | "jog"
+  | "alarm"
+  | "door"
+  | "check"
+  | "home"
+  | "sleep"
+  | "other";
+
+export type JobState = "running" | "finished" | "stopped" | "failed";
+
+export type MachineEvent =
+  | {
+      type: "status";
+      state: MachineState;
+      position: [number, number, number] | null;
+      feed: number | null;
+      spindle: number | null;
+    }
+  | { type: "welcome"; version: string }
+  | { type: "setting"; number: number; value: string }
+  | { type: "line"; text: string }
+  | { type: "commandError"; line: string; code: number; description: string }
+  | { type: "alarm"; code: number; description: string }
+  | { type: "job"; state: JobState; acknowledged: number; total: number; message: string | null }
+  | { type: "disconnected"; reason: string | null };
+
+export type MachineAction =
+  | { type: "line"; text: string }
+  | { type: "jog"; x: number; y: number; z: number; feed: number }
+  | { type: "cancelJog" }
+  | { type: "home" }
+  | { type: "unlock" }
+  | { type: "setOrigin"; z: boolean }
+  | { type: "frame"; minX: number; minY: number; maxX: number; maxY: number; feed: number }
+  | { type: "hold" }
+  | { type: "resume" }
+  | { type: "reset" }
+  | { type: "startJob" }
+  | { type: "stopJob" };
+
+export function listPorts(): Promise<PortInfo[]> {
+  return invoke("list_ports");
+}
+
+export function connectMachine(port: string): Promise<void> {
+  return invoke("connect_machine", { port });
+}
+
+export function disconnectMachine(): Promise<void> {
+  return invoke("disconnect_machine");
+}
+
+export function machineAction(action: MachineAction): Promise<void> {
+  return invoke("machine_action", { action });
+}
+
+export function onMachineEvent(handler: (event: MachineEvent) => void): Promise<() => void> {
+  return listen<MachineEvent>("machine", (e) => handler(e.payload));
 }
 
 /** Returns null when the UI runs in a plain browser (`pnpm dev`) with no Rust backend. */

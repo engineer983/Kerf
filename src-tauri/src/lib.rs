@@ -1,3 +1,5 @@
+mod machine;
+
 use std::sync::{Arc, Mutex};
 
 use kerf_gcode::{Artwork, Job, Program};
@@ -22,10 +24,10 @@ const FLATTEN_TOLERANCE_MM: f64 = 0.05;
 const GCODE_HEAD_LINES: usize = 60;
 
 #[derive(Default)]
-struct AppState {
+pub(crate) struct AppState {
     image: Mutex<Option<LoadedImage>>,
-    /// Text of the most recently generated program, kept here for export.
-    gcode: Mutex<Option<String>>,
+    /// Text of the most recently generated program, kept here for export and sending.
+    pub(crate) gcode: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -54,7 +56,7 @@ fn app_info() -> AppInfo {
     }
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(work)
@@ -212,6 +214,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(machine::MachineLink::default())
         .invoke_handler(tauri::generate_handler![
             app_info,
             load_image,
@@ -219,7 +222,11 @@ pub fn run() {
             trace_image,
             export_svg,
             generate_gcode,
-            export_gcode
+            export_gcode,
+            machine::list_ports,
+            machine::connect_machine,
+            machine::disconnect_machine,
+            machine::machine_action
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");
