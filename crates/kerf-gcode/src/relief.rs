@@ -178,7 +178,8 @@ pub(crate) fn carve(
         );
     }
 
-    w.line(&format!("G0 Z{}", num(safe_z)));
+    w.power = 1.0;
+    w.z_move(safe_z, None);
     w.line(&format!("M3 S{}", num(spindle_rpm)));
     w.line(&format!("G4 P{}", num(SPINDLE_DWELL_S)));
     w.seconds += SPINDLE_DWELL_S;
@@ -211,19 +212,17 @@ pub(crate) fn carve(
                 Some((previous, end_z)) if previous + 1 == j => {
                     let link_z = end_z.max(start_z);
                     if link_z > end_z + LEVEL_EPSILON_MM {
-                        w.line(&format!("G1 Z{} F{}", num(link_z), num(operation.feed)));
+                        w.z_move(link_z, Some(operation.feed));
                     }
                     w.cut(start, operation.feed, &format!(" F{}", num(operation.feed)));
                     if link_z > start_z + LEVEL_EPSILON_MM {
-                        w.line(&format!("G1 Z{} F{}", num(start_z), num(plunge_feed)));
-                        w.seconds += (link_z - start_z).abs() / plunge_feed * 60.0;
+                        w.z_move(start_z, Some(plunge_feed));
                     }
                 }
                 _ => {
-                    w.line(&format!("G0 Z{}", num(safe_z)));
+                    w.z_move(safe_z, None);
                     w.travel(start, "");
-                    w.line(&format!("G1 Z{} F{}", num(start_z), num(plunge_feed)));
-                    w.seconds += (safe_z - start_z).abs() / plunge_feed * 60.0;
+                    w.z_move(start_z, Some(plunge_feed));
                 }
             }
 
@@ -233,6 +232,7 @@ pub(crate) fn carve(
                 } else {
                     String::new()
                 };
+                w.z = zs[i];
                 w.cut(
                     [offset[0] + xs[i], y],
                     operation.feed,
@@ -243,7 +243,7 @@ pub(crate) fn carve(
             forward = !forward;
         }
     }
-    w.line(&format!("G0 Z{}", num(safe_z)));
+    w.z_move(safe_z, None);
     Ok(())
 }
 

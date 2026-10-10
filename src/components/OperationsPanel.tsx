@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 import { isTauri, type OperationKind } from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
+import { MATERIALS } from "../lib/materials";
 import { defaultOperation, traceColors, useProject, type OperationItem } from "../state/project";
 import { NumberField, Section, Segmented, Select } from "./controls";
 
@@ -37,6 +38,8 @@ export function OperationsPanel() {
   const machineKind = useProject((s) => s.machineKind);
   const maxPowerS = useProject((s) => s.maxPowerS);
   const machinePreset = useProject((s) => s.machinePreset);
+  const materialId = useProject((s) => s.materialId);
+  const thickness = useProject((s) => s.thickness);
   const origin = useProject((s) => s.origin);
   const startGcode = useProject((s) => s.startGcode);
   const endGcode = useProject((s) => s.endGcode);
@@ -122,6 +125,26 @@ export function OperationsPanel() {
             onChange={actions.setMaxPowerS}
           />
         )}
+      </Section>
+
+      <Section title="Material">
+        <Select
+          label="Type"
+          value={materialId}
+          options={MATERIALS.map((m) => ({ value: m.id, label: m.label }))}
+          onChange={actions.setMaterial}
+        />
+        <NumberField
+          label="Thickness"
+          unit="mm"
+          min={0.1}
+          max={200}
+          value={thickness}
+          onChange={actions.setThickness}
+        />
+        <p className="text-muted">
+          For the preview only. Speed, power and depth are not set from the material.
+        </p>
       </Section>
 
       <Section title="Position">

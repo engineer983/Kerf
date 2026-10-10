@@ -36,6 +36,11 @@ pub struct Program {
     /// SVG path data for previews, in bed coordinates (Y down).
     pub cut_path: String,
     pub travel_path: String,
+    /// Every move in order, for playback: x, y, z, power per move, in bed
+    /// coordinates (Y down) with Z zero at the material's top. Power is -1 for
+    /// a rapid move, otherwise 0 to 1 (always 1 for a router). The first entry
+    /// is where the job starts.
+    pub moves: Vec<f32>,
 }
 
 pub fn generate(artwork: &Artwork, job: &Job) -> Result<Program, String> {
@@ -140,11 +145,13 @@ pub fn generate_with(
         seconds: w.seconds,
         cut_path: w.cut_path,
         travel_path: w.travel_path,
+        moves: w.moves,
     })
 }
 
 fn laser_cut(w: &mut Writer, operation: &Operation, polylines: &[&Polyline]) {
     let power = w.machine.max_power_s * operation.power / 100.0;
+    w.power = operation.power / 100.0;
     w.line("M4 S0");
     for polyline in order_by_travel(polylines, w.position) {
         let mut points = polyline.points.clone();
@@ -182,6 +189,7 @@ fn laser_fill(w: &mut Writer, operation: &Operation, shapes: &[Vec<Polyline>], i
         return;
     }
     let power = w.machine.max_power_s * operation.power / 100.0;
+    w.power = operation.power / 100.0;
     let rows = ((bottom - top) / interval).ceil() as usize;
     let on = format!(" S{} F{}", num(power), num(operation.feed));
 
@@ -252,20 +260,18 @@ fn cnc_profile(w: &mut Writer, operation: &Operation, polylines: &[&Polyline]) {
     };
     let passes = (depth / depth_per_pass - 1e-9).ceil().max(1.0) as usize;
 
-    w.line(&format!("G0 Z{}", num(safe_z)));
+    w.power = 1.0;
+    w.z_move(safe_z, None);
     w.line(&format!("M3 S{}", num(spindle_rpm)));
     w.line(&format!("G4 P{}", num(SPINDLE_DWELL_S)));
     w.seconds += SPINDLE_DWELL_S;
 
-    let mut z = safe_z;
     for polyline in order_by_travel(polylines, w.position) {
         let mut points = polyline.points.clone();
         w.travel(points[0], "");
         for pass in 1..=passes {
             let target = -(depth_per_pass * pass as f64).min(depth);
-            w.line(&format!("G1 Z{} F{}", num(target), num(plunge_feed)));
-            w.seconds += (z - target).abs() / plunge_feed * 60.0;
-            z = target;
+            w.z_move(target, Some(plunge_feed));
             if pass > 1 && !polyline.closed {
                 points.reverse();
             }
@@ -278,8 +284,7 @@ fn cnc_profile(w: &mut Writer, operation: &Operation, polylines: &[&Polyline]) {
                 w.cut(point, operation.feed, &feed);
             }
         }
-        w.line(&format!("G0 Z{}", num(safe_z)));
-        z = safe_z;
+        w.z_move(safe_z, None);
     }
 }
 
@@ -326,6 +331,11 @@ pub(crate) struct Writer<'a> {
     pub(crate) seconds: f64,
     cut_path: String,
     travel_path: String,
+    /// Height of the tool; callers that put Z on a cutting line set it first.
+    pub(crate) z: f64,
+    /// Laser power, 0 to 1, recorded with each cutting move.
+    pub(crate) power: f64,
+    moves: Vec<f32>,
 }
 
 impl<'a> Writer<'a> {
@@ -340,9 +350,13 @@ impl<'a> Writer<'a> {
             seconds: 0.0,
             cut_path: String::new(),
             travel_path: String::new(),
+            z: 0.0,
+            power: 1.0,
+            moves: Vec::new(),
         };
         // Jobs are assumed to start with the head at the machine origin.
         writer.position = writer.origin();
+        writer.record(-1.0);
         writer
     }
 
@@ -398,6 +412,7 @@ impl<'a> Writer<'a> {
         self.travel_mm += length;
         self.seconds += length / self.machine.travel_feed * 60.0;
         self.position = to;
+        self.record(-1.0);
     }
 
     pub(crate) fn cut(&mut self, to: [f64; 2], feed: f64, suffix: &str) {
@@ -410,6 +425,29 @@ impl<'a> Writer<'a> {
         self.cut_mm += length;
         self.seconds += length / feed * 60.0;
         self.position = to;
+        self.record(self.power);
+    }
+
+    /// A vertical move: a rapid when `feed` is `None`, otherwise a plunge or lift at that feed.
+    pub(crate) fn z_move(&mut self, z: f64, feed: Option<f64>) {
+        match feed {
+            Some(feed) => {
+                self.line(&format!("G1 Z{} F{}", num(z), num(feed)));
+                self.seconds += (self.z - z).abs() / feed * 60.0;
+            }
+            None => self.line(&format!("G0 Z{}", num(z))),
+        }
+        self.z = z;
+        self.record(if feed.is_some() { self.power } else { -1.0 });
+    }
+
+    fn record(&mut self, power: f64) {
+        self.moves.extend([
+            self.position[0] as f32,
+            self.position[1] as f32,
+            self.z as f32,
+            power as f32,
+        ]);
     }
 }
 
@@ -739,5 +777,57 @@ mod tests {
         assert_eq!(num(2.5), "2.5");
         assert_eq!(num(1.23456), "1.235");
         assert_eq!(num(-0.0001), "0");
+    }
+
+    #[test]
+    fn moves_are_recorded_in_order_for_playback() {
+        let program = generate(&square(), &laser_job(OperationKind::LaserCut, 1)).unwrap();
+        let moves: Vec<[f32; 4]> = program
+            .moves
+            .chunks_exact(4)
+            .map(|m| [m[0].round(), m[1].round(), m[2], m[3]])
+            .collect();
+        // Bed coordinates, Y down: the job starts and ends at the front-left origin.
+        assert_eq!(
+            moves,
+            [
+                [0.0, 100.0, 0.0, -1.0],
+                [20.0, 30.0, 0.0, -1.0],
+                [30.0, 30.0, 0.0, 0.5],
+                [30.0, 40.0, 0.0, 0.5],
+                [20.0, 40.0, 0.0, 0.5],
+                [20.0, 30.0, 0.0, 0.5],
+                [0.0, 100.0, 0.0, -1.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn router_moves_record_height() {
+        let job = Job {
+            machine: machine(MachineKind::Cnc),
+            offset: [20.0, 30.0],
+            operations: vec![Operation {
+                color: None,
+                kind: OperationKind::CncProfile {
+                    depth: 1.0,
+                    depth_per_pass: 1.0,
+                    plunge_feed: 200.0,
+                    safe_z: 5.0,
+                    spindle_rpm: 12000.0,
+                },
+                feed: 800.0,
+                power: 0.0,
+                passes: 1,
+            }],
+        };
+        let program = generate(&square(), &job).unwrap();
+        let moves: Vec<&[f32]> = program.moves.chunks_exact(4).collect();
+        // Start, lift to safe height, rapid over, plunge, then cut at depth.
+        assert_eq!(moves[1][2..], [5.0, -1.0]);
+        assert_eq!(moves[2][2..], [5.0, -1.0]);
+        assert_eq!(moves[3][2..], [-1.0, 1.0]);
+        assert!(moves[4..8].iter().all(|m| m[2..] == [-1.0, 1.0]));
+        assert_eq!(moves[moves.len() - 1][2..], [5.0, -1.0]);
     }
 }

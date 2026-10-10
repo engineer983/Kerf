@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Upload } from "lucide-react";
+import { findMaterial, paintMaterial } from "../lib/materials";
+import { Simulation } from "../lib/simulation";
+import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
 import { artworkRect, useProject } from "../state/project";
+import { PlaybackBar } from "./PlaybackBar";
+import { View3D } from "./View3D";
 
 /** Top-left corner of the visible area in mm, and the zoom as mm per screen pixel. */
 interface View {
@@ -12,6 +17,10 @@ interface View {
 const MARGIN_MM = 30;
 const MIN_MM_PER_PX = 0.01;
 const MAX_MM_PER_PX = 5;
+/** How far the piece of material extends beyond the artwork on each side, in mm. */
+const STOCK_MARGIN_MM = 10;
+/** Bit assumed for path-following router jobs, which do not ask for one. */
+const DEFAULT_BIT = { diameter: 3.175, ballNose: false };
 
 export function Canvas() {
   const bed = useProject((s) => s.bed);
@@ -24,6 +33,13 @@ export function Canvas() {
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const program = useProject((s) => s.gcode.program);
+  const materialId = useProject((s) => s.materialId);
+  const thickness = useProject((s) => s.thickness);
+  const machineKind = useProject((s) => s.machineKind);
+  const operations = useProject((s) => s.operations);
+  const mode = usePlayback((s) => s.mode);
+  const playing = usePlayback((s) => s.playing);
+  const progress = usePlayback((s) => s.progress);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -106,6 +122,78 @@ export function Canvas() {
   const placed = artworkRect({ image, widthMm, left, front, bed });
   const px = view?.mmPerPx ?? 1;
 
+  const material = findMaterial(materialId);
+  const [sx, sy, sw, sh] = placed
+    ? [
+        placed.x - STOCK_MARGIN_MM,
+        placed.y - STOCK_MARGIN_MM,
+        placed.width + STOCK_MARGIN_MM * 2,
+        placed.height + STOCK_MARGIN_MM * 2,
+      ]
+    : [0, 0, 0, 0];
+
+  // The bare material, as an image for the 2D view.
+  const materialUrl = useMemo(() => {
+    if (sw <= 0 || sh <= 0) return null;
+    const pxPerMm = Math.min(4, 1024 / Math.max(sw, sh));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(2, Math.round(sw * pxPerMm));
+    canvas.height = Math.max(2, Math.round(sh * pxPerMm));
+    paintMaterial(canvas, material, pxPerMm);
+    return canvas.toDataURL();
+  }, [material, sw, sh]);
+
+  const relief = operations.find((o) => o.kind.type === "cncRelief")?.kind;
+  const bitDiameter = relief?.type === "cncRelief" ? relief.toolDiameter : DEFAULT_BIT.diameter;
+  const bitIsBall = relief?.type === "cncRelief" ? relief.ballNose : DEFAULT_BIT.ballNose;
+  const simulation = useMemo(() => {
+    if (!program || sw <= 0 || sh <= 0) return null;
+    return new Simulation({
+      moves: program.moves,
+      stock: { x: sx, y: sy, width: sw, height: sh },
+      thickness,
+      material,
+      kind: machineKind,
+      tool: { diameter: bitDiameter, ballNose: bitIsBall },
+    });
+  }, [program, sx, sy, sw, sh, thickness, material, machineKind, bitDiameter, bitIsBall]);
+
+  // Tool position for the 2D marker, refreshed whenever the playback point moves.
+  const [head, setHead] = useState<{ x: number; y: number; cutting: boolean } | null>(null);
+  useLayoutEffect(() => {
+    if (!simulation) {
+      setHead(null);
+      return;
+    }
+    simulation.seek(progress);
+    setHead({ x: simulation.head[0], y: simulation.head[1], cutting: simulation.cutting });
+  }, [simulation, progress]);
+
+  useEffect(() => {
+    if (!playing || !simulation) return;
+    let last = performance.now();
+    let frame = requestAnimationFrame(function step(now) {
+      const { progress, speed, setProgress, finish } = usePlayback.getState();
+      const next = progress + ((now - last) / 1000 / PLAYBACK_SECONDS) * speed;
+      last = now;
+      if (next >= 1) {
+        finish();
+        return;
+      }
+      setProgress(next);
+      frame = requestAnimationFrame(step);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [playing, simulation]);
+
+  // In the result view the simulation's own canvas is shown over the material.
+  const resultHost = useRef<HTMLDivElement>(null);
+  const showResult = simulation !== null && mode === "result";
+  useLayoutEffect(() => {
+    if (!showResult || !resultHost.current) return;
+    simulation.canvas.style.cssText = "display:block;width:100%;height:100%";
+    resultHost.current.replaceChildren(simulation.canvas);
+  }, [showResult, simulation]);
   return (
     <main
       ref={containerRef}
@@ -146,6 +234,9 @@ export function Canvas() {
             stroke="var(--line)"
             strokeWidth={px * 1.5}
           />
+          {materialUrl && (
+            <image href={materialUrl} x={sx} y={sy} width={sw} height={sh} preserveAspectRatio="none" />
+          )}
           {image && placed && (showSource || !traced) && (
             <image
               href={image.url}
@@ -187,6 +278,29 @@ export function Canvas() {
         </svg>
       )}
 
+      {view && showResult && (
+        <div
+          ref={resultHost}
+          className="pointer-events-none absolute"
+          style={{
+            left: (sx - view.x) / px,
+            top: (sy - view.y) / px,
+            width: sw / px,
+            height: sh / px,
+          }}
+        />
+      )}
+      {view && showResult && head && (
+        <div
+          className={`pointer-events-none absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 ${
+            head.cutting ? "border-white bg-red-500" : "border-white/80 bg-transparent"
+          }`}
+          style={{ left: (head.x - view.x) / px, top: (head.y - view.y) / px }}
+        />
+      )}
+      {simulation && mode === "3d" && <View3D simulation={simulation} bed={bed} />}
+      {simulation && <PlaybackBar />}
+
       {!image && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="flex flex-col items-center gap-3 rounded-2xl border border-line bg-surface/90 px-10 py-8 text-center shadow-sm backdrop-blur">
@@ -201,7 +315,7 @@ export function Canvas() {
         <div className="pointer-events-none absolute inset-3 rounded-xl border-2 border-dashed border-accent" />
       )}
 
-      <div className="pointer-events-none absolute bottom-3 left-3 rounded-md border border-line bg-surface/90 px-2 py-1 font-mono text-[11px] text-muted">
+      <div className="pointer-events-none absolute top-3 left-3 rounded-md border border-line bg-surface/90 px-2 py-1 font-mono text-[11px] text-muted">
         {bed.width} × {bed.height} mm
         {view && ` · ${(100 / (view.mmPerPx * 3.7795)).toFixed(0)}%`}
       </div>

@@ -103,6 +103,8 @@ export interface Generated {
   /** SVG path data in bed coordinates. */
   cutPath: string;
   travelPath: string;
+  /** Every move in order: `x, y, z, power` each, in bed coordinates. Power is -1 for a rapid. */
+  moves: number[];
   head: string;
 }
 

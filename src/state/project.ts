@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
+import { DEFAULT_MATERIAL, findMaterial } from "../lib/materials";
+import { usePlayback } from "./playback";
 import type {
   Generated,
   MachineKind,
@@ -108,6 +110,10 @@ interface ProjectState {
   /** Distance of the artwork's front (bottom) edge from the bed's front edge, in mm. */
   front: number;
   showSource: boolean;
+  /** The material shown in previews; it does not change the G-code. */
+  materialId: string;
+  /** Material thickness in millimetres, for previews. */
+  thickness: number;
   error: string | null;
   trace: TraceState;
   /** Path of the last exported SVG, for confirmation in the UI. */
@@ -125,6 +131,8 @@ interface ProjectState {
   setOrigin: (origin: Origin) => void;
   applyMachinePreset: (id: string) => void;
   setShowSource: (show: boolean) => void;
+  setMaterial: (id: string) => void;
+  setThickness: (thickness: number) => void;
   updateTrace: (patch: Partial<TraceSettings>) => void;
   updatePreprocess: (patch: Partial<TraceSettings["preprocess"]>) => void;
   exportSvg: () => Promise<void>;
@@ -227,6 +235,8 @@ export const useProject = create<ProjectState>((set, get) => {
     left: 0,
     front: 0,
     showSource: true,
+    materialId: DEFAULT_MATERIAL.id,
+    thickness: DEFAULT_MATERIAL.thickness,
     error: null,
     trace: EMPTY_TRACE,
     exportedTo: null,
@@ -327,6 +337,8 @@ export const useProject = create<ProjectState>((set, get) => {
       }));
     },
     setShowSource: (showSource) => set({ showSource }),
+    setMaterial: (materialId) => set({ materialId, thickness: findMaterial(materialId).thickness }),
+    setThickness: (thickness) => set({ thickness }),
 
     updateTrace: (patch) => {
       set((s) => ({
@@ -391,6 +403,7 @@ export const useProject = create<ProjectState>((set, get) => {
         });
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, program } });
+        usePlayback.getState().finish();
       } catch (e) {
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, error: message(e) } });
