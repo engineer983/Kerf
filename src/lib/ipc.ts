@@ -115,10 +115,19 @@ export interface Generated {
 
 export function generateGcode(
   settings: TraceSettings,
-  widthMm: number,
+  size: { widthMm: number; heightMm: number },
   job: Job,
+  /** Carve reliefs from the estimated depth map, with this much photo texture (0 to 1). */
+  depth: { use: boolean; detail: number },
 ): Promise<Generated> {
-  return invoke("generate_gcode", { settings, widthMm, job });
+  return invoke("generate_gcode", {
+    settings,
+    widthMm: size.widthMm,
+    heightMm: size.heightMm,
+    job,
+    useDepth: depth.use,
+    detail: depth.detail,
+  });
 }
 
 /** Resolves to the saved path, or null if the user cancelled. */
@@ -222,7 +231,23 @@ export function traceImage(settings: TraceSettings, preview: boolean): Promise<T
 export function exportSvg(
   settings: TraceSettings,
   widthMm: number,
+  heightMm: number,
   suggestedName: string,
 ): Promise<string | null> {
-  return invoke("export_svg", { settings, widthMm, suggestedName });
+  return invoke("export_svg", { settings, widthMm, heightMm, suggestedName });
+}
+
+/** Keeps only a rectangle of the working image, in its pixels. */
+export function cropImage(x: number, y: number, width: number, height: number): Promise<void> {
+  return invoke("crop_image", { x, y, width, height });
+}
+
+/** Undoes any crop. */
+export function resetCrop(): Promise<void> {
+  return invoke("reset_crop");
+}
+
+/** Sets the depth picture reliefs are carved from; an empty array removes it. */
+export function setDepthMap(png: Uint8Array): Promise<void> {
+  return invoke("set_depth_map", png);
 }

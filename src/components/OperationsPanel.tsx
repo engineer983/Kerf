@@ -1,11 +1,10 @@
 import { X } from "lucide-react";
 import { isTauri, type OperationKind } from "../lib/ipc";
-import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { findMaterial, MATERIALS } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
 import { artworkRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
 import { useToolbox } from "../state/tools";
-import { NumberField, Section, Segmented, Select } from "./controls";
+import { Checkbox, NumberField, Section, Select, Slider } from "./controls";
 
 const ALL_SHAPES = "all";
 
@@ -24,19 +23,18 @@ export function OperationsPanel() {
   const image = useProject((s) => s.image);
   const bed = useProject((s) => s.bed);
   const machineKind = useProject((s) => s.machineKind);
-  const maxPowerS = useProject((s) => s.maxPowerS);
-  const machinePreset = useProject((s) => s.machinePreset);
   const materialId = useProject((s) => s.materialId);
   const thickness = useProject((s) => s.thickness);
   const origin = useProject((s) => s.origin);
-  const startGcode = useProject((s) => s.startGcode);
-  const endGcode = useProject((s) => s.endGcode);
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const widthMm = useProject((s) => s.widthMm);
+  const heightMm = useProject((s) => s.heightMm);
+  const aspectLocked = useProject((s) => s.aspectLocked);
+  const cropping = useProject((s) => s.cropping);
+  const cropped = useProject((s) => s.uncropped !== null);
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
-  const spindleRpm = useProject((s) => s.spindleRpm);
   const operations = useProject((s) => s.operations);
   const traced = useProject((s) => s.trace.result);
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
@@ -48,8 +46,7 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
-  const presetNote = MACHINE_PRESETS.find((p) => p.id === machinePreset)?.note;
-  const art = artworkRect({ image, widthMm, left, front, bed, origin });
+  const art = artworkRect({ image, widthMm, heightMm, left, front, bed, origin });
   const stock = stockRect({ stockWidth, stockLength, bed, origin });
   const overhangs =
     art !== null &&
@@ -60,83 +57,6 @@ export function OperationsPanel() {
 
   return (
     <div className="flex flex-col gap-5">
-      <Section title="Machine">
-        <Select
-          label="Preset"
-          value={machinePreset}
-          options={[
-            { value: CUSTOM_PRESET, label: "Custom" },
-            ...MACHINE_PRESETS.map((p) => ({ value: p.id, label: p.label })),
-          ]}
-          onChange={actions.applyMachinePreset}
-        />
-        {presetNote && <p className="text-muted">{presetNote}</p>}
-        <Segmented
-          label="Machine type"
-          value={machineKind}
-          options={[
-            { value: "laser", label: "Laser" },
-            { value: "cnc", label: "CNC router" },
-          ]}
-          onChange={actions.setMachineKind}
-        />
-        <NumberField
-          label="Bed width"
-          unit="mm"
-          min={10}
-          max={5000}
-          value={bed.width}
-          onChange={(width) => actions.setBed({ width })}
-        />
-        <NumberField
-          label="Bed depth"
-          unit="mm"
-          min={10}
-          max={5000}
-          value={bed.height}
-          onChange={(height) => actions.setBed({ height })}
-        />
-        <Select
-          label="X0 Y0 corner"
-          value={origin}
-          options={[
-            { value: "frontLeft", label: "Front left" },
-            { value: "backLeft", label: "Back left" },
-          ]}
-          onChange={actions.setOrigin}
-        />
-        {(startGcode || endGcode) && (
-          <p className="text-muted">
-            Jobs start with <span className="font-mono text-[12px]">{startGcode.replace(/\n/g, " ")}</span>
-            {endGcode && (
-              <>
-                {" "}and end with <span className="font-mono text-[12px]">{endGcode.replace(/\n/g, " ")}</span>
-              </>
-            )}
-            .
-          </p>
-        )}
-        {machineKind === "laser" && (
-          <NumberField
-            label="Full power (S)"
-            min={1}
-            max={100000}
-            value={maxPowerS}
-            onChange={actions.setMaxPowerS}
-          />
-        )}
-        {machineKind === "cnc" && (
-          <NumberField
-            label="Router speed"
-            unit="rpm"
-            min={1000}
-            max={60000}
-            value={spindleRpm}
-            onChange={actions.setSpindleRpm}
-          />
-        )}
-      </Section>
-
       <Section title="Material">
         <Select
           label="Type"
@@ -181,7 +101,13 @@ export function OperationsPanel() {
         </p>
       </Section>
 
-      <Section title="Position">
+      <Section title="Artwork">
+        <p className="text-muted">
+          Drag the picture on the canvas to move it, or its handles to resize it.
+        </p>
+        <NumberField label="Width" unit="mm" min={1} max={5000} value={widthMm} onChange={actions.setWidthMm} />
+        <NumberField label="Height" unit="mm" min={1} max={5000} value={heightMm} onChange={actions.setHeightMm} />
+        <Checkbox label="Keep proportions" checked={aspectLocked} onChange={actions.setAspectLocked} />
         <NumberField
           label="From left"
           unit="mm"
@@ -198,6 +124,21 @@ export function OperationsPanel() {
           value={front}
           onChange={(value) => actions.setPosition({ front: value })}
         />
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            className="rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent"
+            onClick={() => actions.setCropping(!cropping)}
+          >
+            {cropping ? "Cancel crop" : "Crop…"}
+          </button>
+          <button
+            className="rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent disabled:opacity-40"
+            disabled={!cropped}
+            onClick={() => void actions.resetCrop()}
+          >
+            Undo crop
+          </button>
+        </div>
       </Section>
 
       {operations.map((operation, index) => (
@@ -260,6 +201,64 @@ export function OperationsPanel() {
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Where a relief's heights come from: the picture's brightness, or estimated depth. */
+function HeightSource() {
+  const heightSource = useProject((s) => s.heightSource);
+  const depth = useProject((s) => s.depth);
+  const detail = useProject((s) => s.detail);
+  const { setHeightSource, setDetail, estimateDepth } = useProject.getState();
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-line p-3">
+      <Select
+        label="Height from"
+        value={heightSource}
+        options={[
+          { value: "brightness", label: "Brightness" },
+          { value: "depth", label: "Estimated depth" },
+        ]}
+        onChange={setHeightSource}
+      />
+      {heightSource === "depth" && (
+        <>
+          {depth.status === "ready" && depth.url ? (
+            <>
+              <img src={depth.url} alt="Estimated depth: lighter is nearer" className="w-full rounded-md border border-line" />
+              <Slider
+                label="Photo texture"
+                min={0}
+                max={1}
+                step={0.05}
+                value={detail}
+                format={(v) => `${Math.round(v * 100)}%`}
+                onChange={setDetail}
+              />
+            </>
+          ) : (
+            <button
+              className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-50"
+              disabled={depth.status === "working"}
+              onClick={() => void estimateDepth()}
+            >
+              {depth.status === "working" ? (depth.message ?? "Working…") : "Estimate depth"}
+            </button>
+          )}
+          {depth.status === "error" && (
+            <p role="alert" className="text-accent">
+              {depth.message}
+            </p>
+          )}
+          <p className="text-muted">
+            A model works out how near each part of the photo is, so faces and objects carve as
+            shapes. It runs on this computer; the first use downloads it (about 27 MB) from Hugging
+            Face. The photo is not sent anywhere.
+          </p>
+        </>
+      )}
     </div>
   );
 }
@@ -373,6 +372,7 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         <>
           {kind.type === "cncRelief" && (
             <>
+              <HeightSource />
               <NumberField label="Stepover" unit="mm" min={0.02} max={50} value={kind.stepover} onChange={(stepover) => setKind({ stepover })} />
               <Select
                 label="Raised areas"

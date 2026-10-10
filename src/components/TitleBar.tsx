@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { MessageSquare, Monitor, Moon, Sun, Wrench } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
+import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
@@ -16,6 +17,12 @@ export function TitleBar() {
   const imageName = useProject((s) => s.image?.name);
   const { theme, setTheme, chatOpen, toggleChat } = useUi();
   const jobRunning = useMachine((s) => jobIsActive(s.job));
+  const isRouter = useProject((s) => s.machineKind === "cnc");
+  const deviceName = useProject(
+    (s) =>
+      MACHINE_PRESETS.find((p) => p.id === s.machinePreset)?.label ??
+      (s.machineKind === "cnc" ? "CNC router" : "Laser"),
+  );
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,12 +49,21 @@ export function TitleBar() {
           </button>
         )}
         <button
-          onClick={() => useToolbox.getState().setOpen(true)}
-          className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:text-fg"
+          onClick={() => useProject.getState().setStep("device")}
+          title="Change the machine"
+          className="rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:text-fg"
         >
-          <Wrench size={14} />
-          Toolbox
+          {deviceName}
         </button>
+        {isRouter && (
+          <button
+            onClick={() => useToolbox.getState().setOpen(true)}
+            className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:text-fg"
+          >
+            <Wrench size={14} />
+            Toolbox
+          </button>
+        )}
         <div className="flex rounded-md border border-line p-0.5" role="radiogroup" aria-label="Theme">
           {THEMES.map(({ value, label, icon: Icon }) => (
             <button

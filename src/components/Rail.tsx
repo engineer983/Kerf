@@ -1,7 +1,9 @@
-import { ImagePlus, Layers, Spline, Zap } from "lucide-react";
+import { ImagePlus, Layers, Settings2, Spline, Zap } from "lucide-react";
+import { MACHINE_PRESETS } from "../lib/machines";
 import { useProject, type Step } from "../state/project";
 
 const STEPS: { id: Step; label: string; icon: typeof Zap }[] = [
+  { id: "device", label: "Device", icon: Settings2 },
   { id: "import", label: "Import", icon: ImagePlus },
   { id: "trace", label: "Trace", icon: Spline },
   { id: "operations", label: "Operations", icon: Layers },
@@ -11,13 +13,17 @@ const STEPS: { id: Step; label: string; icon: typeof Zap }[] = [
 export function Rail() {
   const step = useProject((s) => s.step);
   const setStep = useProject((s) => s.setStep);
+  // A machine that only takes G-code files has nothing to connect to.
+  const exportOnly = useProject(
+    (s) => MACHINE_PRESETS.find((p) => p.id === s.machinePreset)?.exportOnly ?? false,
+  );
 
   return (
     <nav
       aria-label="Workflow"
       className="flex w-[76px] shrink-0 flex-col gap-1 border-r border-line bg-surface px-2 py-3"
     >
-      {STEPS.map(({ id, label, icon: Icon }) => {
+      {STEPS.filter((s) => !(s.id === "machine" && exportOnly)).map(({ id, label, icon: Icon }) => {
         const active = step === id;
         return (
           <button

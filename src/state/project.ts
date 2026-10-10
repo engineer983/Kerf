@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
+import { estimateDepth } from "../lib/depth";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { cutSettings } from "../lib/feeds";
@@ -17,7 +18,7 @@ import type {
   TraceSettings,
 } from "../lib/ipc";
 
-export type Step = "import" | "trace" | "operations" | "machine";
+export type Step = "device" | "import" | "trace" | "operations" | "machine";
 
 export interface SourceImage {
   name: string;
@@ -143,6 +144,16 @@ interface TraceState {
   error: string | null;
 }
 
+interface DepthState {
+  status: "none" | "working" | "ready" | "error";
+  /** Progress while working, or what went wrong. */
+  message: string | null;
+  /** The depth picture, for showing to the user. */
+  url: string | null;
+}
+
+const NO_DEPTH: DepthState = { status: "none", message: null, url: null };
+
 interface GcodeState {
   /** Null whenever anything it was generated from has changed since. */
   program: Generated | null;
@@ -164,8 +175,20 @@ interface ProjectState {
   /** Vendor commands emitted around every job; set by presets. */
   startGcode: string;
   endGcode: string;
-  /** Physical width of the artwork in millimetres; height follows the aspect ratio. */
+  /** Physical size of the artwork in millimetres. */
   widthMm: number;
+  heightMm: number;
+  /** Keep the artwork's proportions when its width or height changes. */
+  aspectLocked: boolean;
+  /** The image before any crop, so that a crop can be undone. */
+  uncropped: SourceImage | null;
+  /** True while the crop frame is shown on the canvas. */
+  cropping: boolean;
+  /** What a relief takes its heights from. */
+  heightSource: "brightness" | "depth";
+  depth: DepthState;
+  /** How much of the photo's fine texture is laid over a depth relief, 0 to 1. */
+  detail: number;
   /** Distance of the artwork's left edge from the bed's left edge, in mm. */
   left: number;
   /**
@@ -193,6 +216,18 @@ interface ProjectState {
   importFile: (file: File) => Promise<void>;
   clearImage: () => void;
   setWidthMm: (widthMm: number) => void;
+  setHeightMm: (heightMm: number) => void;
+  setAspectLocked: (locked: boolean) => void;
+  /** Moves and sizes the artwork, given as a rectangle in bed coordinates. */
+  setArtworkRect: (rect: { x: number; y: number; width: number; height: number }) => void;
+  setCropping: (cropping: boolean) => void;
+  /** Keeps the part of the image inside the fractions given (0 to 1 of its width and height). */
+  applyCrop: (crop: { x0: number; y0: number; x1: number; y1: number }) => Promise<void>;
+  resetCrop: () => Promise<void>;
+  setHeightSource: (source: "brightness" | "depth") => void;
+  setDetail: (detail: number) => void;
+  /** Runs the depth model on the image. Downloads the model the first time. */
+  estimateDepth: () => Promise<void>;
   setPosition: (patch: { left?: number; front?: number }) => void;
   setBed: (patch: { width?: number; height?: number }) => void;
   setMachineKind: (kind: MachineKind) => void;
@@ -237,16 +272,21 @@ let traceTimer: ReturnType<typeof setTimeout> | undefined;
 let traceGeneration = 0;
 let gcodeGeneration = 0;
 
+const tenth = (mm: number) => Math.round(mm * 10) / 10;
+
+/** The longest side given to newly imported artwork, in mm, on a large bed. */
+const DEFAULT_LONG_SIDE_MM = 200;
+
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
 /** Where the artwork sits on the bed, in bed coordinates (mm, Y down from the back). */
 export function artworkRect(
-  s: Pick<ProjectState, "image" | "widthMm" | "left" | "front" | "bed" | "origin">,
+  s: Pick<ProjectState, "image" | "widthMm" | "heightMm" | "left" | "front" | "bed" | "origin">,
 ) {
   if (!s.image) return null;
-  const height = (s.widthMm * s.image.height) / s.image.width;
+  const height = s.heightMm;
   const y = s.origin === "backLeft" ? s.front : s.bed.height - s.front - height;
   return { x: s.left, y, width: s.widthMm, height };
 }
@@ -268,6 +308,23 @@ export function traceColors(traced: Traced | null): string[] {
     colors.add(match[1].toLowerCase());
   }
   return [...colors];
+}
+
+const DEVICE_KEY = "kerf.device";
+
+/** The machine settings that are remembered between sessions. */
+type Device = Pick<
+  ProjectState,
+  "machinePreset" | "machineKind" | "bed" | "origin" | "maxPowerS" | "spindleRpm" | "startGcode" | "endGcode"
+>;
+
+function storedDevice(): Device | null {
+  try {
+    const device = JSON.parse(localStorage.getItem(DEVICE_KEY) ?? "null");
+    return device && typeof device.machineKind === "string" && device.bed ? (device as Device) : null;
+  } catch {
+    return null;
+  }
 }
 
 export const useProject = create<ProjectState>((set, get) => {
@@ -324,8 +381,12 @@ export const useProject = create<ProjectState>((set, get) => {
     return { gcode: EMPTY_GCODE };
   }
 
+  // A machine chosen in an earlier session is used again; otherwise the app
+  // opens on the Device step so that one is chosen first.
+  const remembered = storedDevice();
+
   return {
-    step: "import",
+    step: remembered ? "import" : "device",
     image: null,
     bed: { width: 400, height: 400 },
     machineKind: "laser",
@@ -334,19 +395,27 @@ export const useProject = create<ProjectState>((set, get) => {
     origin: "frontLeft",
     startGcode: "",
     endGcode: "",
+    spindleRpm: 16000,
+    ...remembered,
     widthMm: 100,
+    heightMm: 100,
+    aspectLocked: true,
+    uncropped: null,
+    cropping: false,
+    heightSource: "brightness",
+    depth: NO_DEPTH,
+    detail: 0.3,
     left: STOCK_MARGIN_MM,
     front: STOCK_MARGIN_MM,
     stockWidth: 300,
     stockLength: 200,
-    spindleRpm: 16000,
     showSource: true,
     materialId: DEFAULT_MATERIAL.id,
     thickness: DEFAULT_MATERIAL.thickness,
     error: null,
     trace: EMPTY_TRACE,
     exportedTo: null,
-    operations: [defaultOperation("laser")],
+    operations: [defaultOperation(remembered?.machineKind ?? "laser")],
     gcode: EMPTY_GCODE,
 
     setStep: (step) => set({ step }),
@@ -373,12 +442,22 @@ export const useProject = create<ProjectState>((set, get) => {
         // Start at half the bed, whichever side is the tighter fit, on a piece
         // of material just larger than the artwork in the origin corner.
         const { bed, trace, machineKind } = get();
-        const scale = Math.min((bed.width * 0.5) / image.width, (bed.height * 0.5) / image.height);
+        const scale = Math.min(
+          (bed.width * 0.5) / image.width,
+          (bed.height * 0.5) / image.height,
+          DEFAULT_LONG_SIDE_MM / Math.max(image.width, image.height),
+        );
         const widthMm = Math.round(image.width * scale);
         const heightMm = (widthMm * image.height) / image.width;
         const placed = {
           image,
           widthMm,
+          heightMm: Math.round(heightMm * 10) / 10,
+          aspectLocked: true,
+          uncropped: null,
+          cropping: false,
+          heightSource: "brightness" as const,
+          depth: NO_DEPTH,
           left: STOCK_MARGIN_MM,
           front: STOCK_MARGIN_MM,
           stockWidth: widthMm + STOCK_MARGIN_MM * 2,
@@ -413,7 +492,127 @@ export const useProject = create<ProjectState>((set, get) => {
       }));
     },
 
-    setWidthMm: (widthMm) => set({ widthMm, ...staleGcode() }),
+    // With the proportions locked, changing one side scales the other with it.
+    setWidthMm: (widthMm) =>
+      set((s) => ({
+        widthMm,
+        heightMm: s.aspectLocked ? Math.round(((s.heightMm * widthMm) / s.widthMm) * 10) / 10 : s.heightMm,
+        ...staleGcode(),
+      })),
+    setHeightMm: (heightMm) =>
+      set((s) => ({
+        heightMm,
+        widthMm: s.aspectLocked ? Math.round(((s.widthMm * heightMm) / s.heightMm) * 10) / 10 : s.widthMm,
+        ...staleGcode(),
+      })),
+    setAspectLocked: (aspectLocked) => set({ aspectLocked }),
+    setArtworkRect: (rect) =>
+      set((s) => ({
+        // A tenth of a millimetre is finer than either machine can place work.
+        widthMm: tenth(rect.width),
+        heightMm: tenth(rect.height),
+        left: tenth(rect.x),
+        front: tenth(s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height),
+        ...staleGcode(),
+      })),
+    setCropping: (cropping) => set({ cropping }),
+
+    applyCrop: async ({ x0, y0, x1, y1 }) => {
+      const s = get();
+      const { image } = s;
+      const rect = artworkRect(s);
+      if (!image || !rect) return;
+      const x = Math.round(x0 * image.width);
+      const y = Math.round(y0 * image.height);
+      const width = Math.max(1, Math.round((x1 - x0) * image.width));
+      const height = Math.max(1, Math.round((y1 - y0) * image.height));
+      try {
+        // The same crop is made here, for display, and in the backend, for tracing.
+        const picture = new Image();
+        picture.src = image.url;
+        await picture.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d")!.drawImage(picture, -x, -y);
+        const blob = await new Promise<Blob | null>((done) => canvas.toBlob(done, "image/png"));
+        if (!blob) throw new Error("The cropped image could not be made.");
+        if (ipc.isTauri()) await ipc.cropImage(x, y, width, height);
+
+        cancelTrace();
+        if (s.depth.url) URL.revokeObjectURL(s.depth.url);
+        if (s.uncropped) URL.revokeObjectURL(image.url);
+        set({
+          image: { ...image, url: URL.createObjectURL(blob), width, height, bytes: blob.size },
+          uncropped: s.uncropped ?? image,
+          cropping: false,
+          depth: NO_DEPTH,
+          heightSource: "brightness",
+          trace: { ...EMPTY_TRACE, settings: s.trace.settings },
+          error: null,
+        });
+        // The part that is kept stays where it was on the material.
+        get().setArtworkRect({
+          x: rect.x + x0 * rect.width,
+          y: rect.y + y0 * rect.height,
+          width: (x1 - x0) * rect.width,
+          height: (y1 - y0) * rect.height,
+        });
+        scheduleTrace();
+      } catch (e) {
+        set({ error: message(e), cropping: false });
+      }
+    },
+
+    resetCrop: async () => {
+      const s = get();
+      if (!s.uncropped || !s.image) return;
+      try {
+        if (ipc.isTauri()) await ipc.resetCrop();
+        cancelTrace();
+        URL.revokeObjectURL(s.image.url);
+        if (s.depth.url) URL.revokeObjectURL(s.depth.url);
+        set({
+          image: s.uncropped,
+          uncropped: null,
+          cropping: false,
+          depth: NO_DEPTH,
+          heightSource: "brightness",
+          // Keep the width; the height returns to the whole image's proportions.
+          heightMm: Math.round(((s.widthMm * s.uncropped.height) / s.uncropped.width) * 10) / 10,
+          trace: { ...EMPTY_TRACE, settings: s.trace.settings },
+          ...staleGcode(),
+        });
+        scheduleTrace();
+      } catch (e) {
+        set({ error: message(e) });
+      }
+    },
+
+    setHeightSource: (heightSource) => set({ heightSource, ...staleGcode() }),
+    setDetail: (detail) => set({ detail, ...staleGcode() }),
+
+    estimateDepth: async () => {
+      const { image } = get();
+      if (!image || get().depth.status === "working") return;
+      const working = (text: string) =>
+        set({ depth: { status: "working", message: text, url: null } });
+      working("Starting…");
+      try {
+        const png = await estimateDepth(image.url, working);
+        // The image may have been replaced or cropped while the model ran.
+        if (get().image !== image) return;
+        await ipc.setDepthMap(new Uint8Array(await png.arrayBuffer()));
+        set({
+          depth: { status: "ready", message: null, url: URL.createObjectURL(png) },
+          heightSource: "depth",
+          ...staleGcode(),
+        });
+      } catch (e) {
+        if (get().image !== image) return;
+        set({ depth: { status: "error", message: message(e), url: null } });
+      }
+    },
     setPosition: (patch) => set({ ...patch, ...staleGcode() }),
     setBed: (patch) =>
       set((s) => ({
@@ -508,11 +707,11 @@ export const useProject = create<ProjectState>((set, get) => {
     },
 
     exportSvg: async () => {
-      const { image, trace, widthMm } = get();
+      const { image, trace, widthMm, heightMm } = get();
       if (!image) return;
       const suggestedName = `${image.name.replace(/\.[^.]+$/, "")}.svg`;
       try {
-        const path = await ipc.exportSvg(trace.settings, widthMm, suggestedName);
+        const path = await ipc.exportSvg(trace.settings, widthMm, heightMm, suggestedName);
         if (path) set((s) => ({ exportedTo: path, trace: { ...s.trace, error: null } }));
       } catch (e) {
         set((s) => ({ trace: { ...s.trace, error: message(e) } }));
@@ -541,7 +740,7 @@ export const useProject = create<ProjectState>((set, get) => {
       const generation = ++gcodeGeneration;
       set({ gcode: { ...EMPTY_GCODE, busy: true } });
       try {
-        const program = await ipc.generateGcode(s.trace.settings, s.widthMm, {
+        const program = await ipc.generateGcode(s.trace.settings, s, {
           machine: {
             kind: s.machineKind,
             origin: s.origin,
@@ -554,7 +753,7 @@ export const useProject = create<ProjectState>((set, get) => {
           },
           offset: [rect.x, rect.y],
           operations: s.operations,
-        });
+        }, { use: s.heightSource === "depth" && s.depth.status === "ready", detail: s.detail });
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, program } });
         usePlayback.getState().finish();
@@ -579,4 +778,15 @@ export const useProject = create<ProjectState>((set, get) => {
       }
     },
   };
+});
+
+// Remember the machine between sessions.
+useProject.subscribe((s, previous) => {
+  const keys = ["machinePreset", "machineKind", "bed", "origin", "maxPowerS", "spindleRpm", "startGcode", "endGcode"] as const;
+  if (keys.every((key) => s[key] === previous[key])) return;
+  try {
+    localStorage.setItem(DEVICE_KEY, JSON.stringify(Object.fromEntries(keys.map((key) => [key, s[key]]))));
+  } catch {
+    // Not persisted; the choice still applies for this session.
+  }
 });

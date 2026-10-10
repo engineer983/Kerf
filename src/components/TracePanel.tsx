@@ -8,6 +8,7 @@ export function TracePanel() {
   const image = useProject((s) => s.image);
   const bed = useProject((s) => s.bed);
   const widthMm = useProject((s) => s.widthMm);
+  const heightMm = useProject((s) => s.heightMm);
   const showSource = useProject((s) => s.showSource);
   const exportedTo = useProject((s) => s.exportedTo);
   const { settings, result, busy, refining, error } = useProject((s) => s.trace);
@@ -21,7 +22,7 @@ export function TracePanel() {
 
   const pre = settings.preprocess;
   const manualLevel = pre.threshold.mode === "manual" ? pre.threshold.level : 128;
-  const heightMm = (widthMm * image.height) / image.width;
+
 
   return (
     <div className="flex flex-col gap-5">

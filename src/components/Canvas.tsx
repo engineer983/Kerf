@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Upload } from "lucide-react";
 import { findMaterial, paintMaterial } from "../lib/materials";
-import { Simulation } from "../lib/simulation";
+import { Simulation, type Rect } from "../lib/simulation";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
 import { artworkRect, stockRect, useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
+import { Handles } from "./Handles";
 import { PlaybackBar } from "./PlaybackBar";
 import { View3D } from "./View3D";
 
@@ -26,6 +27,9 @@ export function Canvas() {
   const image = useProject((s) => s.image);
   const importFile = useProject((s) => s.importFile);
   const widthMm = useProject((s) => s.widthMm);
+  const heightMm = useProject((s) => s.heightMm);
+  const aspectLocked = useProject((s) => s.aspectLocked);
+  const cropping = useProject((s) => s.cropping);
   const showSource = useProject((s) => s.showSource);
   const traced = useProject((s) => s.trace.result);
   const traceMode = useProject((s) => s.trace.settings.mode);
@@ -122,7 +126,43 @@ export function Canvas() {
     if (file) void importFile(file);
   }
 
-  const placed = artworkRect({ image, widthMm, left, front, bed, origin });
+  const placed = artworkRect({ image, widthMm, heightMm, left, front, bed, origin });
+
+  // The crop frame, in bed coordinates, while a crop is being chosen.
+  const [cropRect, setCropRect] = useState<Rect | null>(null);
+  useEffect(() => {
+    const rect = artworkRect(useProject.getState());
+    // Start a little inside the artwork, so the frame is easy to see and grab.
+    setCropRect(
+      cropping && rect
+        ? {
+            x: rect.x + rect.width * 0.1,
+            y: rect.y + rect.height * 0.1,
+            width: rect.width * 0.8,
+            height: rect.height * 0.8,
+          }
+        : null,
+    );
+  }, [cropping]);
+
+  const toBed = useCallback(
+    (e: { clientX: number; clientY: number }): [number, number] => {
+      const box = containerRef.current!.getBoundingClientRect();
+      const v = view ?? { x: 0, y: 0, mmPerPx: 1 };
+      return [v.x + (e.clientX - box.left) * v.mmPerPx, v.y + (e.clientY - box.top) * v.mmPerPx];
+    },
+    [view],
+  );
+
+  function applyCrop() {
+    if (!placed || !cropRect) return;
+    void useProject.getState().applyCrop({
+      x0: (cropRect.x - placed.x) / placed.width,
+      y0: (cropRect.y - placed.y) / placed.height,
+      x1: (cropRect.x + cropRect.width - placed.x) / placed.width,
+      y1: (cropRect.y + cropRect.height - placed.y) / placed.height,
+    });
+  }
   const px = view?.mmPerPx ?? 1;
 
   const material = findMaterial(materialId);
@@ -318,6 +358,51 @@ export function Canvas() {
           }`}
           style={{ left: (head.x - view.x) / px, top: (head.y - view.y) / px }}
         />
+      )}
+      {view && placed && !(simulation && mode === "3d") && (
+        // A second layer, above the result picture, so the frame stays visible
+        // and can be grabbed in every 2D view.
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full"
+          viewBox={`${view.x} ${view.y} ${size.w * view.mmPerPx} ${size.h * view.mmPerPx}`}
+        >
+          {cropRect ? (
+            <>
+              <path
+                fillRule="evenodd"
+                fill="rgba(0, 0, 0, 0.55)"
+                d={`M${placed.x} ${placed.y}h${placed.width}v${placed.height}h${-placed.width}zM${cropRect.x} ${cropRect.y}h${cropRect.width}v${cropRect.height}h${-cropRect.width}z`}
+              />
+              <Handles rect={cropRect} px={px} lockAspect={false} bounds={placed} dashed toBed={toBed} onChange={setCropRect} />
+            </>
+          ) : (
+            <Handles
+              rect={placed}
+              px={px}
+              lockAspect={aspectLocked}
+              toBed={toBed}
+              onChange={useProject.getState().setArtworkRect}
+            />
+          )}
+        </svg>
+      )}
+      {cropRect && (
+        <div
+          className="absolute top-3 left-1/2 flex -translate-x-1/2 cursor-default items-center gap-2 rounded-xl border border-line bg-surface/95 px-3 py-2 shadow-sm"
+          onPointerDown={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <span className="text-muted">Drag the frame to choose what to keep</span>
+          <button className="rounded-lg bg-accent px-3 py-1 font-medium text-accent-fg" onClick={applyCrop}>
+            Apply crop
+          </button>
+          <button
+            className="rounded-lg border border-line px-3 py-1 text-muted hover:text-fg"
+            onClick={() => useProject.getState().setCropping(false)}
+          >
+            Cancel
+          </button>
+        </div>
       )}
       {simulation && mode === "3d" && <View3D simulation={simulation} bed={bed} />}
       {simulation && <PlaybackBar />}
