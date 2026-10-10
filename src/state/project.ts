@@ -295,8 +295,17 @@ interface ProjectState {
   operations: OperationItem[];
   gcode: GcodeState;
   setStep: (step: Step) => void;
-  importFile: (file: File) => Promise<void>;
+  /**
+   * Starts a project from a picture. `drawnHeightMap` says the picture was
+   * drawn so that its brightness is its height, which a carving should then
+   * follow directly instead of estimating depth.
+   */
+  importFile: (file: File, options?: { drawnHeightMap?: boolean }) => Promise<void>;
   clearImage: () => void;
+  /** Saves the current project, then clears everything for a fresh start. */
+  newProject: () => Promise<void>;
+  /** True when the picture is a drawn height map: brightness is height. */
+  drawnHeightMap: boolean;
   setWidthMm: (widthMm: number) => void;
   setHeightMm: (heightMm: number) => void;
   setAspectLocked: (locked: boolean) => void;
@@ -616,8 +625,11 @@ export const useProject = create<ProjectState>((set, get) => {
       ...staleGcode(),
     });
 
-    // A carving is shaped from estimated depth, which is worked out once per picture.
-    if (goal === "carving") {
+    // A carving is shaped from estimated depth, which is worked out once per
+    // picture. A drawn height map already says how high each part is.
+    if (goal === "carving" && get().drawnHeightMap) {
+      if (get().heightSource !== "brightness") get().setHeightSource("brightness");
+    } else if (goal === "carving") {
       if (get().depth.status === "none" || get().depth.status === "error") await get().estimateDepth();
       if (get().depth.status === "ready" && get().heightSource !== "depth") get().setHeightSource("depth");
     }
@@ -686,7 +698,28 @@ export const useProject = create<ProjectState>((set, get) => {
 
     setStep: (step) => set({ step }),
 
-    importFile: async (file) => {
+    drawnHeightMap: false,
+
+    newProject: async () => {
+      // What was being worked on is kept, so starting again loses nothing.
+      if (get().image) await get().saveProject();
+      get().clearImage();
+      set((s) => ({
+        projectId: null,
+        step: "import",
+        trace: EMPTY_TRACE,
+        simple: { goal: null, quality: "standard", depth: 4, cutOut: false, part: "main" },
+        operations: [fresh(s.machineKind)],
+        heightSource: "brightness",
+        detail: 0.15,
+        depthFloor: 0,
+        drawnHeightMap: false,
+        aspectLocked: true,
+        ...staleGcode(),
+      }));
+    },
+
+    importFile: async (file, options) => {
       if (!isAcceptedImage(file)) {
         set({ error: `${file.name} is not a supported image (PNG, JPEG, WebP, BMP or GIF).` });
         return;
@@ -722,6 +755,7 @@ export const useProject = create<ProjectState>((set, get) => {
           aspectLocked: true,
           uncropped: null,
           cropping: false,
+          drawnHeightMap: options?.drawnHeightMap ?? false,
           heightSource: "brightness" as const,
           depth: NO_DEPTH,
           left: STOCK_MARGIN_MM,

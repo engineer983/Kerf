@@ -140,6 +140,26 @@ export const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: "new_project",
+    description:
+      "Start a new, empty project. The current project is saved first, so nothing is lost. Afterwards there is no picture: either the person imports one, or you draw one with create_picture.",
+    schema: { type: "object", properties: {} },
+  },
+  {
+    name: "create_picture",
+    description:
+      "Draw a picture yourself, as SVG, and load it as the project's picture. Use this when the person asks you to make or draw something (a flag, an emblem, lettering, a simple illustration or pattern) rather than supplying a picture. It replaces the current picture and starts a new project. You can only draw what SVG can express; you cannot produce a photograph. For a 3D carving, draw a height map and set heightMap to true: white is the highest point and black the lowest, and smooth gradients between them become smooth slopes, so rolling waves are bands of light and dark gradient, and a raised border is a lighter band. Detail drawn in flat colour with no shading carves flat. For laser engraving or cutting, draw normally in black on white. Give the SVG a viewBox and draw at the proportions of the finished piece.",
+    schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "A short name for the picture, such as 'wavy flag'." },
+        svg: { type: "string", description: "A complete SVG document, starting with <svg and including a viewBox." },
+        heightMap: { type: "boolean", description: "True if the picture is a greyscale height map for carving: brightness is height." },
+      },
+      required: ["name", "svg"],
+    },
+  },
+  {
     name: "generate_gcode",
     description:
       "Work out the tool's moves for the included operations and return the job's statistics (time, distances, extent), or the reason it could not be generated. This does not send anything to a machine.",
@@ -148,6 +168,11 @@ export const TOOLS: ToolSpec[] = [
 ];
 
 class ToolError extends Error {}
+
+/** The most SVG the assistant may send as one drawing. */
+const MAX_SVG_CHARS = 400_000;
+/** Longest side, in pixels, of the picture made from a drawing. */
+const DRAWN_PICTURE_PX = 1600;
 
 type Input = Record<string, unknown>;
 
@@ -426,6 +451,70 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     return { content: "Relief height settings updated.", summary: "Changed where the relief takes its height from" };
   },
 
+  new_project: async () => {
+    await useProject.getState().newProject();
+    return {
+      content: "A new, empty project is open. There is no picture yet: the person can import one, or you can draw one with create_picture.",
+      summary: "Started a new project",
+    };
+  },
+
+  create_picture: async (input) => {
+    const name = typeof input.name === "string" && input.name.trim() ? input.name.trim().slice(0, 60) : "drawing";
+    const heightMap = flag(input, "heightMap") ?? false;
+    if (typeof input.svg !== "string") throw new ToolError("svg must be a string containing an SVG document.");
+    let svg = input.svg.trim();
+    const start = svg.indexOf("<svg");
+    if (start < 0) throw new ToolError("svg must contain an <svg> element.");
+    svg = svg.slice(start);
+    if (svg.length > MAX_SVG_CHARS) throw new ToolError(`The SVG is too large (${svg.length} characters; the limit is ${MAX_SVG_CHARS}). Simplify it.`);
+    // An SVG shown as an image must declare its namespace.
+    if (!/<svg[^>]*xmlns=/.test(svg)) svg = svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+
+    // The drawing is turned into an ordinary PNG. Loading it as an image means
+    // nothing inside it can run, and nothing it refers to is fetched.
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    let png: Blob;
+    try {
+      const drawing = new Image();
+      drawing.src = url;
+      try {
+        await drawing.decode();
+      } catch {
+        throw new ToolError("The SVG could not be drawn. Check that it is well-formed and has a viewBox.");
+      }
+      const [w, h] = [drawing.naturalWidth || 300, drawing.naturalHeight || 150];
+      const scale = DRAWN_PICTURE_PX / Math.max(w, h);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      const ctx = canvas.getContext("2d")!;
+      // Undrawn areas are white: untouched for a laser. For a height map, the
+      // drawing is expected to cover the whole picture.
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(drawing, 0, 0, canvas.width, canvas.height);
+      const made = await new Promise<Blob | null>((done) => canvas.toBlob(done, "image/png"));
+      if (!made) throw new ToolError("The drawing could not be turned into a picture.");
+      png = made;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+
+    const before = useProject.getState();
+    // What was being worked on is kept before it is replaced.
+    if (before.image) await before.saveProject();
+    await useProject.getState().importFile(new File([png], `${name}.png`, { type: "image/png" }), { drawnHeightMap: heightMap });
+    const after = useProject.getState();
+    if (after.error || !after.image || after.image === before.image) {
+      throw new ToolError(after.error ?? "The picture could not be loaded.");
+    }
+    return {
+      content: `The picture "${name}" is loaded (${after.image.width} x ${after.image.height} pixels) as a new project${heightMap ? ", and a carving will take its height from brightness" : ""}. Look at the project to see how it was set up.`,
+      summary: `Drew a picture: ${name}`,
+    };
+  },
+
   generate_gcode: async () => {
     const s = useProject.getState();
     if (!s.image) throw new ToolError("There is no picture loaded yet.");
@@ -482,6 +571,8 @@ Clean signs and logos: on a laser, fill the traced shapes; on a router, follow t
 To free the finished piece on a router, add a cutout last: outside the line, depth equal to the material's thickness, with tabs so the piece cannot come loose. Operations that use different bits cannot run as one job, because the bit must be changed and the height set again in between; include one at a time and tell the person the order to run them in.
 
 Before you finish, check that the artwork fits on the material, that no depth exceeds the bit's cutting length, and that a relief does not go through the material.
+
+You can start a new project, and you can make the picture yourself by drawing it as SVG. When the person asks you to create something rather than giving you a picture, draw it: start a new project if one is open, draw the picture, then set the job up and generate as usual. Drawing suits flags, emblems, lettering, patterns and simple illustrations. It cannot produce a photograph or a realistic likeness; if that is what they want, say so and ask them to import a picture instead. For a carving, draw a height map, where brightness is height, and think about the shape in relief: what is highest, what is lowest, and how the surface slopes between. Draw it carefully, with enough gradient stops that curves look smooth, and at the proportions of the real thing. After drawing, say briefly what you drew so the person knows what to expect, since they will see it appear on the canvas.
 
 You cannot connect to, move, start or stop a machine, and you should say so plainly if asked. Never suggest that a job is safe to leave running unattended.
 

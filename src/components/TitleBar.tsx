@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Monitor, Moon, Redo2, Save, Sun, Undo2, Wrench } from "lucide-react";
+import { FilePlus2, MessageSquare, Monitor, Moon, Redo2, Save, Sun, Undo2, Wrench } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
@@ -50,6 +50,14 @@ export function TitleBar() {
             Stop machine
           </button>
         )}
+        <button
+          onClick={() => void useProject.getState().newProject()}
+          aria-label="New project"
+          title="Start a new project. The current one is saved to Your projects first."
+          className="rounded-md border border-line p-1.5 text-muted transition-colors hover:text-fg"
+        >
+          <FilePlus2 size={14} />
+        </button>
         <button
           onClick={() => void useProject.getState().saveProject()}
           disabled={!imageName}
