@@ -76,7 +76,7 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
   const a = useAssistant();
   const preset = findProvider(a.providerId);
   const model = a.models[a.providerId] ?? preset.defaultModel;
-  const baseUrl = a.baseUrls[a.providerId] ?? preset.baseUrl;
+  const baseUrl = (preset.addressEditable ? a.baseUrls[a.providerId] : undefined) ?? preset.baseUrl;
   const [key, setKey] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -100,7 +100,7 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
       </label>
       <p className="text-muted">{preset.note}</p>
 
-      {preset.protocol === "openAi" && (
+      {preset.addressEditable && (
         <label className="flex flex-col gap-1">
           Server address
           <input

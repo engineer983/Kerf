@@ -3,7 +3,12 @@ import { runTool, SYSTEM_PROMPT, TOOLS } from "../lib/assistantTools";
 import * as ipc from "../lib/ipc";
 import { findProvider, type Protocol } from "../lib/providers";
 
-const SETTINGS_KEY = "kerf.assistant";
+// Version 2: an address is only remembered for providers whose address can be
+// changed. Settings saved under the first key are discarded, since they could
+// hold an address for a hosted provider, which nothing in the interface could
+// then correct.
+const SETTINGS_KEY = "kerf.assistant.v2";
+const OLD_SETTINGS_KEY = "kerf.assistant";
 /** The most times in a row the model may call tools before it must answer. */
 const MAX_ROUNDS = 12;
 
@@ -25,6 +30,7 @@ interface Settings {
 
 function loadSettings(): Settings {
   try {
+    localStorage.removeItem(OLD_SETTINGS_KEY);
     const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
     if (stored && typeof stored.providerId === "string") {
       return { providerId: stored.providerId, models: stored.models ?? {}, baseUrls: stored.baseUrls ?? {} };
@@ -98,7 +104,8 @@ export const useAssistant = create<AssistantState>((set, get) => {
     const preset = findProvider(providerId);
     return {
       protocol: preset.protocol,
-      baseUrl: (baseUrls[providerId] ?? preset.baseUrl).trim(),
+      // A hosted provider is always reached at its own address.
+      baseUrl: ((preset.addressEditable ? baseUrls[providerId] : undefined) ?? preset.baseUrl).trim(),
       model: (models[providerId] ?? preset.defaultModel).trim(),
     };
   };
