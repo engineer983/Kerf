@@ -17,8 +17,8 @@ const BY_TEXT: Record<string, string> = {
   Done: "Go back to the conversation",
 
   // Import and trace
-  "Choose image…": "Pick a PNG, JPEG, WebP, BMP or GIF from your computer",
-  "Replace image…": "Pick a different picture; the current one is dropped",
+  "Choose image…": "Pick a PNG, JPEG, WebP, BMP or GIF to trace, or an SVG to use as drawn",
+  "Replace image…": "Pick a different picture or SVG; the current one is dropped",
   "Remove image": "Clear the picture and start again",
   Outline: "Trace the dark areas as solid shapes, for cutting or one-colour engraving",
   Colour: "Trace each colour as its own set of shapes",
@@ -40,6 +40,7 @@ const BY_TEXT: Record<string, string> = {
   "Change the box…": "Open the box maker with this box's sizes, to alter them",
   "Change the layers…": "Open the layers maker with these settings, to alter them",
   "Back to the picture": "Drop the layers and work from the picture again",
+  "Change the text…": "Open the text maker with these words, to alter them",
   "Go back": "Clear the generated job and go back",
 
   Simple: "Choose what you want made and let the settings be picked for you",

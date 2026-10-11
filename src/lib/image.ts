@@ -2,6 +2,9 @@ import type { SourceImage } from "../state/project";
 
 export const ACCEPTED_IMAGE_TYPES = "image/png,image/jpeg,image/webp,image/bmp,image/gif";
 
+/** What the file chooser offers: pictures to trace, and SVG drawings to use as they are. */
+export const ACCEPTED_FILE_TYPES = `${ACCEPTED_IMAGE_TYPES},image/svg+xml,.svg`;
+
 export function isAcceptedImage(file: File): boolean {
   return ACCEPTED_IMAGE_TYPES.split(",").includes(file.type);
 }

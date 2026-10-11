@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { CUT_COLOR, MARK_COLOR } from "../lib/design";
+import { CUT_COLOR, isFixed, MARK_COLOR } from "../lib/design";
 import { isTauri, type OperationKind } from "../lib/ipc";
 import { findMaterial, MATERIALS } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
@@ -44,6 +44,8 @@ export function OperationsPanel() {
   const shaping = useProject((s) => s.depth.status === "working");
   const traced = useProject((s) => s.trace.result);
   const designed = useProject((s) => s.design !== null);
+  // A box or a stack of layers: cut right through, at the size it was drawn.
+  const fixed = useProject((s) => s.design !== null && isFixed(s.design));
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
   const actions = useProject.getState();
 
@@ -86,7 +88,8 @@ export function OperationsPanel() {
             : "Every setting is yours to change. Switching back to Simple replaces them with the automatic setup."}
         </p>
       </div>
-      {designed ? <DesignPanel /> : mode === "simple" && <SimpleSetup />}
+      {designed && <DesignPanel />}
+      {!fixed && mode === "simple" && <SimpleSetup />}
       <Section title="Material">
         <Select
           label="Type"
@@ -134,11 +137,11 @@ export function OperationsPanel() {
 
       <Section title="Artwork">
         <p className="text-muted">
-          {designed
+          {fixed
             ? "Drag the design on the canvas to move it. It stays the size it was drawn at, so that its parts fit."
-            : "Drag the picture on the canvas to move it, or its handles to resize it."}
+            : "Drag the artwork on the canvas to move it, or its handles to resize it."}
         </p>
-        {!designed && (
+        {!fixed && (
           <>
             <NumberField label="Width" unit="mm" min={1} max={5000} value={widthMm} onChange={actions.setWidthMm} />
             <NumberField label="Height" unit="mm" min={1} max={5000} value={heightMm} onChange={actions.setHeightMm} />
@@ -178,12 +181,12 @@ export function OperationsPanel() {
         </div>
       </Section>
 
-      {(mode === "advanced" || designed) &&
+      {(mode === "advanced" || fixed) &&
         operations.map((operation, index) => (
           <OperationCard
             key={operation.id}
             operation={operation}
-            title={(designed && operation.color && LINE_NAMES[operation.color]) || `Operation ${index + 1}`}
+            title={(fixed && operation.color && LINE_NAMES[operation.color]) || `Operation ${index + 1}`}
             colors={colors}
             removable={operations.length > 1}
           />
@@ -205,8 +208,9 @@ export function OperationsPanel() {
         </button>
         <button
           onClick={() => useUi.getState().setMaker("layers")}
+          disabled={designed}
           title="Slice the picture into layers to cut from thin sheet and stack"
-          className="col-span-2 rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
+          className="col-span-2 rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg disabled:opacity-40"
         >
           Stacked layers…
         </button>
@@ -352,7 +356,7 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
   const tools = useToolbox((s) => s.tools);
   const openToolbox = useToolbox((s) => s.setOpen);
   const material = useProject((s) => findMaterial(s.materialId));
-  const designed = useProject((s) => s.design !== null);
+  const designed = useProject((s) => s.design !== null && isFixed(s.design));
   const { id, kind } = operation;
   const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief" || kind.type === "cncCutout";
   const thickness = useProject((s) => s.thickness);

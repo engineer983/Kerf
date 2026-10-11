@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Upload } from "lucide-react";
+import { isFixed } from "../lib/design";
 import { findMaterial, paintMaterial } from "../lib/materials";
 import { Simulation, type Rect } from "../lib/simulation";
 import { setResultCanvas } from "../lib/thumbnail";
@@ -36,6 +37,7 @@ export function Canvas() {
   const traceMode = useProject((s) => s.trace.settings.mode);
   // A box or a set of layers is drawn as the lines to cut, with no picture behind.
   const designed = useProject((s) => s.design !== null);
+  const fixedSize = useProject((s) => s.design !== null && isFixed(s.design));
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const program = useProject((s) => s.gcode.program);
@@ -520,7 +522,7 @@ export function Canvas() {
               rect={placed}
               px={px}
               lockAspect={aspectLocked}
-              moveOnly={designed}
+              moveOnly={fixedSize}
               toBed={toBed}
               onChange={useProject.getState().setArtworkRect}
             />

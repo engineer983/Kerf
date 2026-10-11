@@ -1,6 +1,9 @@
 //! Loading SVG artwork as flattened polylines in millimetres.
 
-use usvg::tiny_skia_path::{PathSegment, Point};
+use std::sync::{Arc, OnceLock};
+
+use usvg::fontdb;
+use usvg::tiny_skia_path::{PathSegment, Point, Transform};
 use usvg::{Group, Node, Paint};
 
 /// SVG user units are 1/96 inch.
@@ -39,10 +42,30 @@ impl Artwork {
     /// Parses an SVG document and flattens its curves so that no point of a
     /// polyline is further than `tolerance` millimetres from the true curve.
     pub fn from_svg(svg: &str, tolerance: f64) -> Result<Self, String> {
-        let tree = usvg::Tree::from_str(svg, &usvg::Options::default())
+        Self::read(svg, tolerance, &usvg::Options::default())
+    }
+
+    /// As [`Artwork::from_svg`], and with any text in the document turned
+    /// into the outlines of its letters, using the fonts installed on this
+    /// computer. Reading those fonts takes a moment the first time.
+    pub fn from_svg_with_text(svg: &str, tolerance: f64) -> Result<Self, String> {
+        let options = usvg::Options {
+            fontdb: system_fonts(),
+            ..usvg::Options::default()
+        };
+        Self::read(svg, tolerance, &options)
+    }
+
+    fn read(svg: &str, tolerance: f64, options: &usvg::Options) -> Result<Self, String> {
+        let tree = usvg::Tree::from_str(svg, options)
             .map_err(|e| format!("Could not read the SVG: {e}"))?;
         let mut shapes = Vec::new();
-        collect(tree.root(), tolerance.max(1e-4), &mut shapes);
+        collect(
+            tree.root(),
+            tolerance.max(1e-4),
+            Transform::identity(),
+            &mut shapes,
+        );
         Ok(Self {
             width: tree.size().width() as f64 * MM_PER_PX,
             height: tree.size().height() as f64 * MM_PER_PX,
@@ -62,14 +85,39 @@ impl Artwork {
     }
 }
 
+/// The fonts installed on this computer, read once and kept.
+fn system_fonts() -> Arc<fontdb::Database> {
+    static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut fonts = fontdb::Database::new();
+            fonts.load_system_fonts();
+            Arc::new(fonts)
+        })
+        .clone()
+}
+
+/// The names of the font families installed on this computer, in order.
+pub fn font_families() -> Vec<String> {
+    let mut names: Vec<String> = system_fonts()
+        .faces()
+        .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names
+}
+
 pub(crate) fn distance(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
 }
 
-fn collect(group: &Group, tolerance: f64, shapes: &mut Vec<Shape>) {
+/// Gathers the paths under `group`. `outer` is a transform the paths' own
+/// absolute transforms do not include, which is the case inside text.
+fn collect(group: &Group, tolerance: f64, outer: Transform, shapes: &mut Vec<Shape>) {
     for node in group.children() {
         match node {
-            Node::Group(group) => collect(group, tolerance, shapes),
+            Node::Group(group) => collect(group, tolerance, outer, shapes),
             Node::Path(path) if path.is_visible() => {
                 let paint = path
                     .fill()
@@ -81,7 +129,8 @@ fn collect(group: &Group, tolerance: f64, shapes: &mut Vec<Shape>) {
                     }
                     _ => None,
                 };
-                let Some(data) = path.data().clone().transform(path.abs_transform()) else {
+                let placed = outer.pre_concat(path.abs_transform());
+                let Some(data) = path.data().clone().transform(placed) else {
                     continue;
                 };
                 let polylines = flatten(data.segments(), tolerance);
@@ -89,7 +138,16 @@ fn collect(group: &Group, tolerance: f64, shapes: &mut Vec<Shape>) {
                     shapes.push(Shape { color, polylines });
                 }
             }
-            // Embedded images and text are not toolpaths.
+            // Text arrives already laid out as the outlines of its letters,
+            // where fonts were given; without them it is left out.
+            // The outlines are placed relative to the text, not the page.
+            Node::Text(text) => collect(
+                text.flattened(),
+                tolerance,
+                outer.pre_concat(text.abs_transform()),
+                shapes,
+            ),
+            // Embedded images are not toolpaths.
             _ => {}
         }
     }
@@ -245,6 +303,53 @@ mod tests {
         assert_eq!(art.shapes.len(), 3);
         assert_eq!(art.shapes[0].polylines.len(), 2);
         assert_eq!(art.colors(), ["#102030", "#00ff00"]);
+    }
+
+    #[test]
+    fn text_becomes_the_outlines_of_its_letters_given_fonts() {
+        let families = font_families();
+        // Machines that build this without any fonts have nothing to check.
+        let Some(family) = families.first() else {
+            return;
+        };
+        let document = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200mm" height="50mm" viewBox="0 0 200 50"><text x="5" y="30" font-family="{}" font-size="20">Hi</text></svg>"##,
+            family.replace('&', "&amp;").replace('"', "&quot;")
+        );
+        // Without fonts the text is left out; with them it is closed outlines.
+        assert!(Artwork::from_svg(&document, 0.05)
+            .unwrap()
+            .shapes
+            .is_empty());
+        let art = Artwork::from_svg_with_text(&document, 0.05).unwrap();
+        let outlines: Vec<&Polyline> = art.shapes.iter().flat_map(|s| &s.polylines).collect();
+        // Symbol fonts may draw nothing for these letters.
+        if !outlines.is_empty() {
+            assert!(outlines.iter().all(|p| p.closed));
+            let tallest = outlines
+                .iter()
+                .flat_map(|p| &p.points)
+                .map(|p| p[1])
+                .fold(f64::MIN, f64::max);
+            assert!(tallest <= 50.0);
+            // A 20-unit font on a page of one unit to the millimetre: the
+            // letters are millimetres tall, not a quarter of that.
+            let highest = outlines
+                .iter()
+                .flat_map(|p| &p.points)
+                .map(|p| p[1])
+                .fold(f64::MAX, f64::min);
+            if families.iter().any(|f| f == "Arial") && family == "Arial" {
+                assert!(
+                    (10.0..20.0).contains(&(tallest - highest)),
+                    "{}",
+                    tallest - highest
+                );
+            }
+        }
+        assert!(families
+            .windows(2)
+            .all(|pair| pair[0].to_lowercase() <= pair[1].to_lowercase()));
     }
 
     #[test]

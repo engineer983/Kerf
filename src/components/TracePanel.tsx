@@ -20,8 +20,9 @@ export function TracePanel() {
     return (
       <div className="flex flex-col gap-4">
         <p className="text-muted">
-          This {design.kind === "box" ? "box" : "set of layers"} is already drawn as exact lines, so there is
-          nothing to trace. You can save the lines as an SVG to use elsewhere.
+          This {{ box: "box", layers: "set of layers", text: "text", drawing: "drawing" }[design.kind]} is
+          already exact lines, so there is nothing to trace. You can save the lines as an SVG to use
+          elsewhere.
         </p>
         <button
           onClick={() => void exportSvg()}

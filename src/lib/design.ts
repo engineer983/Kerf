@@ -1,4 +1,4 @@
-import type { MachineKind, Sheet } from "./ipc";
+import type { MachineKind, Sheet, TextSpec } from "./ipc";
 
 // Designs are made from measurements rather than traced from a picture: a
 // box with finger joints, or a picture sliced into layers to stack. They are
@@ -42,7 +42,21 @@ interface Made {
   madeFor: MachineKind;
 }
 
-export type Design = (Made & { kind: "box"; input: BoxInput }) | (Made & { kind: "layers"; input: LayersInput });
+export type Design =
+  | (Made & { kind: "box"; input: BoxInput })
+  | (Made & { kind: "layers"; input: LayersInput })
+  /** Words set in a font. */
+  | (Made & { kind: "text"; input: TextSpec })
+  /** A drawing opened from a file. */
+  | (Made & { kind: "drawing"; input: { name: string } });
+
+/**
+ * Whether a design must stay the size it was drawn at. A box's joints and a
+ * stack's layers only fit at that size; words and drawings can be any size.
+ */
+export const isFixed = (design: Design) => design.kind === "box" || design.kind === "layers";
+
+export const DEFAULT_TEXT: TextSpec = { text: "", font: "", sizeMm: 20, bold: false, italic: false, align: "center" };
 
 export const DEFAULT_BOX: BoxInput = { width: 150, depth: 100, height: 80, thickness: 3, fingerWidth: 0, lid: false, kerf: 0.15, toolId: null };
 export const DEFAULT_LAYERS: LayersInput = { layers: 5, widthMm: 150, smallestPieceMm: 4, marks: true, source: "brightness", lightIsHigh: true };
@@ -63,6 +77,13 @@ export function describeDesign(design: Design): string {
     const { width, depth, height, thickness, lid } = design.input;
     const [w, d, h] = insideOf(design.input).map(tidy);
     return `${lid ? "A closed" : "An open-topped"} box ${tidy(width)} x ${tidy(depth)} x ${tidy(height)} mm outside (${w} x ${d} x ${h} mm inside) in ${tidy(thickness)} mm material: ${pieces} panels on ${sheets}.`;
+  }
+  if (design.kind === "text" || design.kind === "drawing") {
+    const { widthMm, heightMm } = design.sheets[0];
+    const size = `drawn ${tidy(widthMm)} x ${tidy(heightMm)} mm, and can be resized`;
+    return design.kind === "text"
+      ? `The words "${design.input.text.replace(/\s+/g, " ").trim()}" in ${design.input.font}, as the outlines of their letters, ${size}.`
+      : `The drawing "${design.input.name}", as exact lines, ${size}.`;
   }
   return `The picture as ${pieces} layers to stack, each ${tidy(design.input.widthMm)} mm wide, on ${sheets}. Layer 1 is the base; glue each layer onto the one before.`;
 }

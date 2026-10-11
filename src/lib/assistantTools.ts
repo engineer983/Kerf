@@ -1,4 +1,4 @@
-import { DEFAULT_BOX, DEFAULT_LAYERS, describeDesign } from "./design";
+import { DEFAULT_BOX, DEFAULT_LAYERS, DEFAULT_TEXT, describeDesign } from "./design";
 import * as ipc from "./ipc";
 import type { OperationKind } from "./ipc";
 import { findMaterial, MATERIALS } from "./materials";
@@ -252,6 +252,23 @@ export const TOOLS: ToolSpec[] = [
         bit: { type: "string", description: "Router only: the id or name of the flat end mill to cut with. Defaults to the first flat bit in the toolbox." },
       },
       required: ["width", "depth", "height"],
+    },
+  },
+  {
+    name: "make_text",
+    description:
+      "Draw words in a font installed on the person's computer, as the outlines of their letters, and start a new project from them. Use it for signs, name plates, labels and lettering; it is exact, where drawing letters yourself in create_picture is not. The result can be resized like a picture, engraved solid or outlined on a laser, or followed with a bit on a router, and a cutout can be added round it. If the font asked for is not installed, the error lists some that are. Bold, simple fonts suit small sizes.",
+    schema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The words. Use a line break for a new line." },
+        font: { type: "string", description: "A font family's name, such as Arial. Leave out for a plain default." },
+        size: number("The font's size in millimetres; capital letters stand about seven tenths of it. Defaults to 20."),
+        bold: { type: "boolean" },
+        italic: { type: "boolean" },
+        align: { type: "string", enum: ["left", "center", "right"], description: "How lines of different lengths line up. Defaults to center." },
+      },
+      required: ["text"],
     },
   },
   {
@@ -763,6 +780,32 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     };
   },
 
+  make_text: async (input) => {
+    if (typeof input.text !== "string" || !input.text.trim()) throw new ToolError("text is required.");
+    const fonts = await ipc.listFonts();
+    const usual = ["Arial", "Segoe UI", "Helvetica", "DejaVu Sans", "Liberation Sans"];
+    let font = usual.find((name) => fonts.includes(name)) ?? fonts[0] ?? "";
+    if (typeof input.font === "string" && input.font.trim()) {
+      const wanted = input.font.trim().toLowerCase();
+      const found = fonts.find((name) => name.toLowerCase() === wanted);
+      if (!found) {
+        const near = fonts.filter((name) => name.toLowerCase().includes(wanted.split(" ")[0]));
+        throw new ToolError(`The font "${input.font}" is not installed. ${near.length ? `Similar: ${near.slice(0, 12).join(", ")}.` : `Some that are: ${fonts.slice(0, 30).join(", ")}.`}`);
+      }
+      font = found;
+    }
+    await useProject.getState().makeText({
+      text: input.text.slice(0, 2000),
+      font,
+      sizeMm: num(input, "size", 1, 1000) ?? DEFAULT_TEXT.sizeMm,
+      bold: flag(input, "bold") ?? false,
+      italic: flag(input, "italic") ?? false,
+      align: choice(input, "align", ["left", "center", "right"] as const) ?? "center",
+    });
+    const made = useProject.getState().design!;
+    return { content: `${describeDesign(made)} It is loaded as a new project. Look at the project to see how it was set up.`, summary: "Drew the text" };
+  },
+
   make_layers: async (input) => {
     const s = useProject.getState();
     if (!s.image) throw new ToolError("There is no picture loaded yet.");
@@ -850,7 +893,7 @@ Search the web when they want a real photograph or an existing artwork, or when 
 
 You cannot see a picture that was made or found unless the person has let you see the project's picture, so do not describe it as if you had. Say what you asked for, and ask them how it looks.
 
-You can also make two things that need no tracing. A box with finger joints is made from its outside size and the material's thickness: it starts a new project of panels to cut. Stacked layers slice the loaded picture into pieces to cut from thin sheet and glue into a stack. Both are exact lines kept at the size they were drawn, so they cannot be resized or engraved as pictures; to change one, make it again. When one needs more than one sheet, the person cuts a sheet at a time.
+You can also make things that need no tracing. Words are drawn in any installed font as the outlines of their letters, ready to engrave, outline or follow with a bit; unlike boxes and layers they can be resized afterwards. The person can also open drawings themselves (SVG files, and PDF, AI and EPS where Inkscape is installed), which are likewise used as exact lines. Two more things need no tracing. A box with finger joints is made from its outside size and the material's thickness: it starts a new project of panels to cut. Stacked layers slice the loaded picture into pieces to cut from thin sheet and glue into a stack. Both are exact lines kept at the size they were drawn, so they cannot be resized or engraved as pictures; to change one, make it again. When one needs more than one sheet, the person cuts a sheet at a time.
 
 You cannot connect to, move, start or stop a machine, and you should say so plainly if asked. Never suggest that a job is safe to leave running unattended.
 

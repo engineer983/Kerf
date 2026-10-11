@@ -21,14 +21,16 @@ function applyTheme(theme: ThemeChoice) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
 
+export type Maker = "box" | "layers" | "text";
+
 interface UiState {
   theme: ThemeChoice;
   chatOpen: boolean;
-  /** Which of the makers is open: the box maker, the layers maker, or neither. */
-  maker: "box" | "layers" | null;
+  /** Which of the makers is open, if any. */
+  maker: Maker | null;
   setTheme: (theme: ThemeChoice) => void;
   toggleChat: () => void;
-  setMaker: (maker: "box" | "layers" | null) => void;
+  setMaker: (maker: Maker | null) => void;
 }
 
 export const useUi = create<UiState>((set) => ({

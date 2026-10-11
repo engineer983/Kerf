@@ -1,5 +1,6 @@
 mod assistant;
 mod design;
+mod drawing;
 mod gallery;
 mod machine;
 mod pictures;
@@ -488,7 +489,12 @@ pub fn run() {
             pictures::fetch_picture,
             design::set_design,
             design::make_box,
-            design::make_layers
+            design::make_layers,
+            drawing::read_svg,
+            drawing::open_drawing,
+            drawing::inkscape_found,
+            drawing::list_fonts,
+            drawing::make_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");

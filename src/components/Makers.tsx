@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import { DEFAULT_BOX, DEFAULT_LAYERS, insideOf, type BoxInput, type LayersInput } from "../lib/design";
+import { DEFAULT_BOX, DEFAULT_LAYERS, DEFAULT_TEXT, insideOf, type BoxInput, type LayersInput } from "../lib/design";
+import { listFonts, type TextSpec } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
@@ -14,6 +15,7 @@ export function Makers() {
   const maker = useUi((s) => s.maker);
   if (maker === "box") return <BoxMaker />;
   if (maker === "layers") return <LayerMaker />;
+  if (maker === "text") return <TextMaker />;
   return null;
 }
 
@@ -64,7 +66,7 @@ function Maker({ title, about, action, make, children }: MakerProps) {
             <X size={16} />
           </button>
         </header>
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-5">
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-5" onChangeCapture={() => setProblem(null)}>
           <p className="text-muted">{about}</p>
           {children}
           {problem && (
@@ -239,6 +241,99 @@ function LayerMaker() {
         <p className="text-muted">
           On a router the cut follows the middle of each line, so every piece comes out smaller by half the
           bit's width all round. Use a small bit, and stick the sheet down so pieces cannot come loose.
+        </p>
+      )}
+    </Maker>
+  );
+}
+
+/** Fonts tried first for new text, in order; the first one installed is used. */
+const USUAL_FONTS = ["Arial", "Segoe UI", "Helvetica", "DejaVu Sans", "Liberation Sans"];
+
+function TextMaker() {
+  const design = useProject((s) => s.design);
+  const machineKind = useProject((s) => s.machineKind);
+  const [fonts, setFonts] = useState<string[]>([]);
+  const [text, setText] = useState<TextSpec>(() => (design?.kind === "text" ? design.input : DEFAULT_TEXT));
+  const change = (patch: Partial<TextSpec>) => setText((t) => ({ ...t, ...patch }));
+
+  // The fonts are this computer's own, so the list is asked for.
+  useEffect(() => {
+    listFonts()
+      .then((names) => {
+        setFonts(names);
+        setText((t) => (t.font ? t : { ...t, font: USUAL_FONTS.find((f) => names.includes(f)) ?? names[0] ?? "" }));
+      })
+      .catch(() => setFonts([]));
+  }, []);
+
+  return (
+    <Maker
+      title="Text"
+      about="Words in any font installed on this computer, drawn as the outlines of their letters. A laser can engrave them solid or trace round them; a router follows their edges."
+      action={design?.kind === "text" ? "Make it again" : "Make the text"}
+      make={() => useProject.getState().makeText(text)}
+    >
+      <label className="flex flex-col gap-1">
+        Words
+        <textarea
+          autoFocus
+          className="h-20 resize-none rounded-md border border-line bg-raised px-2 py-1.5 select-text"
+          placeholder="Type what it should say. Press Enter for a new line."
+          value={text.text}
+          onChange={(e) => change({ text: e.target.value })}
+        />
+      </label>
+      {fonts.length > 0 ? (
+        <Select
+          label="Font"
+          hint={{ text: "The typeface. Bold, simple fonts engrave and carve most clearly; thin or script fonts can lose their fine strokes at small sizes." }}
+          value={text.font}
+          options={fonts.map((name) => ({ value: name, label: name }))}
+          onChange={(font) => change({ font })}
+        />
+      ) : (
+        <p className="text-muted">Looking for this computer's fonts…</p>
+      )}
+      <NumberField
+        label="Letter size"
+        unit="mm"
+        step={1}
+        min={1}
+        max={1000}
+        value={text.sizeMm}
+        hint={{ text: "The font's size. Capital letters stand about seven tenths of it, so 20 mm gives capitals about 14 mm tall. You can also resize the words on the canvas afterwards." }}
+        onChange={(sizeMm) => change({ sizeMm })}
+      />
+      <Checkbox label="Bold" hint={{ text: "Uses the font's heavier weight, where it has one." }} checked={text.bold} onChange={(bold) => change({ bold })} />
+      <Checkbox label="Italic" hint={{ text: "Uses the font's slanted style, where it has one." }} checked={text.italic} onChange={(italic) => change({ italic })} />
+      <Select
+        label="Line up"
+        hint={{ text: "How lines of different lengths are lined up with each other." }}
+        value={text.align}
+        options={[
+          { value: "left", label: "Left" },
+          { value: "center", label: "Centre" },
+          { value: "right", label: "Right" },
+        ]}
+        onChange={(align) => change({ align })}
+      />
+      <div
+        aria-label="Preview"
+        className="min-h-16 overflow-hidden rounded-lg border border-line bg-raised px-3 py-2 text-[26px] leading-tight whitespace-pre-wrap"
+        style={{
+          fontFamily: `"${text.font.replace(/"/g, "")}"`,
+          fontWeight: text.bold ? 700 : 400,
+          fontStyle: text.italic ? "italic" : "normal",
+          textAlign: text.align,
+        }}
+      >
+        {text.text || <span className="text-muted">A preview appears here.</span>}
+      </div>
+      {machineKind === "cnc" && (
+        <p className="text-muted">
+          A router follows the edge of each letter with the middle of the bit, so letters come out a little
+          heavier than drawn. Use a fine or V-shaped bit for small text.
         </p>
       )}
     </Maker>

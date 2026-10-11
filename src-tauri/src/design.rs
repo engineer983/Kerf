@@ -27,6 +27,7 @@ pub(crate) struct Design {
 
 impl Design {
     fn new(svg: &str) -> Result<Self, String> {
+        // Designs arrive already reduced to plain paths, so no fonts are needed.
         let artwork = Artwork::from_svg(svg, FLATTEN_TOLERANCE_MM)?;
         if artwork.shapes.is_empty() {
             return Err("The design has no lines to cut.".into());
@@ -152,6 +153,74 @@ pub async fn make_layers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drawing::{drawn, text_sheet, Align, TextSpec};
+
+    #[test]
+    fn a_drawing_is_cropped_to_what_is_drawn_and_keeps_its_colours() {
+        // A page far larger than the two lines on it.
+        let sheet = drawn(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="300mm" height="200mm" viewBox="0 0 300 200">
+                <rect x="100" y="50" width="40" height="20" fill="#ff0000"/>
+                <path d="M110 90H180" stroke="#0000ff" fill="none"/></svg>"##,
+            "sign",
+        )
+        .unwrap();
+        assert!((sheet.width_mm - 80.0).abs() < 0.01 && (sheet.height_mm - 40.0).abs() < 0.01);
+        assert_eq!(sheet.parts, ["sign"]);
+        let design = Design::new(&sheet.svg).unwrap();
+        let again = Artwork::from_svg(&design.to_svg(80.0, 40.0), FLATTEN_TOLERANCE_MM).unwrap();
+        assert_eq!(again.colors(), ["#ff0000", "#0000ff"]);
+        assert!(again.shapes[0].polylines[0].closed);
+        assert!(!again.shapes[1].polylines[0].closed);
+        // The rectangle now starts at the corner.
+        assert!(again.shapes[0].polylines[0]
+            .points
+            .iter()
+            .any(|p| p[0].abs() < 0.01 && p[1].abs() < 0.01));
+
+        assert!(drawn("not svg", "x").is_err());
+        assert!(drawn(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="10mm"/>"#,
+            "x"
+        )
+        .unwrap_err()
+        .contains("nothing"));
+    }
+
+    #[test]
+    fn text_is_drawn_at_the_size_asked_for() {
+        let Some(font) = kerf_gcode::font_families().into_iter().find(|name| {
+            ["Arial", "DejaVu Sans", "Liberation Sans", "Helvetica"].contains(&name.as_str())
+        }) else {
+            // No ordinary font to measure with on this machine.
+            return;
+        };
+        let spec = |text: &str, size_mm: f64| TextSpec {
+            text: text.into(),
+            font: font.clone(),
+            size_mm,
+            bold: false,
+            italic: false,
+            align: Align::Center,
+        };
+        let one = text_sheet(&spec("HELLO", 20.0)).unwrap();
+        // Capital letters stand about seven tenths of the size.
+        assert!((12.0..17.0).contains(&one.height_mm), "{}", one.height_mm);
+        assert!(one.width_mm > 50.0);
+        let big = text_sheet(&spec("HELLO", 40.0)).unwrap();
+        assert!((big.width_mm / one.width_mm - 2.0).abs() < 0.05);
+        let two = text_sheet(&spec("HELLO\nA <&> B", 20.0)).unwrap();
+        assert!(two.height_mm > one.height_mm + 15.0);
+        assert!(Design::new(&two.svg).is_ok());
+        // The hole in a letter stays part of that letter, so that engraving
+        // the word solid leaves the hole clear.
+        let o = text_sheet(&spec("O", 20.0)).unwrap();
+        let read = Artwork::from_svg(&o.svg, FLATTEN_TOLERANCE_MM).unwrap();
+        assert_eq!(read.shapes.len(), 1);
+        assert_eq!(read.shapes[0].polylines.len(), 2);
+        assert!(text_sheet(&spec("   ", 20.0)).is_err());
+        assert!(text_sheet(&spec("HELLO", 0.0)).is_err());
+    }
 
     #[test]
     fn a_design_is_shown_and_exported_at_its_own_size() {

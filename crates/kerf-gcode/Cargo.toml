@@ -8,4 +8,4 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
-usvg = { version = "0.45.1", default-features = false }
+usvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }

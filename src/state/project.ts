@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import { estimateDepth } from "../lib/depth";
-import { CUT_COLOR, MARK_COLOR, pictureOf, type BoxInput, type Design, type LayersInput } from "../lib/design";
+import { CUT_COLOR, isFixed, MARK_COLOR, pictureOf, type BoxInput, type Design, type LayersInput } from "../lib/design";
 import { measureTones, optimise, PURPOSE_LABELS, type Purpose } from "../lib/optimize";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
@@ -112,12 +112,18 @@ export interface SimpleSetup {
 }
 
 /** The goals a machine offers, most likely first. */
-export function goalsFor(kind: MachineKind): Goal[] {
+/**
+ * What can be made. `drawn` is for words and drawings, which are lines with
+ * no shading to engrave and no heights to carve.
+ */
+export function goalsFor(kind: MachineKind, drawn = false): Goal[] {
+  if (drawn) return kind === "laser" ? ["shapes", "outline"] : ["lines"];
   return kind === "laser" ? ["picture", "shapes", "outline"] : ["carving", "lines"];
 }
 
 /** The goal used when none has been chosen. */
-export function defaultGoal(kind: MachineKind, photo: boolean): Goal {
+export function defaultGoal(kind: MachineKind, photo: boolean, drawn = false): Goal {
+  if (drawn) return kind === "cnc" ? "lines" : "shapes";
   return kind === "cnc" ? "carving" : photo ? "picture" : "shapes";
 }
 
@@ -327,6 +333,12 @@ interface ProjectState {
   makeBox: (input: BoxInput) => Promise<void>;
   /** Slices the loaded picture into layers to stack. Throws with the reason if it cannot. */
   makeLayers: (input: LayersInput) => Promise<void>;
+  /** Starts a project from a drawing that is already lines, such as an SVG. */
+  importDrawing: (name: string, sheet: ipc.Sheet) => Promise<void>;
+  /** Asks for a drawing file and starts a project from it. Throws with the reason if it cannot. */
+  openDrawing: () => Promise<void>;
+  /** Draws words as the outlines of their letters and starts a project from them. */
+  makeText: (input: ipc.TextSpec) => Promise<void>;
   /** Puts another of the design's sheets on the canvas. */
   setDesignSheet: (sheet: number) => Promise<void>;
   /** Goes back from layers to the picture they were made from. */
@@ -607,13 +619,14 @@ export const useProject = create<ProjectState>((set, get) => {
    */
   async function applySimple() {
     const s = get();
-    // A design is cut along its lines; there is nothing to choose.
-    if (!s.image || s.design) return;
+    // A box or a set of layers is cut along its lines; there is nothing to choose.
+    if (!s.image || (s.design && isFixed(s.design))) return;
     const { quality, cutOut } = s.simple;
+    const drawn = s.design !== null;
     const goal =
-      s.simple.goal && goalsFor(s.machineKind).includes(s.simple.goal)
+      s.simple.goal && goalsFor(s.machineKind, drawn).includes(s.simple.goal)
         ? s.simple.goal
-        : defaultGoal(s.machineKind, s.image.photo);
+        : defaultGoal(s.machineKind, s.image.photo, drawn);
     const material = findMaterial(s.materialId);
     const blank = { color: null, power: 0, passes: 1, feed: 600 };
     const operations: OperationItem[] = [];
@@ -739,17 +752,22 @@ export const useProject = create<ProjectState>((set, get) => {
     // Earlier sizes no longer apply, so there is nothing sensible to undo back to.
     past.length = 0;
     future.length = 0;
+    const fixed = isFixed(design);
+    // A drawing larger than the machine can reach starts out scaled to fit.
+    const [widest, tallest] = sheetLimit();
+    const scale = fixed ? 1 : Math.min(1, widest / sheet.widthMm, tallest / sheet.heightMm);
+    const [widthMm, heightMm] = fixed ? [sheet.widthMm, sheet.heightMm] : [tenth(sheet.widthMm * scale), tenth(sheet.heightMm * scale)];
     set((s) => ({
       design,
-      widthMm: sheet.widthMm,
-      heightMm: sheet.heightMm,
+      widthMm,
+      heightMm,
       aspectLocked: true,
       cropping: false,
       left: STOCK_MARGIN_MM,
       front: STOCK_MARGIN_MM,
-      stockWidth: Math.ceil(sheet.widthMm) + STOCK_MARGIN_MM * 2,
-      stockLength: Math.ceil(sheet.heightMm) + STOCK_MARGIN_MM * 2,
-      operations: keepOperations ? s.operations : designOperations(design, s),
+      stockWidth: Math.ceil(widthMm) + STOCK_MARGIN_MM * 2,
+      stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
+      operations: keepOperations ? s.operations : fixed ? designOperations(design, s) : [fresh(s.machineKind, s)],
       step: "operations",
       pendingStep: null,
       canUndo: false,
@@ -758,13 +776,22 @@ export const useProject = create<ProjectState>((set, get) => {
       ...staleGcode(),
     }));
     scheduleTrace();
+    if (!fixed && get().mode === "simple") void applySimple();
+  }
+
+  /** Starts a project from a sheet of lines: its picture for the gallery, then the lines themselves. */
+  async function startFrom(design: Design, name: string) {
+    await get().importFile(await pictureOf(design.sheets[0], name), { forDesign: true });
+    const failed = get().error;
+    if (failed) throw new Error(failed);
+    await showDesign(design);
   }
 
   /** The largest sheet the machine can cut, leaving a margin of material around it. */
-  const sheetLimit = () => {
+  function sheetLimit() {
     const { bed } = get();
     return [bed.width - STOCK_MARGIN_MM * 2, bed.height - STOCK_MARGIN_MM * 2] as const;
-  };
+  }
 
   /** What the picture is being used for, judged from the job as it stands. */
   function purpose(): Purpose {
@@ -875,12 +902,29 @@ export const useProject = create<ProjectState>((set, get) => {
       );
       // What was being worked on is kept, unless it is this box being changed.
       if (s.image && s.design?.kind !== "box") await s.saveProject();
-      const name = `Box ${input.width} x ${input.depth} x ${input.height}`;
-      await get().importFile(await pictureOf(sheets[0], name), { forDesign: true });
-      const failed = get().error;
-      if (failed) throw new Error(failed);
       set({ thickness: input.thickness });
-      await showDesign({ kind: "box", input, sheets, sheet: 0, madeFor: s.machineKind });
+      await startFrom(
+        { kind: "box", input, sheets, sheet: 0, madeFor: s.machineKind },
+        `Box ${input.width} x ${input.depth} x ${input.height}`,
+      );
+    },
+
+    importDrawing: async (name, sheet) => {
+      const s = get();
+      await startFrom({ kind: "drawing", input: { name }, sheets: [sheet], sheet: 0, madeFor: s.machineKind }, name);
+    },
+
+    openDrawing: async () => {
+      const opened = await ipc.openDrawing();
+      if (opened) await get().importDrawing(opened.name, opened.sheet);
+    },
+
+    makeText: async (input) => {
+      const s = get();
+      const sheet = await ipc.makeText(input);
+      // What was being worked on is kept, unless it is these words being changed.
+      if (s.image && s.design?.kind !== "text") await s.saveProject();
+      await startFrom({ kind: "text", input, sheets: [sheet], sheet: 0, madeFor: s.machineKind }, sheet.parts[0]);
     },
 
     makeLayers: async (input) => {
@@ -965,8 +1009,17 @@ export const useProject = create<ProjectState>((set, get) => {
     },
 
     importFile: async (file, options) => {
+      if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+        try {
+          const name = file.name.replace(/\.[^.]+$/, "") || "drawing";
+          await get().importDrawing(name, await ipc.readSvg(await file.text(), name));
+        } catch (e) {
+          set({ error: `${file.name} could not be opened: ${message(e)}` });
+        }
+        return;
+      }
       if (!isAcceptedImage(file)) {
-        set({ error: `${file.name} is not a supported image (PNG, JPEG, WebP, BMP or GIF).` });
+        set({ error: `${file.name} is not a supported image (PNG, JPEG, WebP, BMP or GIF) or drawing (SVG).` });
         return;
       }
       try {
@@ -1049,7 +1102,7 @@ export const useProject = create<ProjectState>((set, get) => {
     // A design keeps the size it was drawn at, or its joints would no longer fit.
     setWidthMm: (widthMm) =>
       set((s) =>
-        s.design
+        s.design && isFixed(s.design)
           ? {}
           : {
               widthMm,
@@ -1059,7 +1112,7 @@ export const useProject = create<ProjectState>((set, get) => {
       ),
     setHeightMm: (heightMm) =>
       set((s) =>
-        s.design
+        s.design && isFixed(s.design)
           ? {}
           : {
               heightMm,
@@ -1071,8 +1124,8 @@ export const useProject = create<ProjectState>((set, get) => {
     setArtworkRect: (rect) =>
       set((s) => ({
         // A tenth of a millimetre is finer than either machine can place work.
-        widthMm: s.design ? s.widthMm : tenth(rect.width),
-        heightMm: s.design ? s.heightMm : tenth(rect.height),
+        widthMm: s.design && isFixed(s.design) ? s.widthMm : tenth(rect.width),
+        heightMm: s.design && isFixed(s.design) ? s.heightMm : tenth(rect.height),
         left: tenth(rect.x),
         front: tenth(s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height),
         ...staleGcode(),
@@ -1187,7 +1240,7 @@ export const useProject = create<ProjectState>((set, get) => {
       set((s) => ({
         machineKind,
         machinePreset: CUSTOM_PRESET,
-        operations: s.design ? designOperations(s.design, { ...s, machineKind }) : [fresh(machineKind)],
+        operations: s.design && isFixed(s.design) ? designOperations(s.design, { ...s, machineKind }) : [fresh(machineKind)],
         ...staleGcode(),
       })),
     setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
@@ -1210,7 +1263,7 @@ export const useProject = create<ProjectState>((set, get) => {
         operations:
           s.machineKind === preset.kind
             ? s.operations
-            : s.design
+            : s.design && isFixed(s.design)
               ? designOperations(s.design, { ...s, machineKind: preset.kind })
               : [fresh(preset.kind, s)],
         ...staleGcode(),

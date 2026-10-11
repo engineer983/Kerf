@@ -22,6 +22,8 @@ const QUALITY_ABOUT: Record<Quality, string> = {
 export function SimpleSetup() {
   const machineKind = useProject((s) => s.machineKind);
   const photo = useProject((s) => s.image?.photo ?? false);
+  // Words and drawings are lines: there is no shading to engrave or height to carve.
+  const drawn = useProject((s) => s.design !== null);
   const simple = useProject((s) => s.simple);
   const operations = useProject((s) => s.operations);
   const depth = useProject((s) => s.depth);
@@ -29,7 +31,7 @@ export function SimpleSetup() {
   const tools = useToolbox((s) => s.tools);
   const { setSimple, updateOperation } = useProject.getState();
 
-  const goal = simple.goal && goalsFor(machineKind).includes(simple.goal) ? simple.goal : defaultGoal(machineKind, photo);
+  const goal = simple.goal && goalsFor(machineKind, drawn).includes(simple.goal) ? simple.goal : defaultGoal(machineKind, photo, drawn);
   const [main, cut] = operations;
   // On a laser, the cut around the piece has its own power and speed to set.
   const laserCut = cut?.kind.type === "laserCutout" ? { ...cut, kind: cut.kind } : null;
@@ -40,7 +42,7 @@ export function SimpleSetup() {
   return (
     <>
       <Section title="What do you want to make?">
-        {goalsFor(machineKind).map((id) => (
+        {goalsFor(machineKind, drawn).map((id) => (
           <button
             key={id}
             onClick={() => setSimple({ goal: id })}
@@ -53,15 +55,19 @@ export function SimpleSetup() {
             <span className="text-muted">{GOALS[id].about}</span>
           </button>
         ))}
-        <button
-          onClick={() => useUi.getState().setMaker("layers")}
-          title="Slice the picture into layers to cut from thin sheet and stack"
-          className="flex w-full flex-col rounded-xl border border-line p-3 text-left transition-colors hover:border-muted"
-        >
-          <span className="font-medium">Stacked layers…</span>
-          <span className="text-muted">Cuts the picture as layers to glue into a piece with real depth.</span>
-        </button>
-        <OptimizeButton />
+        {!drawn && (
+          <>
+            <button
+              onClick={() => useUi.getState().setMaker("layers")}
+              title="Slice the picture into layers to cut from thin sheet and stack"
+              className="flex w-full flex-col rounded-xl border border-line p-3 text-left transition-colors hover:border-muted"
+            >
+              <span className="font-medium">Stacked layers…</span>
+              <span className="text-muted">Cuts the picture as layers to glue into a piece with real depth.</span>
+            </button>
+            <OptimizeButton />
+          </>
+        )}
       </Section>
 
       <Section title="How fine?">

@@ -454,3 +454,39 @@ export function makeLayers(
 ): Promise<Sheet[]> {
   return invoke("make_layers", { spec, settings, lightIsHigh, depth, sheetWidth, sheetHeight });
 }
+
+/** Words to draw as the outlines of their letters. */
+export interface TextSpec {
+  text: string;
+  /** The name of a font family installed on this computer. */
+  font: string;
+  /** The font's size in millimetres; capitals stand about seven tenths of it. */
+  sizeMm: number;
+  bold: boolean;
+  italic: boolean;
+  align: "left" | "center" | "right";
+}
+
+/** Reads an SVG document as plain lines, cropped to what is drawn. */
+export function readSvg(svg: string, name: string): Promise<Sheet> {
+  return invoke("read_svg", { svg, name });
+}
+
+/** Asks for a drawing file (SVG, or PDF, AI and EPS where Inkscape is installed) and reads it. */
+export function openDrawing(): Promise<{ name: string; sheet: Sheet } | null> {
+  return invoke("open_drawing");
+}
+
+/** Whether Inkscape is installed, which decides the file types that can be opened. */
+export function inkscapeFound(): Promise<boolean> {
+  return invoke("inkscape_found");
+}
+
+/** The font families installed on this computer. */
+export function listFonts(): Promise<string[]> {
+  return invoke("list_fonts");
+}
+
+export function makeText(spec: TextSpec): Promise<Sheet> {
+  return invoke("make_text", { spec });
+}
