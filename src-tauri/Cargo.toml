@@ -23,5 +23,6 @@ kerf-gcode = { path = "../crates/kerf-gcode" }
 kerf-grbl = { path = "../crates/kerf-grbl" }
 kerf-ai = { path = "../crates/kerf-ai" }
 kerf-make = { path = "../crates/kerf-make" }
+kerf-core = { path = "../crates/kerf-core" }
 ureq = "2"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }

@@ -3,6 +3,13 @@ import { listen } from "@tauri-apps/api/event";
 
 export { isTauri };
 
+/**
+ * True in the version that runs in a browser, where the same interface is
+ * backed by `src/web` instead of the desktop app. A few things are missing
+ * there: connecting to a machine, Inkscape, and reading other web sites.
+ */
+export const inBrowser = import.meta.env.MODE === "web";
+
 export interface AppInfo {
   name: string;
   version: string;

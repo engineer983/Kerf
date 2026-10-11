@@ -3,7 +3,7 @@ resolver = "2"
 members = ["src-tauri", "crates/*"]
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 rust-version = "1.80"
@@ -26,6 +26,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.kerf-make]
+opt-level = 3
+
+[profile.dev.package.kerf-core]
 opt-level = 3
 
 [profile.dev.package.image]

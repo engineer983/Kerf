@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Settings, SquarePen, TriangleAlert, X } from "lucide-react";
-import { fetchPicture, isTauri, type FoundPicture } from "../lib/ipc";
+import { fetchPicture, inBrowser, isTauri, type FoundPicture } from "../lib/ipc";
 import { creditLine, loadFoundPicture } from "../lib/pictures";
 import { findProvider, PROVIDERS } from "../lib/providers";
 import { useAssistant, type Entry } from "../state/assistant";
@@ -132,7 +132,7 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
             <button
               className={quiet}
               disabled={!key.trim()}
-              title="Save the key in this computer's credential store"
+              title={inBrowser ? "Save the key in this browser, for this site" : "Save the key in this computer's credential store"}
               onClick={() => {
                 void a.saveKey(key);
                 setKey("");
@@ -145,8 +145,10 @@ function AssistantSettings({ onDone }: { onDone?: () => void }) {
             </button>
           </div>
           <p className="text-muted">
-            {a.hasKey ? "A key is saved. " : ""}Keys are kept in this computer's credential store, not in
-            the project or its files, and are only sent to the provider you chose.
+            {a.hasKey ? "A key is saved. " : ""}
+            {inBrowser
+              ? "Keys are kept in this browser's storage for this site, which is less protected than the desktop app's use of the computer's credential store. They are only sent to the provider you chose. On a shared computer, remove the key when you finish."
+              : "Keys are kept in this computer's credential store, not in the project or its files, and are only sent to the provider you chose."}
           </p>
         </div>
       )}
@@ -285,7 +287,7 @@ function PictureSettings() {
                 <button
                   className={quiet}
                   disabled={!key.trim()}
-                  title="Save the image service's key in this computer's credential store"
+                  title={inBrowser ? "Save the image service's key in this browser, for this site" : "Save the image service's key in this computer's credential store"}
                   onClick={() => {
                     void p.saveKey(key);
                     setKey("");
@@ -328,14 +330,16 @@ function PictureSettings() {
         <input
           type="checkbox"
           className="mt-0.5 accent-accent"
-          checked={p.webSearch}
+          checked={p.webSearch && !inBrowser}
+          disabled={inBrowser}
           onChange={(e) => p.setWebSearch(e.target.checked)}
         />
         <span>
           Let the assistant search the web for pictures
           <span className="block text-muted">
-            Searches Wikimedia Commons and Openverse for public-domain and Creative Commons pictures that may be adapted and
-            used commercially. Free, with no key. The search words are sent to those two sites.
+            {inBrowser
+              ? "Searching for pictures is in the desktop app only, for now. Here, find a picture yourself, then drop its file on the canvas or copy the picture and press Ctrl+V."
+              : "Searches Wikimedia Commons and Openverse for public-domain and Creative Commons pictures that may be adapted and used commercially. Free, with no key. The search words are sent to those two sites."}
           </span>
         </span>
       </label>

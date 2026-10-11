@@ -9,10 +9,13 @@
 
 const MODEL = "onnx-community/depth-anything-v2-small";
 
-/** The ONNX runtime files, served by the app itself (see `vite.config.ts`). */
+/**
+ * The ONNX runtime files, served by the app itself (see `vite.config.ts`).
+ * They sit beside the page, which in a browser need not be at the site's root.
+ */
 const RUNTIME = {
-  mjs: "/ort/ort-wasm-simd-threaded.asyncify.mjs",
-  wasm: "/ort/ort-wasm-simd-threaded.asyncify.wasm",
+  mjs: "ort/ort-wasm-simd-threaded.asyncify.mjs",
+  wasm: "ort/ort-wasm-simd-threaded.asyncify.wasm",
 };
 
 type Estimator = (image: string) => Promise<{ depth: { toBlob: (type?: string) => Promise<Blob> } }>;
@@ -27,8 +30,8 @@ function load(onProgress: (text: string) => void): Promise<Estimator> {
     const wasm = env.backends.onnx.wasm;
     if (wasm) {
       wasm.wasmPaths = {
-        mjs: new URL(RUNTIME.mjs, location.href).href,
-        wasm: new URL(RUNTIME.wasm, location.href).href,
+        mjs: new URL(RUNTIME.mjs, document.baseURI).href,
+        wasm: new URL(RUNTIME.wasm, document.baseURI).href,
       };
     }
     const loaded = await pipeline("depth-estimation", MODEL, {

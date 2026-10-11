@@ -17,7 +17,10 @@ mod http;
 mod images;
 mod openai;
 
-pub use images::{generate_image, Generated, ImageEndpoint, ImageProtocol, Shape};
+pub use http::{could_not_reach, describe_failure};
+#[cfg(feature = "http")]
+pub use images::generate_image;
+pub use images::{image_request, read_image, Generated, ImageEndpoint, ImageProtocol, Shape};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,7 +98,18 @@ pub struct ModelInfo {
     pub name: String,
 }
 
+/// A request to a provider: a POST of `body` as JSON, or a GET without one.
+/// The reply is JSON too. This crate makes the request itself where it has an
+/// HTTP client; in a browser the page makes it and hands back the reply.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Request {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Value>,
+}
+
 /// Sends the conversation and returns the model's next turn.
+#[cfg(feature = "http")]
 pub fn send(
     endpoint: &Endpoint,
     key: Option<&str>,
@@ -103,33 +117,72 @@ pub fn send(
     messages: &[Value],
     tools: &[ToolSpec],
 ) -> Result<Turn, String> {
-    match endpoint.protocol {
+    let reply = http::send(&turn_request(endpoint, key, system, messages, tools)?)?;
+    read_turn(endpoint, &reply, tools, messages.len())
+}
+
+/// The request that sends the conversation to the model.
+pub fn turn_request(
+    endpoint: &Endpoint,
+    key: Option<&str>,
+    system: &str,
+    messages: &[Value],
+    tools: &[ToolSpec],
+) -> Result<Request, String> {
+    Ok(match endpoint.protocol {
         Protocol::Anthropic => {
             let key = key.ok_or("Add your Anthropic API key in the assistant's settings.")?;
-            let body = anthropic::request_body(&endpoint.model, system, messages, tools);
-            let reply = http::post(
-                &endpoint.url("v1/messages"),
-                &anthropic::headers(key, &endpoint.model),
-                &body,
-            )?;
-            anthropic::parse_turn(&reply)
+            Request {
+                url: endpoint.url("v1/messages"),
+                headers: anthropic::headers(key, &endpoint.model),
+                body: Some(anthropic::request_body(
+                    &endpoint.model,
+                    system,
+                    messages,
+                    tools,
+                )),
+            }
         }
+        Protocol::OpenAi => Request {
+            url: endpoint.url("chat/completions"),
+            headers: openai::headers(key),
+            body: Some(openai::request_body(
+                &endpoint.model,
+                system,
+                messages,
+                tools,
+            )),
+        },
+    })
+}
+
+/// Reads the model's next turn from the reply to [`turn_request`]. `sent` is
+/// how many messages the conversation had when it was sent.
+pub fn read_turn(
+    endpoint: &Endpoint,
+    reply: &Value,
+    tools: &[ToolSpec],
+    sent: usize,
+) -> Result<Turn, String> {
+    match endpoint.protocol {
+        Protocol::Anthropic => anthropic::parse_turn(reply),
         Protocol::OpenAi => {
-            let body = openai::request_body(&endpoint.model, system, messages, tools);
-            let reply = http::post(
-                &endpoint.url("chat/completions"),
-                &openai::headers(key),
-                &body,
-            )?;
-            let mut turn = openai::parse_turn(&reply)?;
-            openai::recover_written_calls(&mut turn, tools, messages.len());
+            let mut turn = openai::parse_turn(reply)?;
+            openai::recover_written_calls(&mut turn, tools, sent);
             Ok(turn)
         }
     }
 }
 
 /// The models the endpoint offers.
+#[cfg(feature = "http")]
 pub fn list_models(endpoint: &Endpoint, key: Option<&str>) -> Result<Vec<ModelInfo>, String> {
+    let reply = http::send(&models_request(endpoint, key)?)?;
+    read_models(endpoint, &reply)
+}
+
+/// The request that asks which models the endpoint offers.
+pub fn models_request(endpoint: &Endpoint, key: Option<&str>) -> Result<Request, String> {
     let (url, headers) = match endpoint.protocol {
         Protocol::Anthropic => {
             let key = key.ok_or("Add your Anthropic API key in the assistant's settings.")?;
@@ -140,8 +193,16 @@ pub fn list_models(endpoint: &Endpoint, key: Option<&str>) -> Result<Vec<ModelIn
         }
         Protocol::OpenAi => (endpoint.url("models"), openai::headers(key)),
     };
-    let reply = http::get(&url, &headers)?;
-    let mut models = parse_models(&reply)?;
+    Ok(Request {
+        url,
+        headers,
+        body: None,
+    })
+}
+
+/// Reads the list of models from the reply to [`models_request`].
+pub fn read_models(endpoint: &Endpoint, reply: &Value) -> Result<Vec<ModelInfo>, String> {
+    let mut models = parse_models(reply)?;
     if endpoint.protocol == Protocol::OpenAi {
         models.sort_by(|a, b| a.id.cmp(&b.id));
     }

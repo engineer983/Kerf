@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
-import { fetchPageText, isTauri } from "../lib/ipc";
+import { fetchPageText, inBrowser, isTauri } from "../lib/ipc";
 import {
   parseToolText,
   taperFromDimensions,
@@ -186,7 +186,10 @@ function ToolForm({ tool, update, remove }: ToolFormProps) {
             value={tool.url}
             onChange={(e) => set({ url: e.target.value })}
           />
-          <button className={`${quiet} shrink-0 whitespace-nowrap`} disabled={busy || !isTauri() || !tool.url.trim()} onClick={() => void fetchPage()}>
+          <button className={`${quiet} shrink-0 whitespace-nowrap`} disabled={busy || !isTauri() || inBrowser || !tool.url.trim()}
+            title={inBrowser ? "A web page cannot read another site's pages. Paste the details below instead, or use the desktop app." : undefined}
+            onClick={() => void fetchPage()}
+          >
             {busy ? "Reading…" : "Read page"}
           </button>
         </div>

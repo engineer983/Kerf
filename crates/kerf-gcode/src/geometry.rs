@@ -1,6 +1,6 @@
 //! Loading SVG artwork as flattened polylines in millimetres.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use usvg::fontdb;
 use usvg::tiny_skia_path::{PathSegment, Point, Transform};
@@ -47,10 +47,11 @@ impl Artwork {
 
     /// As [`Artwork::from_svg`], and with any text in the document turned
     /// into the outlines of its letters, using the fonts installed on this
-    /// computer. Reading those fonts takes a moment the first time.
+    /// computer and any added with [`add_font`]. Reading the installed fonts
+    /// takes a moment the first time.
     pub fn from_svg_with_text(svg: &str, tolerance: f64) -> Result<Self, String> {
         let options = usvg::Options {
-            fontdb: system_fonts(),
+            fontdb: fonts(),
             ..usvg::Options::default()
         };
         Self::read(svg, tolerance, &options)
@@ -85,22 +86,41 @@ impl Artwork {
     }
 }
 
-/// The fonts installed on this computer, read once and kept.
-fn system_fonts() -> Arc<fontdb::Database> {
-    static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
-    FONTS
-        .get_or_init(|| {
-            let mut fonts = fontdb::Database::new();
-            fonts.load_system_fonts();
-            Arc::new(fonts)
-        })
-        .clone()
+/// The fonts text can be set in: those installed on this computer, read once
+/// and kept, and any added since.
+fn font_store() -> &'static RwLock<Arc<fontdb::Database>> {
+    static FONTS: OnceLock<RwLock<Arc<fontdb::Database>>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        #[allow(unused_mut)]
+        let mut fonts = fontdb::Database::new();
+        // A browser has no installed fonts to read.
+        #[cfg(not(target_arch = "wasm32"))]
+        fonts.load_system_fonts();
+        RwLock::new(Arc::new(fonts))
+    })
 }
 
-/// The names of the font families installed on this computer, in order.
+fn fonts() -> Arc<fontdb::Database> {
+    font_store().read().unwrap().clone()
+}
+
+/// Adds the fonts in a font file (TrueType or OpenType, given as the file's
+/// bytes) to those text can be set in, and returns their families' names.
+/// A file with no font in it adds nothing.
+pub fn add_font(file: Vec<u8>) -> Vec<String> {
+    let mut store = font_store().write().unwrap();
+    let before = store.len();
+    Arc::make_mut(&mut store).load_font_data(file);
+    family_names(store.faces().skip(before))
+}
+
+/// The names of the font families text can be set in, in order.
 pub fn font_families() -> Vec<String> {
-    let mut names: Vec<String> = system_fonts()
-        .faces()
+    family_names(fonts().faces())
+}
+
+fn family_names<'a>(faces: impl Iterator<Item = &'a fontdb::FaceInfo>) -> Vec<String> {
+    let mut names: Vec<String> = faces
         .filter_map(|face| face.families.first().map(|(name, _)| name.clone()))
         .collect();
     names.sort_by_key(|name| name.to_lowercase());

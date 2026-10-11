@@ -8,4 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
+usvg = { version = "0.45.1", default-features = false, features = ["text"] }
+
+# A browser has no installed fonts to read; there they are handed over instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 usvg = { version = "0.45.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }

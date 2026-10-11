@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, RefreshCw } from "lucide-react";
-import { isTauri } from "../lib/ipc";
+import { inBrowser, isTauri } from "../lib/ipc";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
@@ -25,7 +25,7 @@ export function MachinePanel() {
   const [armed, setArmed] = useState(false);
 
   useEffect(() => {
-    if (isTauri()) void useMachine.getState().refreshPorts();
+    if (isTauri() && !inBrowser) void useMachine.getState().refreshPorts();
   }, []);
 
   useEffect(() => {
@@ -36,6 +36,15 @@ export function MachinePanel() {
 
   if (!isTauri()) {
     return <p className="text-muted">Machine control needs the desktop app.</p>;
+  }
+  if (inBrowser) {
+    return (
+      <p className="text-muted">
+        Kerf in a browser does not connect to a machine. Export the G-code from Operations and send it
+        with your machine's own software, or use the desktop app, which can connect to a GRBL machine
+        and run the job itself.
+      </p>
+    );
   }
   if (preset?.exportOnly) {
     return (

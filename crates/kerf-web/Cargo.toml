@@ -1,0 +1,27 @@
+[package]
+name = "kerf-web"
+description = "Kerf's engine built as WebAssembly, for the version that runs in a browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+base64 = "0.22"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+kerf-core = { path = "../kerf-core" }
+kerf-trace = { path = "../kerf-trace" }
+kerf-gcode = { path = "../kerf-gcode" }
+kerf-make = { path = "../kerf-make" }
+kerf-ai = { path = "../kerf-ai", default-features = false }
+
+# wasm-pack's bundled optimiser lags behind the compiler and can refuse what
+# it produces; the release profile already optimises.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

@@ -12,6 +12,6 @@ pub mod relief;
 
 pub use cutout::{Outline, Side};
 pub use generate::{generate, generate_composed, generate_with, Additions, Bounds, Program};
-pub use geometry::{font_families, Artwork, Polyline, Shape};
+pub use geometry::{add_font, font_families, Artwork, Polyline, Shape};
 pub use job::{Job, Machine, MachineKind, Operation, OperationKind, Origin};
 pub use relief::Heightmap;

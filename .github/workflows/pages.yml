@@ -1,0 +1,59 @@
+name: Web
+
+# Builds the version of Kerf that runs in a browser and publishes it with
+# GitHub Pages, at https://<owner>.github.io/<repository>/.
+#
+# Pages has to be switched on once, by hand: in the repository's Settings,
+# under Pages, set Source to "GitHub Actions". Until then this builds the site
+# and stops without publishing it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:web
+
+      - name: Check that Pages is switched on
+        id: pages
+        uses: actions/configure-pages@v5
+        continue-on-error: true
+      - name: Say how to switch Pages on
+        if: steps.pages.outcome != 'success'
+        run: echo "::notice::The site was built but not published. Switch GitHub Pages on in Settings > Pages, with Source set to GitHub Actions, then run this workflow again."
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.pages.outcome == 'success'
+        with:
+          path: dist-web
+      - id: deploy
+        if: steps.pages.outcome == 'success'
+        uses: actions/deploy-pages@v4

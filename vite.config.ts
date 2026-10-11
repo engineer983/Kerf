@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -40,14 +41,32 @@ function onnxRuntimeFiles(): Plugin {
   };
 }
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), onnxRuntimeFiles()],
-  // Keep Rust compiler errors visible in the terminal.
-  clearScreen: false,
-  server: {
-    port: 1420,
-    strictPort: true,
-    host: host || false,
-    watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"] },
-  },
+/**
+ * `--mode web` builds the version that runs in a browser. The interface is the
+ * same; what it asks of the desktop app's backend is answered by `src/web`
+ * instead, which runs the same Rust code as WebAssembly (built by `pnpm wasm`).
+ */
+export default defineConfig(({ mode }) => {
+  const web = mode === "web";
+  const standIn = (file: string) => fileURLToPath(new URL(`./src/web/${file}`, import.meta.url));
+  return {
+    plugins: [react(), tailwindcss(), onnxRuntimeFiles()],
+    // Keep Rust compiler errors visible in the terminal.
+    clearScreen: false,
+    // The browser version finds its files beside the page, so it can be served from any address.
+    base: web ? "./" : "/",
+    resolve: {
+      alias: web
+        ? { "@tauri-apps/api/core": standIn("core.ts"), "@tauri-apps/api/event": standIn("event.ts") }
+        : {},
+    },
+    build: { outDir: web ? "dist-web" : "dist" },
+    worker: { format: "es" as const },
+    server: {
+      port: web ? 1421 : 1420,
+      strictPort: true,
+      host: host || false,
+      watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**", "**/target-*/**"] },
+    },
+  };
 });

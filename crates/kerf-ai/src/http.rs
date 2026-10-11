@@ -1,33 +1,24 @@
 //! JSON over HTTP, with failures turned into messages a person can act on.
 
-use std::time::Duration;
-
 use serde_json::Value;
 
-/// Models can take minutes on a hard question; shorter would cut them off.
-const TIMEOUT: Duration = Duration::from_secs(600);
-
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(TIMEOUT).build()
-}
-
-pub(crate) fn post(url: &str, headers: &[(String, String)], body: &Value) -> Result<Value, String> {
-    let mut request = agent().post(url);
-    for (name, value) in headers {
-        request = request.set(name, value);
+/// Makes a request and reads the reply as JSON.
+#[cfg(feature = "http")]
+pub(crate) fn send(request: &crate::Request) -> Result<Value, String> {
+    /// Models can take minutes on a hard question; shorter would cut them off.
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
+    let mut call = match request.body {
+        Some(_) => agent.post(&request.url),
+        None => agent.get(&request.url),
+    };
+    for (name, value) in &request.headers {
+        call = call.set(name, value);
     }
-    read(url, request.send_json(body))
-}
-
-pub(crate) fn get(url: &str, headers: &[(String, String)]) -> Result<Value, String> {
-    let mut request = agent().get(url);
-    for (name, value) in headers {
-        request = request.set(name, value);
-    }
-    read(url, request.call())
-}
-
-fn read(url: &str, result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
+    let result = match &request.body {
+        Some(body) => call.send_json(body),
+        None => call.call(),
+    };
     match result {
         Ok(response) => response
             .into_json()
@@ -36,11 +27,18 @@ fn read(url: &str, result: Result<ureq::Response, ureq::Error>) -> Result<Value,
             let body: Value = response.into_json().unwrap_or(Value::Null);
             Err(describe_failure(status, &body))
         }
-        Err(ureq::Error::Transport(transport)) => Err(format!(
-            "Could not reach {}: {transport}. Check the address and that the service is running.",
-            host(url)
-        )),
+        Err(ureq::Error::Transport(transport)) => {
+            Err(could_not_reach(&request.url, &transport.to_string()))
+        }
     }
+}
+
+/// Explains a request that never got an answer.
+pub fn could_not_reach(url: &str, why: &str) -> String {
+    format!(
+        "Could not reach {}: {why}. Check the address and that the service is running.",
+        host(url)
+    )
 }
 
 fn host(url: &str) -> &str {
@@ -50,7 +48,7 @@ fn host(url: &str) -> &str {
 
 /// Explains an error status, using the provider's own message where it gave one.
 /// Both protocols put it at `error.message`; some servers send a bare string.
-pub(crate) fn describe_failure(status: u16, body: &Value) -> String {
+pub fn describe_failure(status: u16, body: &Value) -> String {
     let detail = body["error"]["message"]
         .as_str()
         .or_else(|| body["error"].as_str())

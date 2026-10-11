@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { DEFAULT_BOX, DEFAULT_LAYERS, DEFAULT_TEXT, insideOf, ringPath, type BoxInput, type LayersInput } from "../lib/design";
-import { listFonts, type TextSpec } from "../lib/ipc";
+import { inBrowser, listFonts, type TextSpec } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
@@ -320,6 +320,13 @@ function TextMaker() {
         />
       ) : (
         <p className="text-muted">Looking for this computer's fonts…</p>
+      )}
+      {inBrowser && fonts.length > 0 && fonts.length <= 2 && (
+        <p className="text-muted">
+          Only the font that comes with Kerf is listed. To choose from this computer's fonts, use Chrome or
+          Edge and allow this site to see them when asked (or under the padlock in the address bar), then
+          open this again.
+        </p>
       )}
       <NumberField
         label="Letter size"

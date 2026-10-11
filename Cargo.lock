@@ -416,6 +416,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "cookie"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1955,9 +1965,10 @@ dependencies = [
 
 [[package]]
 name = "kerf"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "kerf-ai",
+ "kerf-core",
  "kerf-gcode",
  "kerf-grbl",
  "kerf-make",
@@ -1973,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-ai"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1982,8 +1993,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerf-core"
+version = "1.0.0-rc.2"
+dependencies = [
+ "kerf-gcode",
+ "kerf-make",
+ "kerf-trace",
+ "serde",
+]
+
+[[package]]
 name = "kerf-gcode"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "serde",
  "usvg",
@@ -1991,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-grbl"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "serde",
  "serialport",
@@ -1999,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-make"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "kerf-trace",
  "serde",
@@ -2007,12 +2028,28 @@ dependencies = [
 
 [[package]]
 name = "kerf-trace"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "image 0.25.10",
  "serde",
  "visioncortex",
  "vtracer",
+]
+
+[[package]]
+name = "kerf-web"
+version = "1.0.0-rc.2"
+dependencies = [
+ "base64 0.22.1",
+ "console_error_panic_hook",
+ "kerf-ai",
+ "kerf-core",
+ "kerf-gcode",
+ "kerf-make",
+ "kerf-trace",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

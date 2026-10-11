@@ -9,7 +9,7 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{http, openai};
+use crate::{openai, Request};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,31 +45,45 @@ pub enum Generated {
 }
 
 /// Asks the server for one picture of `prompt`.
+#[cfg(feature = "http")]
 pub fn generate_image(
     endpoint: &ImageEndpoint,
     key: Option<&str>,
     prompt: &str,
     shape: Shape,
 ) -> Result<Generated, String> {
+    let reply = crate::http::send(&image_request(endpoint, key, prompt, shape))?;
+    read_image(endpoint, &reply)
+}
+
+/// The request that asks the server for one picture of `prompt`.
+pub fn image_request(
+    endpoint: &ImageEndpoint,
+    key: Option<&str>,
+    prompt: &str,
+    shape: Shape,
+) -> Request {
     let base = endpoint.base_url.trim_end_matches('/');
     let model = endpoint.model.trim();
     match endpoint.protocol {
-        ImageProtocol::OpenAi => {
-            let reply = http::post(
-                &format!("{base}/images/generations"),
-                &openai::headers(key),
-                &openai_body(model, prompt, shape),
-            )?;
-            parse_openai(&reply)
-        }
-        ImageProtocol::WebUi => {
-            let reply = http::post(
-                &format!("{base}/sdapi/v1/txt2img"),
-                &[],
-                &web_ui_body(model, prompt, shape),
-            )?;
-            parse_web_ui(&reply)
-        }
+        ImageProtocol::OpenAi => Request {
+            url: format!("{base}/images/generations"),
+            headers: openai::headers(key),
+            body: Some(openai_body(model, prompt, shape)),
+        },
+        ImageProtocol::WebUi => Request {
+            url: format!("{base}/sdapi/v1/txt2img"),
+            headers: Vec::new(),
+            body: Some(web_ui_body(model, prompt, shape)),
+        },
+    }
+}
+
+/// Reads the server's reply to [`image_request`].
+pub fn read_image(endpoint: &ImageEndpoint, reply: &Value) -> Result<Generated, String> {
+    match endpoint.protocol {
+        ImageProtocol::OpenAi => parse_openai(reply),
+        ImageProtocol::WebUi => parse_web_ui(reply),
     }
 }
 

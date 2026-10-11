@@ -1,0 +1,13 @@
+[package]
+name = "kerf-core"
+description = "What Kerf does with a project, the same on the desktop and in a browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+kerf-trace = { path = "../kerf-trace" }
+kerf-gcode = { path = "../kerf-gcode" }
+kerf-make = { path = "../kerf-make" }

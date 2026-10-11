@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, PenLine, Trash2, Type } from "lucide-react";
 import { isFixed } from "../lib/design";
 import { ACCEPTED_FILE_TYPES } from "../lib/image";
-import { inkscapeFound, isTauri } from "../lib/ipc";
+import { inBrowser, inkscapeFound, isTauri } from "../lib/ipc";
 import { artworkRect, everythingRect, itemRect, stockRect, useProject } from "../state/project";
 import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Section } from "./controls";
@@ -49,7 +49,9 @@ export function DesignStep() {
   const drawings = inkscape ? "SVG, PDF, AI, EPS" : "SVG";
   const drawingTip = inkscape
     ? "Open an SVG, PDF, AI or EPS file and use its lines exactly as drawn. Inkscape converts the last three."
-    : "Open an SVG file and use its lines exactly as drawn. With Inkscape installed, PDF, AI and EPS files can be opened too.";
+    : inBrowser
+      ? "Open an SVG file and use its lines exactly as drawn. PDF, AI and EPS files need the desktop app, with Inkscape installed."
+      : "Open an SVG file and use its lines exactly as drawn. With Inkscape installed, PDF, AI and EPS files can be opened too.";
 
   return (
     <div className="flex flex-col gap-5">
