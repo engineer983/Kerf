@@ -1,11 +1,13 @@
 import { isTauri } from "../lib/ipc";
-import { useProject } from "../state/project";
+import { jobUses, useProject } from "../state/project";
 import { Checkbox, NumberField, Section, Segmented, Slider } from "./controls";
 import { OptimizeButton } from "./OptimizeButton";
 
 export function TracePanel() {
   const image = useProject((s) => s.image);
   const design = useProject((s) => s.design);
+  const operations = useProject((s) => s.operations);
+  const uses = jobUses(operations);
   const bed = useProject((s) => s.bed);
   const widthMm = useProject((s) => s.widthMm);
   const heightMm = useProject((s) => s.heightMm);
@@ -50,6 +52,13 @@ export function TracePanel() {
   return (
     <div className="flex flex-col gap-5">
       <OptimizeButton />
+      {uses.picture && !uses.traced && (
+        <p className="rounded-lg border border-line px-3 py-2 text-muted">
+          This job works from the picture itself, shown on the canvas in the greys the machine will read.
+          Brightness, Contrast and Blur change it. The other settings here only matter for operations
+          that follow traced shapes.
+        </p>
+      )}
       <Segmented
         label="Trace mode"
         value={settings.mode}

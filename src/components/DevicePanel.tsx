@@ -1,7 +1,8 @@
+import { useState } from "react";
 import { Drill, Zap } from "lucide-react";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
-import { useProject } from "../state/project";
-import { NumberField, Section, Select } from "./controls";
+import { setWarnOnBack, useProject, warnsOnBack } from "../state/project";
+import { Checkbox, NumberField, Section, Select } from "./controls";
 
 const card = (active: boolean) =>
   `flex w-full items-start gap-3 rounded-xl border p-3 text-left transition-colors ${
@@ -21,6 +22,7 @@ export function DevicePanel() {
   const actions = useProject.getState();
   const preset = MACHINE_PRESETS.find((p) => p.id === machinePreset);
   const custom = machinePreset === CUSTOM_PRESET;
+  const [warn, setWarn] = useState(warnsOnBack);
 
   return (
     <div className="flex flex-col gap-5">
@@ -90,6 +92,18 @@ export function DevicePanel() {
       >
         Continue
       </button>
+
+      <Section title="Preferences">
+        <Checkbox
+          label="Warn before clearing a generated job"
+          hint={{ text: "Going back to an earlier step after generating a job clears that job, since it no longer matches. With this ticked, you are asked first." }}
+          checked={warn}
+          onChange={(on) => {
+            setWarnOnBack(on);
+            setWarn(on);
+          }}
+        />
+      </Section>
     </div>
   );
 }

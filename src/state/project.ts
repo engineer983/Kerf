@@ -528,12 +528,35 @@ function stepHistory(from: Snapshot[], to: Snapshot[]) {
 export const STEP_ORDER: Step[] = ["device", "import", "trace", "operations", "machine"];
 const WARN_ON_BACK_KEY = "kerf.warnOnBack";
 
-function warnsOnBack(): boolean {
+/** Whether going back from a generated job asks first. */
+export function warnsOnBack(): boolean {
   try {
     return localStorage.getItem(WARN_ON_BACK_KEY) !== "off";
   } catch {
     return true;
   }
+}
+
+export function setWarnOnBack(warn: boolean) {
+  try {
+    if (warn) localStorage.removeItem(WARN_ON_BACK_KEY);
+    else localStorage.setItem(WARN_ON_BACK_KEY, "off");
+  } catch {
+    // Not remembered; the default of asking applies.
+  }
+}
+
+/**
+ * What the included operations work from: the picture itself, with its
+ * shading (engraving it, or carving it as a relief), or the shapes traced
+ * from it. The canvas shows whichever is in use.
+ */
+export function jobUses(operations: OperationItem[]): { picture: boolean; traced: boolean } {
+  const included = operations.filter((op) => op.enabled !== false).map((op) => op.kind.type);
+  return {
+    picture: included.some((type) => type === "laserImage" || type === "cncRelief"),
+    traced: included.some((type) => type === "laserFill" || type === "laserCut" || type === "cncProfile"),
+  };
 }
 
 const DEVICE_KEY = "kerf.device";
@@ -870,13 +893,7 @@ export const useProject = create<ProjectState>((set, get) => {
     confirmStep: (dontWarnAgain) => {
       const step = get().pendingStep;
       if (!step) return;
-      if (dontWarnAgain) {
-        try {
-          localStorage.setItem(WARN_ON_BACK_KEY, "off");
-        } catch {
-          // Not remembered; they will be asked again next time.
-        }
-      }
+      if (dontWarnAgain) setWarnOnBack(false);
       set({ step, pendingStep: null, ...staleGcode() });
     },
     cancelStep: () => set({ pendingStep: null }),
