@@ -68,6 +68,7 @@ export const TOOLS: ToolSpec[] = [
         brightness: number("-1 (darker) to 1 (lighter); 0 is unchanged."),
         contrast: number("-1 (flatter) to 1 (stronger); 0 is unchanged."),
         blur: number("Blur radius in pixels, 0 to 5."),
+        sharpen: number("How strongly edges and fine detail are brought out, 0 (off) to 2. About 0.8 makes an engraved photograph look crisper and more lifelike; leave it at 0 for a carving."),
         threshold: { description: 'Dark/light dividing level for outlines: "auto", or 0 to 255.', anyOf: [{ type: "string", enum: ["auto"] }, { type: "number" }] },
         invert: { type: "boolean", description: "Trace the light areas instead of the dark ones." },
         ignoreSpecks: number("Drop shapes smaller than this many pixels across, 0 to 16."),
@@ -441,6 +442,7 @@ function describeProject() {
       brightness: preprocess.brightness,
       contrast: preprocess.contrast,
       blur: preprocess.blurSigma,
+      sharpen: preprocess.sharpen ?? 0,
       threshold: preprocess.threshold.mode === "otsu" ? "auto" : preprocess.threshold.level,
       invert: preprocess.invert,
       ignoreSpecks: s.trace.settings.speckle,
@@ -485,6 +487,7 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     const brightness = num(input, "brightness", -1, 1);
     const contrast = num(input, "contrast", -1, 1);
     const blur = num(input, "blur", 0, 5);
+    const sharpen = num(input, "sharpen", 0, 2);
     const invert = flag(input, "invert");
     const speckle = num(input, "ignoreSpecks", 0, 16);
     const curves = flag(input, "smoothCurves");
@@ -500,6 +503,7 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       ...(brightness !== undefined && { brightness }),
       ...(contrast !== undefined && { contrast }),
       ...(blur !== undefined && { blurSigma: blur }),
+      ...(sharpen !== undefined && { sharpen }),
       ...(invert !== undefined && { invert }),
       ...(threshold && { threshold }),
     };

@@ -21,6 +21,8 @@ export interface Preprocess {
   brightness: number;
   contrast: number;
   blurSigma: number;
+  /** How strongly edges and fine detail are brought out, 0 to 2. Projects saved before this existed have none. */
+  sharpen?: number;
   threshold: Threshold;
   invert: boolean;
 }

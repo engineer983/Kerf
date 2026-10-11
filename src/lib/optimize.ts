@@ -106,6 +106,9 @@ export interface Optimised {
   changes: string[];
 }
 
+/** How much a photograph to be engraved is sharpened: enough to show in the eyes and hair without roughening skin. */
+const ENGRAVING_SHARPEN = 0.8;
+
 /** The settings that suit `purpose` for a picture with these tones. */
 export function optimise(purpose: Purpose, tones: Tones, current: TraceSettings): Optimised {
   const before = current.preprocess;
@@ -122,6 +125,7 @@ export function optimise(purpose: Purpose, tones: Tones, current: TraceSettings)
       brightness: 0,
       contrast: 0,
       blurSigma: tones.longSide < 600 ? 0.4 : tones.longSide < 1600 ? 0.7 : 1,
+      sharpen: 0,
       threshold: { mode: "otsu" },
       // Mostly dark means a light subject on a dark ground: trace the light.
       invert: darkShare > 0.6,
@@ -132,7 +136,11 @@ export function optimise(purpose: Purpose, tones: Tones, current: TraceSettings)
     // whole range. A carving is also smoothed, since single-pixel noise would
     // be cut as pits and spikes; an engraving keeps all its detail.
     const blurSigma = purpose === "carving" ? round(clamp(tones.longSide / 1500, 0.5, 2), 1) : 0;
-    preprocess = { ...before, ...fillRange(tones.histogram, purpose === "carving" ? 0.005 : 0.01), blurSigma };
+    // An engraving comes out softer than the picture, so its edges are
+    // brought out to make up for it. A carving's are not: the bit would cut
+    // the halo that sharpening leaves as a ridge.
+    const sharpen = purpose === "carving" ? 0 : ENGRAVING_SHARPEN;
+    preprocess = { ...before, ...fillRange(tones.histogram, purpose === "carving" ? 0.005 : 0.01), blurSigma, sharpen };
     settings = { ...current, preprocess };
   }
 
@@ -141,6 +149,7 @@ export function optimise(purpose: Purpose, tones: Tones, current: TraceSettings)
   if (preprocess.contrast !== before.contrast) changes.push(`contrast ${percent(preprocess.contrast)}`);
   if (preprocess.brightness !== before.brightness) changes.push(`brightness ${percent(preprocess.brightness)}`);
   if (preprocess.blurSigma !== before.blurSigma) changes.push(preprocess.blurSigma ? `blur ${preprocess.blurSigma} px` : "blur off");
+  if ((preprocess.sharpen ?? 0) !== (before.sharpen ?? 0)) changes.push(preprocess.sharpen ? `sharpening ${Math.round(preprocess.sharpen * 100)}%` : "sharpening off");
   if (purpose === "shapes") {
     if (before.threshold.mode !== "otsu") changes.push("automatic threshold");
     if (preprocess.invert !== before.invert) changes.push(preprocess.invert ? "tracing the light areas" : "tracing the dark areas");

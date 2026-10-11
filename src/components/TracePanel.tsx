@@ -55,7 +55,7 @@ export function TracePanel() {
       {uses.picture && !uses.traced && (
         <p className="rounded-lg border border-line px-3 py-2 text-muted">
           This job works from the picture itself, shown on the canvas in the greys the machine will read.
-          Brightness, Contrast and Blur change it. The other settings here only matter for operations
+          Brightness, Contrast, Blur and Sharpen change it. The other settings here only matter for operations
           that follow traced shapes.
         </p>
       )}
@@ -114,6 +114,15 @@ export function TracePanel() {
             value={pre.blurSigma}
             unit="px"
             onChange={(blurSigma) => updatePreprocess({ blurSigma })}
+          />
+          <Slider
+            label="Sharpen"
+            min={0}
+            max={2}
+            step={0.05}
+            value={pre.sharpen ?? 0}
+            percent
+            onChange={(sharpen) => updatePreprocess({ sharpen })}
           />
           <Checkbox
             label="Invert (trace light areas)"

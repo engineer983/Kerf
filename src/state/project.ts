@@ -40,6 +40,7 @@ export const DEFAULT_TRACE_SETTINGS: TraceSettings = {
     brightness: 0,
     contrast: 0,
     blurSigma: 0,
+    sharpen: 0,
     threshold: { mode: "otsu" },
     invert: false,
   },

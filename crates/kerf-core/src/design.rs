@@ -113,7 +113,7 @@ pub fn layer_sheets(
     sheet_height: f64,
 ) -> Result<Vec<Sheet>, String> {
     // The size in millimetres does not matter here: only the heights are used.
-    let map = crate::heightmap(image, depth, settings, 1.0, 1.0);
+    let map = crate::heightmap(image, depth, &crate::unsharpened(settings), 1.0, 1.0);
     let heights = GrayImage::from_fn(map.width as u32, map.height as u32, |x, y| {
         let height = map.data[y as usize * map.width + x as usize];
         let height = if light_is_high { height } else { 1.0 - height };

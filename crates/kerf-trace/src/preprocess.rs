@@ -26,6 +26,10 @@ pub struct Preprocess {
     pub contrast: f32,
     /// Gaussian blur radius in pixels; 0.0 disables it.
     pub blur_sigma: f32,
+    /// How strongly edges and fine detail are brought out, from 0.0 (not at
+    /// all) to 2.0. An engraved photograph is softer than the picture it was
+    /// made from, and this makes up for it.
+    pub sharpen: f32,
     pub threshold: Threshold,
     /// Trace the light areas instead of the dark ones.
     pub invert: bool,
@@ -37,14 +41,19 @@ impl Default for Preprocess {
             brightness: 0.0,
             contrast: 0.0,
             blur_sigma: 0.0,
+            sharpen: 0.0,
             threshold: Threshold::Otsu,
             invert: false,
         }
     }
 }
 
+/// Sharpening looks at detail this fraction of the picture's longer side
+/// across, so that it does the same to a picture at any resolution.
+const SHARPEN_REACH: f32 = 1.0 / 560.0;
+
 /// Converts to greyscale (transparency becomes white), then applies
-/// brightness, contrast and blur.
+/// brightness, contrast, blur and sharpening.
 pub fn grayscale(img: &DynamicImage, p: &Preprocess) -> GrayImage {
     let rgba = img.to_rgba8();
     let contrast = p.contrast.clamp(-1.0, 0.999);
@@ -64,7 +73,22 @@ pub fn grayscale(img: &DynamicImage, p: &Preprocess) -> GrayImage {
     if p.blur_sigma > 0.0 {
         gray = image::imageops::blur(&gray, p.blur_sigma);
     }
+    if p.sharpen > 0.0 {
+        gray = sharpened(&gray, p.sharpen.min(2.0));
+    }
     gray
+}
+
+/// An unsharp mask: each pixel is pushed away from the average of its
+/// surroundings, which steepens edges and leaves flat areas alone.
+fn sharpened(gray: &GrayImage, amount: f32) -> GrayImage {
+    let reach = (gray.width().max(gray.height()) as f32 * SHARPEN_REACH).clamp(0.8, 8.0);
+    let soft = image::imageops::blur(gray, reach);
+    GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
+        let v = gray.get_pixel(x, y).0[0] as f32;
+        let around = soft.get_pixel(x, y).0[0] as f32;
+        Luma([(v + amount * (v - around)).round().clamp(0.0, 255.0) as u8])
+    })
 }
 
 /// Otsu's method: the level that best separates dark from light pixels.
@@ -158,6 +182,29 @@ mod tests {
         let mask = binarize(&gray, &p);
         let values: Vec<u8> = mask.pixels().map(|p| p.0[0]).collect();
         assert_eq!(values, [INK, INK, PAPER]);
+    }
+
+    #[test]
+    fn sharpening_steepens_edges_and_leaves_flat_areas_alone() {
+        // Mid grey on the left, lighter grey on the right.
+        let picture = DynamicImage::ImageLuma8(GrayImage::from_fn(200, 40, |x, _| {
+            Luma([if x < 100 { 100 } else { 160 }])
+        }));
+        let plain = grayscale(&picture, &Preprocess::default());
+        let sharp = grayscale(
+            &picture,
+            &Preprocess {
+                sharpen: 1.0,
+                ..Preprocess::default()
+            },
+        );
+        let at = |image: &GrayImage, x: u32| image.get_pixel(x, 20).0[0];
+        // Far from the edge nothing changes.
+        assert_eq!(at(&sharp, 20), at(&plain, 20));
+        assert_eq!(at(&sharp, 180), at(&plain, 180));
+        // Beside it, the dark side is darker and the light side lighter.
+        assert!(at(&sharp, 99) < at(&plain, 99));
+        assert!(at(&sharp, 100) > at(&plain, 100));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Upload } from "lucide-react";
 import { isFixed } from "../lib/design";
 import { findMaterial, paintMaterial } from "../lib/materials";
+import { reduceInto } from "../lib/reduce";
 import { Simulation, type Rect } from "../lib/simulation";
 import { setResultCanvas } from "../lib/thumbnail";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
@@ -233,6 +234,8 @@ export function Canvas() {
 
   // The preview carves with one bit: the first router operation's.
   const routing = operations.find((o) => o.kind.type === "cncRelief" || o.kind.type === "cncProfile");
+  // A carving is made without sharpening, so the picture is shown without it too.
+  const sharpen = operations.some((o) => o.kind.type === "cncRelief" && o.enabled !== false) ? 0 : Math.min(2, adjust.sharpen ?? 0);
   const chosen = tools.find((t) => t.id === routing?.toolId);
   const bit =
     chosen ??
@@ -304,11 +307,20 @@ export function Canvas() {
   // In the result view the simulation's own canvas is shown over the material.
   const resultHost = useRef<HTMLDivElement>(null);
   const showResult = simulation !== null && mode === "result";
+  // It is far finer than the screen, so a copy reduced to the size it is
+  // seen at is what is shown: see `reduceInto`.
+  const shown = useMemo(() => document.createElement("canvas"), []);
+  /** How many of the screen's own pixels the material is wide at this zoom. */
+  const shownWidth = (sw / px) * window.devicePixelRatio;
   useLayoutEffect(() => {
     if (!showResult || !resultHost.current) return;
-    simulation.canvas.style.cssText = "display:block;width:100%;height:100%";
-    resultHost.current.replaceChildren(simulation.canvas);
-  }, [showResult, simulation]);
+    shown.style.cssText = "display:block;width:100%;height:100%";
+    resultHost.current.replaceChildren(shown);
+  }, [showResult, shown]);
+  // After the layout effect above that moves the simulation to `progress`.
+  useLayoutEffect(() => {
+    if (showResult) reduceInto(shown, simulation.canvas, shownWidth);
+  }, [showResult, simulation, progress, shownWidth, shown]);
 
   // The gallery pictures a project by its simulated result.
   useEffect(() => {
@@ -338,11 +350,13 @@ export function Canvas() {
   /** Where the divider sits across the material, 0 at the left and 1 at the right. */
   const [split, setSplit] = useState(0.5);
   const beforeHost = useRef<HTMLDivElement>(null);
+  const shownBefore = useMemo(() => document.createElement("canvas"), []);
   useLayoutEffect(() => {
     if (!comparing || !beforeHost.current || !before) return;
-    before.canvas.style.cssText = "display:block;width:100%;height:100%";
-    beforeHost.current.replaceChildren(before.canvas);
-  }, [comparing, before]);
+    shownBefore.style.cssText = "display:block;width:100%;height:100%";
+    beforeHost.current.replaceChildren(shownBefore);
+    reduceInto(shownBefore, before.canvas, shownWidth);
+  }, [comparing, before, shownWidth, shownBefore]);
 
   function dragSplit(e: React.PointerEvent) {
     if (!e.currentTarget.hasPointerCapture(e.pointerId) || !view) return;
@@ -428,18 +442,35 @@ export function Canvas() {
           )}
           {uses.picture && image && placed && (
             // The same steps the backend takes: to grey, then contrast and
-            // brightness, then blur.
+            // brightness, then blur, then sharpening.
             <filter id="kerf-as-read" colorInterpolationFilters="sRGB" x="0" y="0" width="1" height="1">
               <feColorMatrix
                 type="matrix"
                 values="0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0.299 0.587 0.114 0 0  0 0 0 1 0"
               />
-              <feComponentTransfer>
+              <feComponentTransfer result="toned">
                 <feFuncR type="linear" slope={gain} intercept={lift} />
                 <feFuncG type="linear" slope={gain} intercept={lift} />
                 <feFuncB type="linear" slope={gain} intercept={lift} />
               </feComponentTransfer>
-              {adjust.blurSigma > 0 && <feGaussianBlur stdDeviation={(adjust.blurSigma * placed.width) / image.width} />}
+              {adjust.blurSigma > 0 && <feGaussianBlur stdDeviation={(adjust.blurSigma * placed.width) / image.width} result="read" />}
+              {sharpen > 0 && (
+                <>
+                  {/* An unsharp mask: each point is pushed away from the average of what surrounds it. */}
+                  <feGaussianBlur
+                    stdDeviation={Math.min(8, Math.max(0.8, Math.max(image.width, image.height) / 560)) * (placed.width / image.width)}
+                    edgeMode="duplicate"
+                    result="around"
+                  />
+                  <feComposite
+                    in={adjust.blurSigma > 0 ? "read" : "toned"}
+                    in2="around"
+                    operator="arithmetic"
+                    k2={1 + sharpen}
+                    k3={-sharpen}
+                  />
+                </>
+              )}
             </filter>
           )}
           {image && placed && !designed && (uses.picture || showSource || !traced || !showTraced) && (

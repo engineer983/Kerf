@@ -1,5 +1,5 @@
-import { useEffect, useReducer, useRef, useState, type PointerEvent } from "react";
-import { X } from "lucide-react";
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type PointerEvent } from "react";
+import { Maximize, X, ZoomIn, ZoomOut } from "lucide-react";
 import { cutOut, findSubject, maskCanvas, type Backdrop } from "../lib/subject";
 import { useProject } from "../state/project";
 import { useUi } from "../state/ui";
@@ -10,8 +10,13 @@ const quiet = "rounded-lg border border-line px-3 py-1.5 transition-colors hover
 const caption = "text-[11px] font-semibold tracking-wider text-muted uppercase";
 
 /** Longest side, in pixels, of the copy that is drawn on. The finished picture keeps its full size. */
-const WORK_MAX_PX = 1600;
-const UNDO_STEPS = 12;
+const WORK_MAX_PX = 2400;
+const UNDO_STEPS = 16;
+/** How far the picture can be magnified, as a multiple of the size that fits the window. */
+const ZOOM_MAX = 16;
+const ZOOM_STEP = 1.3;
+/** Space left round the picture, in pixels, when it is fitted to the window. */
+const MARGIN = 16;
 /** Laid over what will be removed, so that it can still be seen and brought back. */
 const WASH = "rgba(40, 110, 255, 0.62)";
 
@@ -35,7 +40,17 @@ export function BackgroundRemover() {
   const image = useProject((s) => s.image);
   const display = useRef<HTMLCanvasElement>(null);
   const work = useRef<Work | null>(null);
-  const history = useRef<ImageData[]>([]);
+  /** Earlier states of the mask, each as how much of every pixel is kept. */
+  const history = useRef<Uint8ClampedArray[]>([]);
+  const viewport = useRef<HTMLDivElement>(null);
+  /** The size, in screen pixels, at which the whole picture fits the window. */
+  const [fit, setFit] = useState<{ width: number; height: number } | null>(null);
+  const [zoom, setZoom] = useState(1);
+  /** The point of the picture (as fractions) to hold at a place in the window when the zoom changes. */
+  const anchor = useRef<{ fx: number; fy: number; x: number; y: number } | null>(null);
+  /** A drag that moves the view: where it started, and where the view was. */
+  const pan = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const spaceHeld = useRef(false);
   /** The loop or brush stroke being drawn. */
   const stroke = useRef<Point[] | null>(null);
   const pointer = useRef<Point | null>(null);
@@ -44,7 +59,7 @@ export function BackgroundRemover() {
   const [problem, setProblem] = useState<string | null>(null);
   const [mode, setMode] = useState<"keep" | "remove">("keep");
   const [tool, setTool] = useState<"loop" | "brush">("loop");
-  const [brush, setBrush] = useState(4);
+  const [brush, setBrush] = useState(3);
   const [view, setView] = useState<"edit" | "result">("edit");
   const [backdrop, setBackdrop] = useState<Backdrop>("white");
   const [canUndo, setCanUndo] = useState(false);
@@ -56,7 +71,10 @@ export function BackgroundRemover() {
   /** Keeps the mask as it is now, to go back to. */
   function remember() {
     const { mask } = work.current!;
-    history.current.push(maskContext().getImageData(0, 0, mask.width, mask.height));
+    const pixels = maskContext().getImageData(0, 0, mask.width, mask.height).data;
+    const kept = new Uint8ClampedArray(mask.width * mask.height);
+    for (let i = 0; i < kept.length; i++) kept[i] = pixels[i * 4 + 3];
+    history.current.push(kept);
     if (history.current.length > UNDO_STEPS) history.current.shift();
     setCanUndo(true);
   }
@@ -64,9 +82,33 @@ export function BackgroundRemover() {
   function undo() {
     const last = history.current.pop();
     if (!last || !work.current) return;
-    maskContext().putImageData(last, 0, 0);
+    const { mask } = work.current;
+    const pixels = new ImageData(mask.width, mask.height);
+    for (let i = 0; i < last.length; i++) {
+      pixels.data[i * 4] = pixels.data[i * 4 + 1] = pixels.data[i * 4 + 2] = 255;
+      pixels.data[i * 4 + 3] = last[i];
+    }
+    maskContext().putImageData(pixels, 0, 0);
     setCanUndo(history.current.length > 0);
     redraw();
+  }
+
+  /** Changes the zoom, holding the picture still at a point of the window (its middle unless given). */
+  function zoomBy(factor: number, at?: { clientX: number; clientY: number }) {
+    const view = viewport.current;
+    const canvas = display.current;
+    if (!view || !canvas) return;
+    const frame = view.getBoundingClientRect();
+    const box = canvas.getBoundingClientRect();
+    const x = at ? at.clientX - frame.left : frame.width / 2;
+    const y = at ? at.clientY - frame.top : frame.height / 2;
+    anchor.current = {
+      fx: (frame.left + x - box.left) / box.width,
+      fy: (frame.top + y - box.top) / box.height,
+      x,
+      y,
+    };
+    setZoom((z) => Math.min(ZOOM_MAX, Math.max(1, z * factor)));
   }
 
   /** Keeps or removes the whole picture. */
@@ -148,9 +190,61 @@ export function BackgroundRemover() {
         undo();
       }
     };
+    // Holding Space turns a drag into moving the view, as in drawing programs.
+    const onSpace = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || (e.target as HTMLElement | null)?.tagName === "INPUT") return;
+      spaceHeld.current = e.type === "keydown";
+      if (e.type === "keydown") e.preventDefault();
+    };
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onSpace);
+    window.addEventListener("keyup", onSpace);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keydown", onSpace);
+      window.removeEventListener("keyup", onSpace);
+    };
   });
+
+  // The size at which the whole picture fits, kept up as the window changes.
+  useEffect(() => {
+    const view = viewport.current;
+    if (!view) return;
+    const measure = () => {
+      const canvas = display.current;
+      if (!canvas || !work.current) return;
+      const scale = Math.min((view.clientWidth - MARGIN * 2) / canvas.width, (view.clientHeight - MARGIN * 2) / canvas.height);
+      setFit({ width: Math.max(1, canvas.width * scale), height: Math.max(1, canvas.height * scale) });
+    };
+    measure();
+    const watcher = new ResizeObserver(measure);
+    watcher.observe(view);
+    return () => watcher.disconnect();
+    // Measured again once the picture has loaded, which `status` first changing marks.
+  }, [status === "Starting…"]);
+
+  // The wheel zooms about the pointer. Listened to directly, since it must stop the view scrolling.
+  useEffect(() => {
+    const view = viewport.current;
+    if (!view) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      zoomBy(e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, e);
+    };
+    view.addEventListener("wheel", onWheel, { passive: false });
+    return () => view.removeEventListener("wheel", onWheel);
+  });
+
+  // After a zoom, the view is moved so the point that was under the pointer still is.
+  useLayoutEffect(() => {
+    const view = viewport.current;
+    const canvas = display.current;
+    const held = anchor.current;
+    anchor.current = null;
+    if (!view || !canvas || !held) return;
+    view.scrollLeft = canvas.offsetLeft + held.fx * canvas.offsetWidth - held.x;
+    view.scrollTop = canvas.offsetTop + held.fy * canvas.offsetHeight - held.y;
+  }, [zoom]);
 
   function draw() {
     const canvas = display.current;
@@ -178,7 +272,8 @@ export function BackgroundRemover() {
     context.drawImage(current.scratch, 0, 0);
     if (view !== "edit") return;
 
-    const line = Math.max(1.5, Math.max(width, height) / 450);
+    // About two screen pixels wide, however far in the view is.
+    const line = (2 * width) / ((fit?.width ?? width) * zoom);
     context.lineWidth = line;
     context.strokeStyle = mode === "keep" ? "#ffffff" : "#ff5a36";
     const points = stroke.current;
@@ -234,7 +329,15 @@ export function BackgroundRemover() {
   }
 
   function onPointerDown(e: PointerEvent<HTMLCanvasElement>) {
-    if (!work.current || status || view !== "edit" || e.button !== 0) return;
+    // The middle or right button, or the left with Space held, moves the view.
+    if (e.button !== 0 || spaceHeld.current) {
+      const frame = viewport.current!;
+      e.currentTarget.setPointerCapture(e.pointerId);
+      pan.current = { x: e.clientX, y: e.clientY, left: frame.scrollLeft, top: frame.scrollTop };
+      e.preventDefault();
+      return;
+    }
+    if (!work.current || status || view !== "edit") return;
     e.currentTarget.setPointerCapture(e.pointerId);
     const point = at(e);
     stroke.current = [point];
@@ -246,6 +349,12 @@ export function BackgroundRemover() {
   }
 
   function onPointerMove(e: PointerEvent<HTMLCanvasElement>) {
+    if (pan.current) {
+      const frame = viewport.current!;
+      frame.scrollLeft = pan.current.left - (e.clientX - pan.current.x);
+      frame.scrollTop = pan.current.top - (e.clientY - pan.current.y);
+      return;
+    }
     const point = at(e);
     pointer.current = point;
     const points = stroke.current;
@@ -261,6 +370,10 @@ export function BackgroundRemover() {
   }
 
   function onPointerUp() {
+    if (pan.current) {
+      pan.current = null;
+      return;
+    }
     const points = stroke.current;
     stroke.current = null;
     // A loop closes itself: its end is joined to its start.
@@ -324,12 +437,19 @@ export function BackgroundRemover() {
         </header>
 
         <div className="flex min-h-0 flex-1">
-          <div className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center bg-raised p-4">
+          <div className="relative min-h-0 min-w-0 flex-1 bg-raised">
+            {/* The picture's own window: it scrolls when the picture is magnified past its edges. */}
+            <div ref={viewport} className="absolute inset-0 flex overflow-auto" onContextMenu={(e) => e.preventDefault()}>
             <canvas
               ref={display}
               aria-label="The picture, to draw on"
-              className="max-h-full max-w-full touch-none rounded shadow"
-              style={{ cursor: view === "edit" && !busy ? "crosshair" : "default" }}
+              className="m-auto shrink-0 touch-none rounded shadow"
+              style={{
+                cursor: view === "edit" && !busy ? "crosshair" : "default",
+                width: fit ? fit.width * zoom : undefined,
+                height: fit ? fit.height * zoom : undefined,
+                visibility: fit ? "visible" : "hidden",
+              }}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
@@ -339,6 +459,21 @@ export function BackgroundRemover() {
                 draw();
               }}
             />
+            </div>
+            <div className="absolute bottom-3 left-3 flex items-center gap-1 rounded-lg border border-line bg-surface p-1 shadow">
+              <button className="rounded p-1.5 text-muted hover:text-fg disabled:opacity-40" disabled={zoom <= 1} aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(1 / ZOOM_STEP)}>
+                <ZoomOut size={15} />
+              </button>
+              <span className="w-12 text-center font-mono text-[11px] text-muted" aria-label="Zoom">
+                {Math.round(zoom * 100)}%
+              </span>
+              <button className="rounded p-1.5 text-muted hover:text-fg disabled:opacity-40" disabled={zoom >= ZOOM_MAX} aria-label="Zoom in" title="Zoom in, for fine work" onClick={() => zoomBy(ZOOM_STEP)}>
+                <ZoomIn size={15} />
+              </button>
+              <button className="rounded p-1.5 text-muted hover:text-fg disabled:opacity-40" disabled={zoom === 1} aria-label="Show the whole picture" title="Show the whole picture" onClick={() => setZoom(1)}>
+                <Maximize size={15} />
+              </button>
+            </div>
             {busy && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/35">
                 <p role="status" className="rounded-lg border border-line bg-surface px-4 py-2 shadow">
@@ -352,6 +487,10 @@ export function BackgroundRemover() {
             <p className="text-muted">
               The subject is found for you. Where it has it wrong, draw on the picture to put it right: a loop
               round an area, or a brush over it.
+            </p>
+            <p className="text-muted">
+              Turn the mouse wheel to zoom in for fine work. To move around, hold Space and drag, or drag with
+              the right mouse button.
             </p>
 
             <div className="flex flex-col gap-1.5">
@@ -382,8 +521,9 @@ export function BackgroundRemover() {
               <Slider
                 label="Brush size"
                 unit="%"
-                min={1}
+                min={0.5}
                 max={20}
+                step={0.5}
                 value={brush}
                 hint={{ text: "How wide the brush is, as a share of the picture. Use a small brush along edges and a large one to fill in." }}
                 onChange={setBrush}

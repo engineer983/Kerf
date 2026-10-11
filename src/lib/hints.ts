@@ -35,6 +35,9 @@ const BY_LABEL: Record<string, HintContent> = {
   Brightness: { text: "Lightens or darkens the image before it is used. For engraving and carving this shifts the whole picture lighter or deeper." },
   Contrast: { text: "Pushes light and dark further apart, or pulls them together. More contrast gives a bolder engraving or a deeper-looking carving." },
   Blur: { text: "Softens the image. It removes speckle from a trace and smooths the surface of a carving.", demo: "blur" },
+  Sharpen: {
+    text: "Brings out edges and fine detail such as eyes, hair and fabric. An engraved photograph comes out softer than the picture, and this makes up for it: 60 to 100% suits most photos. Too much puts a pale halo round dark edges and makes skin look rough. It is left out of carvings and stacked layers, where the halo would be cut as a ridge.",
+  },
   "Invert (trace light areas)": { text: "Swaps black and white, so the light parts of the image are the ones traced." },
   "Colour detail": { text: "How finely colours are told apart. Higher keeps more separate colours; lower merges similar ones into fewer shapes." },
   "Layer separation": { text: "How different two colours must be before they become separate shapes. Higher gives fewer, larger shapes." },

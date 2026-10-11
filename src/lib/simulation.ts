@@ -46,6 +46,8 @@ export interface SimulationSetup {
 const LASER_LINE_MM = 0.14;
 const MAX_CANVAS_PX = 4096;
 const MAX_PX_PER_MM = 12;
+/** An engraved picture may use a larger canvas, to give every row of dots whole pixels. */
+const MAX_IMAGE_CANVAS_PX = 6000;
 /** Cells along the longer side of the height grid used for router jobs. */
 const GRID_CELLS = 1152;
 
@@ -106,6 +108,13 @@ export class Simulation {
       this.canvas.height = this.base.height = this.gridHeight;
     } else {
       this.pxPerMm = Math.min(MAX_PX_PER_MM, MAX_CANVAS_PX / longest);
+      if (setup.imageInterval) {
+        // An engraved picture is rows of dots. Each row gets a whole number of
+        // pixels: with a fraction, rows fall unevenly across the pixels and
+        // show as stripes that are not in the job.
+        const perRow = Math.min(3, Math.max(1, Math.floor((MAX_IMAGE_CANVAS_PX / longest) * setup.imageInterval)));
+        this.pxPerMm = perRow / setup.imageInterval;
+      }
       this.canvas.width = this.base.width = Math.max(2, Math.round(stock.width * this.pxPerMm));
       this.canvas.height = this.base.height = Math.max(2, Math.round(stock.height * this.pxPerMm));
     }

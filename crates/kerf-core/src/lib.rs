@@ -222,6 +222,16 @@ pub fn heightmap(
     }
 }
 
+/// The settings with sharpening left out, for heights that a bit will carve
+/// or that are cut as layers. Sharpening leaves a pale and a dark fringe
+/// along every edge, which flatters an engraving but would be cut as a ridge
+/// and a groove.
+pub fn unsharpened(settings: &TraceSettings) -> TraceSettings {
+    let mut plain = *settings;
+    plain.preprocess.sharpen = 0.0;
+    plain
+}
+
 /// How a relief uses the estimated depth map.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,8 +319,14 @@ pub fn generate(input: JobInput) -> Result<(Generated, String), String> {
         None => kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm),
     };
     let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
-    let heightmap =
-        carves_relief.then(|| heightmap(&image, depth.as_ref(), &settings, width_mm, height_mm));
+    let heightmap = carves_relief.then(|| {
+        let shaping = if is_relief {
+            unsharpened(&settings)
+        } else {
+            settings
+        };
+        heightmap(&image, depth.as_ref(), &shaping, width_mm, height_mm)
+    });
     let lettering = added
         .as_ref()
         .map(|added| Artwork::from_svg(&added.svg, FLATTEN_TOLERANCE_MM))

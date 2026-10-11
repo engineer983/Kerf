@@ -12,6 +12,50 @@ use crate::relief::Heightmap;
 /// of almost equal shade in one move.
 const POWER_STEPS: f64 = 64.0;
 
+/// Where the rounding error of a dot goes: (columns ahead, rows down, share
+/// out of 48). This is the Jarvis, Judice and Ninke pattern, which spreads
+/// the error over twelve neighbours. It leaves a finer, more even grain than
+/// simpler patterns, without their stripes in flat areas.
+const SPREAD: [(isize, usize, f64); 12] = [
+    (1, 0, 7.0),
+    (2, 0, 5.0),
+    (-2, 1, 3.0),
+    (-1, 1, 5.0),
+    (0, 1, 7.0),
+    (1, 1, 5.0),
+    (2, 1, 3.0),
+    (-2, 2, 1.0),
+    (-1, 2, 3.0),
+    (0, 2, 5.0),
+    (1, 2, 3.0),
+    (2, 2, 1.0),
+];
+
+/// Turns shades into dots that are fully on or off, whose density gives the
+/// shade. Each dot's rounding error is passed to dots not yet visited. Rows
+/// are worked in alternate directions, so the error does not always drift the
+/// same way and leave slanting streaks.
+fn dither_dots(dark: &mut [f64], columns: usize, rows: usize) {
+    for row in 0..rows {
+        let backwards = row % 2 == 1;
+        for step in 0..columns {
+            let column = if backwards { columns - 1 - step } else { step };
+            let i = row * columns + column;
+            let wanted = dark[i];
+            let chosen = if wanted >= 0.5 { 1.0 } else { 0.0 };
+            dark[i] = chosen;
+            let error = wanted - chosen;
+            for (ahead, down, share) in SPREAD {
+                let across = column as isize + if backwards { -ahead } else { ahead };
+                if across < 0 || across >= columns as isize || row + down >= rows {
+                    continue;
+                }
+                dark[(row + down) * columns + across as usize] += error * share / 48.0;
+            }
+        }
+    }
+}
+
 pub(crate) fn engrave(w: &mut Writer, operation: &Operation, map: &Heightmap, offset: [f64; 2]) {
     let OperationKind::LaserImage { interval, dither } = operation.kind else {
         return;
@@ -36,29 +80,7 @@ pub(crate) fn engrave(w: &mut Writer, operation: &Operation, map: &Heightmap, of
         .collect();
 
     if dither {
-        // Floyd–Steinberg: each dot becomes on or off, and the rounding error
-        // is passed to the dots not yet visited.
-        for row in 0..rows {
-            for column in 0..columns {
-                let i = row * columns + column;
-                let wanted = dark[i];
-                let chosen = if wanted >= 0.5 { 1.0 } else { 0.0 };
-                dark[i] = chosen;
-                let error = wanted - chosen;
-                if column + 1 < columns {
-                    dark[i + 1] += error * 7.0 / 16.0;
-                }
-                if row + 1 < rows {
-                    if column > 0 {
-                        dark[i + columns - 1] += error * 3.0 / 16.0;
-                    }
-                    dark[i + columns] += error * 5.0 / 16.0;
-                    if column + 1 < columns {
-                        dark[i + columns + 1] += error / 16.0;
-                    }
-                }
-            }
-        }
+        dither_dots(&mut dark, columns, rows);
     } else {
         for d in &mut dark {
             *d = (d.clamp(0.0, 1.0) * POWER_STEPS).round() / POWER_STEPS;
