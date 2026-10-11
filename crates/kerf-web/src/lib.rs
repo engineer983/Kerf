@@ -242,6 +242,17 @@ pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
             })?;
             Ok(DONE.into())
         }
+        // Takes an edited copy of the picture, such as one with its background removed.
+        "replace_image" => {
+            with(|state| {
+                state
+                    .image
+                    .as_mut()
+                    .ok_or("No image is loaded.")?
+                    .replace(file)
+            })?;
+            Ok(DONE.into())
+        }
         "reset_crop" => {
             with(|state| {
                 state
@@ -538,6 +549,10 @@ mod tests {
             text.lines().count() as u64,
             generated["lineCount"].as_u64().unwrap()
         );
+
+        // An edited copy of the same size can take its place; another size cannot.
+        run("replace_image", "", &square()).unwrap();
+        assert!(run("replace_image", "", b"not a picture").is_err());
 
         // The picture comes back out as a PNG, and there is no depth map.
         assert!(picture_png("image")

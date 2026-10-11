@@ -339,6 +339,7 @@ export const HELP_TOPICS: HelpTopic[] = [
         heading: "For a better engraving",
         points: [
           "Start with a sharp photo with one clear subject and a plain background.",
+          "If the background is busy, take it away: Remove background… in step 3 keeps just the subject.",
           "A little extra contrast in step 4 usually helps. The canvas shows the picture in the greys the laser will read.",
           "Fine gives the most detail and takes longest. Try Draft on scrap first.",
         ],
@@ -368,7 +369,40 @@ export const HELP_TOPICS: HelpTopic[] = [
         points: [
           "In Advanced, Picture detail adds the photo's own linework back onto the shape. A little goes a long way: start near 10%.",
           "Flatten background levels off what is behind the subject, so the subject uses the whole depth.",
+          "Remove background… in step 3 goes further and takes away what is behind the subject altogether.",
           "A bigger piece shows more detail with the same bit.",
+        ],
+      },
+    ],
+  },
+  {
+    id: "remove-background",
+    title: "Remove a picture's background",
+    group: "How to make",
+    blocks: [
+      {
+        text: "This keeps the subject of a photograph and takes away what is behind it, so only the subject is engraved, traced or carved.",
+      },
+      {
+        steps: [
+          "Step 3, Design: select the picture and press Remove background….",
+          "Wait while the subject is found. The first time, a small model is downloaded; after that it needs no connection. The picture never leaves your computer.",
+          "Blue lies over what will be removed. Look for parts of the subject under the blue, and for background left clear.",
+          "To bring a part back, choose Kept and A loop round it, then drag a line round that part and let go. Everything inside the loop is kept.",
+          "To take a part away, choose Removed and do the same.",
+          "For edges and small places, choose A brush and paint over them. Undo, or Ctrl+Z, takes back the last thing drawn.",
+          "Choose Finished to see the picture as it will be used, then press Remove the background.",
+        ],
+      },
+      {
+        heading: "Good to know",
+        points: [
+          "The subject is found best in photographs of people, and of things that stand clear of what is behind them. Where the subject and the background are the same shade, such as a white shirt against a white wall, part of the subject is lost and has to be drawn back.",
+          "To do it all by hand, press Remove everything and draw a loop round just what you want.",
+          "Logos and drawings do not need this: tracing already leaves a white background alone.",
+          "The background becomes white, which a laser leaves untouched. For a carving where dark is low, black gives a flat ground for the subject to stand up from.",
+          "Restore the picture, in step 3, brings back the picture as it was imported, and undoes any crop too.",
+          "A carving's shape is worked out again afterwards, since the picture has changed.",
         ],
       },
     ],

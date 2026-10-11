@@ -112,7 +112,19 @@ fn crop_image(
         .crop(x, y, width, height)
 }
 
-/// Undoes any crop, going back to the image as imported.
+/// Takes an edited copy of the image being worked on (an encoded image file
+/// of the same size, such as one with its background removed) as the raw
+/// request body, and puts it in the image's place.
+#[tauri::command]
+async fn replace_image(request: Request<'_>, state: State<'_, AppState>) -> Result<(), String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Expected the edited picture as raw bytes.".into());
+    };
+    let mut guard = state.image.lock().unwrap();
+    guard.as_mut().ok_or("No image is loaded.")?.replace(bytes)
+}
+
+/// Undoes any crop or edit, going back to the image as imported.
 #[tauri::command]
 fn reset_crop(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.image.lock().unwrap();
@@ -259,6 +271,7 @@ pub fn run() {
             load_image,
             clear_image,
             crop_image,
+            replace_image,
             reset_crop,
             set_depth_map,
             trace_image,

@@ -321,8 +321,11 @@ function Selected({ onReplace }: { onReplace: () => void }) {
             <button className={quiet} onClick={() => s.setCropping(!s.cropping)}>
               {s.cropping ? "Cancel crop" : "Crop…"}
             </button>
+            <button className={quiet} onClick={() => useUi.getState().setMaker("background")}>
+              Remove background…
+            </button>
             <button className={quiet} disabled={s.uncropped === null} onClick={() => void s.resetCrop()}>
-              Undo crop
+              Restore the picture
             </button>
             <button
               className={quiet}

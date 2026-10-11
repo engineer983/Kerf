@@ -21,7 +21,7 @@ function applyTheme(theme: ThemeChoice) {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
 
-export type Maker = "box" | "layers" | "text";
+export type Maker = "box" | "layers" | "text" | "background";
 
 interface UiState {
   theme: ThemeChoice;

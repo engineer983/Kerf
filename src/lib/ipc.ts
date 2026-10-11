@@ -367,7 +367,15 @@ export function cropImage(x: number, y: number, width: number, height: number): 
   return invoke("crop_image", { x, y, width, height });
 }
 
-/** Undoes any crop. */
+/**
+ * Puts an edited copy of the working image in its place: an image file of the
+ * same size, such as one with its background removed.
+ */
+export function replaceImage(bytes: Uint8Array): Promise<void> {
+  return invoke("replace_image", bytes);
+}
+
+/** Undoes any crop or edit, going back to the picture as imported. */
 export function resetCrop(): Promise<void> {
   return invoke("reset_crop");
 }

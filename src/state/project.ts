@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import { estimateDepth } from "../lib/depth";
+import { cutOut, findSubject, maskCanvas } from "../lib/subject";
 import { CUT_COLOR, isFixed, MARK_COLOR, pictureOf, type BoxInput, type Design, type LayersInput } from "../lib/design";
 import { measureTones, optimise, PURPOSE_LABELS, type Purpose } from "../lib/optimize";
 import * as ipc from "../lib/ipc";
@@ -421,6 +422,17 @@ interface ProjectState {
   /** Keeps the part of the image inside the fractions given (0 to 1 of its width and height). */
   applyCrop: (crop: { x0: number; y0: number; x1: number; y1: number }) => Promise<void>;
   resetCrop: () => Promise<void>;
+  /**
+   * Puts an edited copy of the picture (the same size, as an image file) in
+   * its place, keeping where it sits and what is made from it. The picture as
+   * imported is kept, so `resetCrop` brings it back.
+   */
+  replacePicture: (edited: Blob) => Promise<void>;
+  /**
+   * Finds the picture's subject and removes everything else, leaving white.
+   * Throws, with the reason, if the subject could not be found.
+   */
+  removeBackground: () => Promise<void>;
   setHeightSource: (source: "brightness" | "depth") => void;
   setDetail: (detail: number) => void;
   setDepthFloor: (depthFloor: number) => void;
@@ -1478,6 +1490,38 @@ export const useProject = create<ProjectState>((set, get) => {
       } catch (e) {
         set({ error: message(e) });
       }
+    },
+
+    replacePicture: async (edited) => {
+      const s = get();
+      const { image } = s;
+      if (!image) return;
+      if (ipc.isTauri()) await ipc.replaceImage(new Uint8Array(await edited.arrayBuffer()));
+      cancelTrace();
+      if (s.depth.url) URL.revokeObjectURL(s.depth.url);
+      if (s.uncropped) URL.revokeObjectURL(image.url);
+      set({
+        image: { ...image, url: URL.createObjectURL(edited), bytes: edited.size },
+        uncropped: s.uncropped ?? image,
+        cropping: false,
+        // The depth map was of the picture as it was.
+        depth: NO_DEPTH,
+        heightSource: "brightness",
+        trace: { ...EMPTY_TRACE, settings: s.trace.settings },
+        error: null,
+        ...staleGcode(),
+      });
+      scheduleTrace();
+    },
+
+    removeBackground: async () => {
+      const { image } = get();
+      if (!image) throw new Error("There is no picture to remove the background from.");
+      const found = await findSubject(image.url, () => {});
+      const edited = await cutOut(image.url, maskCanvas(found), "white");
+      // The picture may have been replaced while the model ran.
+      if (get().image !== image) return;
+      await get().replacePicture(edited);
     },
 
     setHeightSource: (heightSource) => set({ heightSource, ...staleGcode() }),

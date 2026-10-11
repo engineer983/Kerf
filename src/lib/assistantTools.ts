@@ -82,6 +82,12 @@ export const TOOLS: ToolSpec[] = [
     schema: { type: "object", properties: {} },
   },
   {
+    name: "remove_background",
+    description:
+      "Find the subject of the loaded picture and remove everything behind it, leaving white, which a laser leaves alone and which is not traced. A model on this computer does it; it is best on photographs of people and of things that stand clear of what is behind them, and it does poorly on logos and drawings, which do not need it. It can lose part of a subject that is the same shade as the background. Afterwards tell the person they can correct the result by hand with Remove background… in the Design step, by drawing round what to keep or remove, and that Restore the picture brings the background back. Any estimated depth is dropped, so estimate it again for a carving.",
+    schema: { type: "object", properties: {} },
+  },
+  {
     name: "set_material",
     description: "Change the material and the size of the piece. Changing the material recalculates router speeds.",
     schema: {
@@ -509,6 +515,18 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
   optimize_picture: async () => {
     const note = await useProject.getState().optimizePicture();
     return { content: note, summary: "Optimised the picture" };
+  },
+
+  remove_background: async () => {
+    const s = useProject.getState();
+    if (!s.image) throw new ToolError("There is no picture loaded.");
+    if (s.design) throw new ToolError("This project is a drawing, a box, layers or text, which has no background to remove.");
+    await s.removeBackground();
+    return {
+      content:
+        "The background was removed and is now white. The picture as it was can be brought back with Restore the picture in the Design step. If part of the subject is missing, or some background is left, the person can correct it with Remove background… in the Design step.",
+      summary: "Removed the background",
+    };
   },
 
   set_material: (input) => {

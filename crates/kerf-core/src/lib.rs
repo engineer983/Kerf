@@ -65,7 +65,20 @@ impl LoadedImage {
         Ok(())
     }
 
-    /// Undoes any crop, going back to the image as imported.
+    /// Puts an edited copy of the image in its place, such as one with its
+    /// background removed. It is given as an encoded image file and must be
+    /// the same size. The image as imported is kept, so this can be undone,
+    /// and any depth map is dropped, since it no longer matches.
+    pub fn replace(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let edited = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+        if (edited.width(), edited.height()) != (self.full.width(), self.full.height()) {
+            return Err("The edited picture is not the same size as the one it replaces.".into());
+        }
+        *self = Self::new(self.original.clone(), edited);
+        Ok(())
+    }
+
+    /// Undoes any crop or edit, going back to the image as imported.
     pub fn reset_crop(&mut self) {
         *self = Self::new(self.original.clone(), (*self.original).clone());
     }
@@ -328,6 +341,29 @@ pub fn generate(input: JobInput) -> Result<(Generated, String), String> {
 mod tests {
     use super::*;
     use kerf_trace::image::{GrayImage, Luma};
+
+    fn png(width: u32, height: u32, shade: u8) -> Vec<u8> {
+        let picture = DynamicImage::ImageLuma8(GrayImage::from_pixel(width, height, Luma([shade])));
+        encode_png(&picture).unwrap()
+    }
+
+    #[test]
+    fn an_edited_picture_takes_the_place_of_the_original_until_undone() {
+        let mut loaded = LoadedImage::load(&png(40, 30, 10)).unwrap();
+        loaded.depth = decode_depth(&png(40, 30, 200)).unwrap();
+        loaded.crop(10, 0, 20, 30).unwrap();
+
+        // Only a picture the size of the one being worked on can replace it.
+        assert!(loaded.replace(&png(40, 30, 250)).is_err());
+        loaded.replace(&png(20, 30, 250)).unwrap();
+        assert_eq!(loaded.full.to_luma8().get_pixel(5, 5).0, [250]);
+        assert_eq!(loaded.preview.to_luma8().get_pixel(5, 5).0, [250]);
+        assert!(loaded.depth.is_none());
+
+        loaded.reset_crop();
+        assert_eq!((loaded.full.width(), loaded.full.height()), (40, 30));
+        assert_eq!(loaded.full.to_luma8().get_pixel(5, 5).0, [10]);
+    }
 
     /// A flat mid-grey form with a picture on it.
     fn blended(photo: &GrayImage, detail: f32, floor: f32) -> Vec<f32> {

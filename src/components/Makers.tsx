@@ -5,17 +5,19 @@ import { inBrowser, listFonts, type TextSpec } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
+import { BackgroundRemover } from "./BackgroundRemover";
 import { Checkbox, NumberField, Select, Slider } from "./controls";
 
 const primary = "rounded-lg bg-accent px-4 py-2 font-medium text-accent-fg hover:opacity-90 disabled:opacity-40";
 const quiet = "rounded-lg border border-line px-4 py-2 transition-colors hover:text-fg";
 
-/** The box maker and the layers maker, whichever is open. */
+/** Whichever of the makers is open: the box, the layers, text, or removing a background. */
 export function Makers() {
   const maker = useUi((s) => s.maker);
   if (maker === "box") return <BoxMaker />;
   if (maker === "layers") return <LayerMaker />;
   if (maker === "text") return <TextMaker />;
+  if (maker === "background") return <BackgroundRemover />;
   return null;
 }
 

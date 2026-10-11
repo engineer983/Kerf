@@ -6,17 +6,9 @@
  * downloaded from Hugging Face the first time and kept in the browser cache;
  * the photograph itself is never sent anywhere.
  */
+import { downloading, transformers } from "./models";
 
 const MODEL = "onnx-community/depth-anything-v2-small";
-
-/**
- * The ONNX runtime files, served by the app itself (see `vite.config.ts`).
- * They sit beside the page, which in a browser need not be at the site's root.
- */
-const RUNTIME = {
-  mjs: "ort/ort-wasm-simd-threaded.asyncify.mjs",
-  wasm: "ort/ort-wasm-simd-threaded.asyncify.wasm",
-};
 
 type Estimator = (image: string) => Promise<{ depth: { toBlob: (type?: string) => Promise<Blob> } }>;
 
@@ -24,22 +16,9 @@ let estimator: Promise<Estimator> | null = null;
 
 function load(onProgress: (text: string) => void): Promise<Estimator> {
   estimator ??= (async () => {
-    // Loaded on demand: the library is large and most sessions never need it.
-    const { env, pipeline } = await import("@huggingface/transformers");
-    env.allowLocalModels = false;
-    const wasm = env.backends.onnx.wasm;
-    if (wasm) {
-      wasm.wasmPaths = {
-        mjs: new URL(RUNTIME.mjs, document.baseURI).href,
-        wasm: new URL(RUNTIME.wasm, document.baseURI).href,
-      };
-    }
+    const { pipeline } = await transformers();
     const loaded = await pipeline("depth-estimation", MODEL, {
-      progress_callback: (event: { status?: string; progress?: number; file?: string }) => {
-        if (event.status === "progress" && event.file?.endsWith(".onnx") && event.progress !== undefined) {
-          onProgress(`Downloading the depth model… ${Math.round(event.progress)}%`);
-        }
-      },
+      progress_callback: downloading("Downloading the depth model…", onProgress),
     });
     return loaded as unknown as Estimator;
   })();

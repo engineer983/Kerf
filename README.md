@@ -36,6 +36,7 @@ The installers are not signed, so the operating system warns before running them
 The work goes through six numbered steps: Device, Material, Design, Trace, Operations, Machine.
 
 - **Design on the material.** Start from a picture (PNG, JPEG, WebP, BMP, GIF), an SVG drawing, text in any installed font, or a box; then add more text and drawings around it. Text can run straight, along a curve, or round the artwork. Everything is moved and sized on a canvas that shows the bed and the material in millimetres.
+- **Remove a background.** A photograph's subject is found on your own computer and what is behind it taken away; correct it by drawing round what to keep or remove.
 - **Lasers.** Engrave a photograph with its shading, fill shapes solidly, follow outlines, and cut the piece out in the same job.
 - **CNC routers.** Follow outlines, carve a picture as a 3D relief, and cut the piece out with holding tabs. A photograph's shape is estimated with a depth model that runs on your own computer. Speeds are worked out from the bit, the material and the router's speed, from a toolbox of bits you can edit.
 - **Without tracing.** A box maker draws finger-jointed panels from a box's size and the material's thickness, allowing for a laser's kerf or a router bit's width. Stacked layers slice a picture into pieces to cut from thin sheet and glue into a relief.
