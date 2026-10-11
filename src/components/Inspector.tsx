@@ -7,6 +7,7 @@ import { DesignStep } from "./DesignStep";
 import { MachinePanel } from "./MachinePanel";
 import { MaterialPanel } from "./MaterialPanel";
 import { OperationsPanel } from "./OperationsPanel";
+import { PanelResizer } from "./PanelResizer";
 import { TracePanel } from "./TracePanel";
 
 const TITLES: Record<Step, string> = {
@@ -22,9 +23,11 @@ const TITLES: Record<Step, string> = {
 export function Inspector() {
   const step = useProject((s) => s.step);
   const machineKind = useProject((s) => s.machineKind);
+  const width = useUi((s) => s.panels.inspector);
 
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-surface">
+    <aside className="relative flex shrink-0 flex-col border-l border-line bg-surface" style={{ width }}>
+      <PanelResizer panel="inspector" label="Width of the settings panel" />
       <div className="flex items-center border-b border-line px-5 py-3">
         <h2 className="text-[13px] font-semibold">{TITLES[step]}</h2>
         <button

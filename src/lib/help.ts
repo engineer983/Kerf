@@ -55,6 +55,7 @@ export const HELP_TOPICS: HelpTopic[] = [
         heading: "Things worth knowing",
         points: [
           "Hover over any setting's name for an explanation, often with a small animation.",
+          "The panels on the right can be made wider or narrower: drag a panel's left edge. Double-click the edge to go back to its usual width.",
           "Ctrl+Z undoes a change to the settings; the arrows in the title bar do the same.",
           "The Result view shows roughly what the finished piece will look like, and 3D lets you turn it. Press play to watch the job run.",
           "A project is saved to Your projects each time you generate, and when you press Save.",

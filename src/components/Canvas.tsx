@@ -97,6 +97,8 @@ export function Canvas() {
   const [view, setView] = useState<View | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const pan = useRef<{ x: number; y: number } | null>(null);
+  /** Whether the person has zoomed or moved the view since it was last fitted. */
+  const moved = useRef(false);
 
   useLayoutEffect(() => {
     const el = containerRef.current!;
@@ -109,6 +111,7 @@ export function Canvas() {
 
   const fit = useCallback(() => {
     if (size.w === 0 || size.h === 0) return;
+    moved.current = false;
     const mmPerPx = Math.max(
       (bed.width + MARGIN_MM * 2) / size.w,
       (bed.height + MARGIN_MM * 2) / size.h,
@@ -128,6 +131,14 @@ export function Canvas() {
     if (!view) fit();
   }, [view, fit]);
 
+  // When the canvas changes size (a side panel is widened, say) the bed is
+  // fitted to it again, unless the person has chosen their own view.
+  useEffect(() => {
+    if (!moved.current) fit();
+    // Only a change of size should do this, not every new `fit`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size.w, size.h]);
+
   function onWheel(e: React.WheelEvent) {
     if (!view) return;
     const rect = containerRef.current!.getBoundingClientRect();
@@ -137,6 +148,7 @@ export function Canvas() {
       MAX_MM_PER_PX,
       Math.max(MIN_MM_PER_PX, view.mmPerPx * Math.exp(e.deltaY * 0.0015)),
     );
+    moved.current = true;
     // Keep the point under the cursor fixed while zooming.
     setView({
       x: view.x + px * (view.mmPerPx - mmPerPx),
@@ -156,6 +168,7 @@ export function Canvas() {
     const dx = e.clientX - pan.current.x;
     const dy = e.clientY - pan.current.y;
     pan.current = { x: e.clientX, y: e.clientY };
+    if (dx !== 0 || dy !== 0) moved.current = true;
     setView({ ...view, x: view.x - dx * view.mmPerPx, y: view.y - dy * view.mmPerPx });
   }
 

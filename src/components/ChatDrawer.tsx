@@ -6,6 +6,7 @@ import { findProvider, PROVIDERS } from "../lib/providers";
 import { useAssistant, type Entry } from "../state/assistant";
 import { findPictureSource, OFF, PICTURE_SOURCES, usePictures } from "../state/pictures";
 import { useUi } from "../state/ui";
+import { PanelResizer } from "./PanelResizer";
 
 const field = "w-full rounded-md border border-line bg-raised px-2 py-1.5 select-text";
 const quiet = "rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-fg disabled:opacity-40";
@@ -29,6 +30,7 @@ export function ChatDrawer() {
   // Open on the settings until the assistant has what it needs to answer.
   const ready = Boolean(model) && (!preset.needsKey || hasKey);
   const [showSettings, setShowSettings] = useState(false);
+  const width = useUi((s) => s.panels.assistant);
 
   useEffect(() => {
     void useAssistant.getState().refreshKey();
@@ -41,7 +43,8 @@ export function ChatDrawer() {
   }, [ready]);
 
   return (
-    <aside className="flex w-[360px] shrink-0 flex-col border-l border-line bg-surface">
+    <aside className="relative flex shrink-0 flex-col border-l border-line bg-surface" style={{ width }}>
+      <PanelResizer panel="assistant" label="Width of the assistant panel" />
       <div className="flex items-center gap-1 border-b border-line px-5 py-3">
         <h2 className="text-[13px] font-semibold">Assistant</h2>
         <span className="ml-2 truncate text-[11px] text-muted">{model || "no model chosen"}</span>
