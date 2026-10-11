@@ -1,0 +1,67 @@
+name: Release
+
+# Pushing a tag such as v1.0.0-rc.1 builds installers for Windows, macOS and
+# Linux and attaches them to a GitHub release of that name. A tag with a
+# hyphen in it (a release candidate) is published as a pre-release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --bundles nsis
+          - os: macos-latest
+            args: --target aarch64-apple-darwin --bundles dmg
+          - os: macos-latest
+            args: --target x86_64-apple-darwin --bundles dmg
+          - os: ubuntu-22.04
+            args: --bundles appimage,deb
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev libdbus-1-dev
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Kerf ${{ github.ref_name }}
+          releaseBody: |
+            A build for testing. See the README for what works and what has not yet been tried on a real machine.
+
+            The installers are not signed, so Windows and macOS will warn before running them:
+            - Windows: choose "More info", then "Run anyway".
+            - macOS: right-click the app and choose Open the first time.
+
+            Start with a small job on scrap, at low power or as an air cut, with a hand near the stop.
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }}

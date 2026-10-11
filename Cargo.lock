@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "kerf"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "kerf-ai",
  "kerf-gcode",
@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-ai"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-gcode"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "serde",
  "usvg",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-grbl"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "serde",
  "serialport",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-make"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "kerf-trace",
  "serde",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "kerf-trace"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "image 0.25.10",
  "serde",

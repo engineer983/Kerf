@@ -23,7 +23,7 @@ const COMMONS_URL: &str = "https://commons.wikimedia.org/w/api.php";
 /// Commons serves scaled copies at a fixed set of widths, and refuses
 /// programs it does not know the full-size originals. These are the widths
 /// worth working from, largest first, and the one used for thumbnails.
-const COMMONS_WIDTHS: [u32; 3] = [1920, 1280, 960];
+const COMMONS_WIDTHS: [u32; 4] = [3840, 1920, 1280, 960];
 const COMMONS_ASKED_WIDTH: u32 = 960;
 const COMMONS_THUMBNAIL_WIDTH: u32 = 330;
 const RESULTS: usize = 8;
@@ -31,8 +31,14 @@ const RESULTS: usize = 8;
 const MAX_PICTURE_BYTES: u64 = 40 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Says who is asking, with where to find the project: sites such as
+/// Wikimedia ask programs to identify themselves this way.
 fn user_agent() -> &'static str {
-    concat!("Kerf/", env!("CARGO_PKG_VERSION"))
+    concat!(
+        "Kerf/",
+        env!("CARGO_PKG_VERSION"),
+        " (+https://github.com/engineer983/Kerf)"
+    )
 }
 
 /// Makes a picture of `prompt` and returns the image file's bytes.
