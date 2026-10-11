@@ -17,7 +17,7 @@ export function TracePanel() {
   const { updateTrace, updatePreprocess, setWidthMm, setShowSource, exportSvg } =
     useProject.getState();
 
-  if (!image) return <p className="text-muted">Import an image first.</p>;
+  if (!image) return <p className="text-muted">Put a picture on the material first, in step 3, Design.</p>;
   if (design) {
     return (
       <div className="flex flex-col gap-4">

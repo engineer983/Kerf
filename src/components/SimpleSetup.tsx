@@ -29,10 +29,13 @@ export function SimpleSetup() {
   const depth = useProject((s) => s.depth);
   const thickness = useProject((s) => s.thickness);
   const tools = useToolbox((s) => s.tools);
-  const { setSimple, updateOperation } = useProject.getState();
+  const hasItems = useProject((s) => s.items.length > 0);
+  const { setSimple, updateOperation, setOperationType } = useProject.getState();
 
   const goal = simple.goal && goalsFor(machineKind, drawn).includes(simple.goal) ? simple.goal : defaultGoal(machineKind, photo, drawn);
-  const [main, cut] = operations;
+  // The main artwork's operations; whatever makes the added text and drawings is set separately.
+  const [main, cut] = operations.filter((op) => !op.forItems);
+  const added = hasItems ? operations.find((op) => op.forItems) : undefined;
   // On a laser, the cut around the piece has its own power and speed to set.
   const laserCut = cut?.kind.type === "laserCutout" ? { ...cut, kind: cut.kind } : null;
   const bitName = (toolId?: string | null) => tools.find((t) => t.id === toolId)?.name;
@@ -204,6 +207,58 @@ export function SimpleSetup() {
             </p>
           )}
           <p className="text-muted">Bits come from your toolbox. Speeds are set to suit the bit and the material.</p>
+        </Section>
+      )}
+      {added && (
+        <Section title="Added text and drawings">
+          {added.kind.type === "laserFill" || added.kind.type === "laserCut" ? (
+            <>
+              <Segmented
+                label="How added text and drawings are made"
+                value={added.kind.type}
+                options={[
+                  { value: "laserFill", label: "Engrave solid" },
+                  { value: "laserCut", label: "Outline" },
+                ]}
+                onChange={(type) => setOperationType(added.id, type)}
+              />
+              <NumberField
+                label="Text power"
+                unit="%"
+                min={0}
+                max={100}
+                value={added.power}
+                hint={{ text: "How strongly the laser fires for the text and drawings you added. It is set apart from the main artwork's power." }}
+                onChange={(power) => updateOperation(added.id, { power })}
+              />
+              <NumberField
+                label="Text speed"
+                unit="mm/min"
+                min={1}
+                max={100000}
+                value={added.feed}
+                hint={{ text: "How fast the laser moves for the text and drawings you added." }}
+                onChange={(feed) => updateOperation(added.id, { feed })}
+              />
+            </>
+          ) : added.kind.type === "cncProfile" ? (
+            <>
+              <NumberField
+                label="Text depth"
+                unit="mm"
+                min={0.01}
+                max={200}
+                value={added.kind.depth}
+                hint={{ text: "How deep the bit cuts along the edges of the text and drawings you added." }}
+                onChange={(depth) => updateOperation(added.id, { kind: { ...added.kind, depth } as typeof added.kind })}
+              />
+              <p className="text-muted">
+                Cut with the {bitName(added.toolId) ?? "same bit"}, following the edge of each letter with the
+                middle of the bit.
+              </p>
+            </>
+          ) : null}
+          <p className="text-muted">They are made in the same job, after the main artwork and before any cut-out.</p>
         </Section>
       )}
     </>

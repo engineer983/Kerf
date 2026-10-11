@@ -23,8 +23,8 @@ export function DesignPanel() {
       {design.sheets.length > 1 && (
         <>
           <p className="text-muted">
-            It does not fit the machine in one go, so it is cut a sheet at a time. Generate and cut each
-            sheet in turn.
+            It does not fit on one piece of your material, so it is cut a sheet at a time. Generate and cut
+            each sheet in turn.
           </p>
           <Segmented
             label="Sheet to cut now"

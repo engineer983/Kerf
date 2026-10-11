@@ -28,16 +28,22 @@ interface UiState {
   chatOpen: boolean;
   /** Which of the makers is open, if any. */
   maker: Maker | null;
+  /**
+   * What the text maker is making: a new item added to the material ("new"),
+   * a change to the item with this id, or with null the main artwork itself.
+   */
+  makerItem: number | "new" | null;
   setTheme: (theme: ThemeChoice) => void;
   toggleChat: () => void;
-  setMaker: (maker: Maker | null) => void;
+  setMaker: (maker: Maker | null, item?: number | "new" | null) => void;
 }
 
 export const useUi = create<UiState>((set) => ({
   theme: readTheme(),
   chatOpen: false,
   maker: null,
-  setMaker: (maker) => set({ maker }),
+  makerItem: null,
+  setMaker: (maker, item = null) => set({ maker, makerItem: maker ? item : null }),
   setTheme: (theme) => {
     try {
       localStorage.setItem(THEME_KEY, theme);

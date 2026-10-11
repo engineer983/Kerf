@@ -360,14 +360,28 @@ pub(crate) fn depth_source(
     })
 }
 
+/// Text and drawings added to the material beside the main artwork.
+#[derive(serde::Deserialize)]
+struct Added {
+    /// An SVG the size of the bed, with each addition drawn where it sits.
+    svg: String,
+    operations: Vec<kerf_gcode::Operation>,
+}
+
 /// Traces at full resolution and generates G-code for `job`.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn generate_gcode(
     settings: TraceSettings,
     width_mm: f64,
     height_mm: f64,
     job: Job,
     depth: DepthOptions,
+    // Text and drawings added beside the main artwork, cut in the same job.
+    added: Option<Added>,
+    // The space everything takes up on the bed (x, y, width, height), which
+    // cutouts go round.
+    cutout_around: Option<[f64; 4]>,
     state: State<'_, AppState>,
 ) -> Result<Generated, String> {
     check_size(width_mm, height_mm)?;
@@ -405,7 +419,24 @@ async fn generate_gcode(
         let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
         let heightmap = carves_relief
             .then(|| heightmap(&image, depth.as_ref(), &settings, width_mm, height_mm));
-        let mut program = kerf_gcode::generate_with(&artwork, heightmap.as_ref(), &job)?;
+        let lettering = added
+            .as_ref()
+            .map(|added| Artwork::from_svg(&added.svg, FLATTEN_TOLERANCE_MM))
+            .transpose()?;
+        let additions = match (&lettering, &added) {
+            (Some(artwork), Some(added)) => Some(kerf_gcode::Additions {
+                artwork,
+                operations: &added.operations,
+            }),
+            _ => None,
+        };
+        let mut program = kerf_gcode::generate_composed(
+            &artwork,
+            heightmap.as_ref(),
+            &job,
+            additions.as_ref(),
+            cutout_around,
+        )?;
         let text = std::mem::take(&mut program.text);
         Ok((program, text))
     })

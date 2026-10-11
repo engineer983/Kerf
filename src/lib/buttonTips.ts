@@ -6,7 +6,8 @@
 const BY_TEXT: Record<string, string> = {
   // Workflow rail
   Device: "Choose the machine you are making this job for",
-  Import: "Bring in a picture to work from",
+  Material: "Say what you are working on and how big the piece is",
+  Design: "Put a picture, drawing, words or a box on the material, and arrange them",
   Trace: "Turn the picture into outlines, and adjust its brightness, contrast and blur",
   Operations: "Choose the material, place the artwork, and decide what the machine does",
   Machine: "Connect to the machine, move it, and run the job",
@@ -35,7 +36,7 @@ const BY_TEXT: Record<string, string> = {
   "Generate G-code": "Work out the tool's moves for the included operations",
   "Export G-code…": "Save the generated program as a file to send to the machine",
   "Open toolbox": "See and edit your router bits",
-  Continue: "Go on to importing a picture",
+  Continue: "Go on to the next step",
   "Stay here": "Keep the generated job and stay on this step",
   "Change the box…": "Open the box maker with this box's sizes, to alter them",
   "Change the layers…": "Open the layers maker with these settings, to alter them",

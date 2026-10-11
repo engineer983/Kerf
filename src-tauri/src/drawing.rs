@@ -109,7 +109,15 @@ pub struct TextSpec {
     pub(crate) bold: bool,
     pub(crate) italic: bool,
     pub(crate) align: Align,
+    /// How far the words bend round a circle, in degrees: zero is straight,
+    /// more than zero arches them over the top, less than zero curves them
+    /// under the bottom. 180 is half way round.
+    #[serde(default)]
+    pub(crate) bend: f64,
 }
+
+/// The most of a circle that words are bent round, in degrees.
+const MOST_BEND: f64 = 350.0;
 
 /// Lines of text are set this far apart, as a multiple of the font's size.
 const LINE_SPACING: f64 = 1.25;
@@ -129,6 +137,20 @@ pub(crate) fn text_sheet(spec: &TextSpec) -> Result<Sheet, String> {
     }
     if !(spec.size_mm.is_finite() && spec.size_mm > 0.0 && spec.size_mm <= 1000.0) {
         return Err("The size must be between 0 and 1000 mm.".into());
+    }
+    let first = lines
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(&"text");
+    let name: String = first.trim().chars().take(40).collect();
+    let no_shapes = |_| {
+        format!(
+            "The font {} has no shapes for those characters. Choose another font.",
+            spec.font
+        )
+    };
+    if spec.bend.abs() >= 1.0 {
+        return drawn(&bent_text(spec, &lines)?, &name).map_err(no_shapes);
     }
     // The text is set in the middle of a page far larger than it could need,
     // one unit to the millimetre, then cropped to its own outline.
@@ -156,17 +178,84 @@ pub(crate) fn text_sheet(spec: &TextSpec) -> Result<Sheet, String> {
         ));
     }
     svg.push_str("</svg>\n");
-    let first = lines
-        .iter()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or(&"text");
-    let name: String = first.trim().chars().take(40).collect();
-    drawn(&svg, &name).map_err(|_| {
-        format!(
+    drawn(&svg, &name).map_err(no_shapes)
+}
+
+/// An SVG of the lines of `spec` bent round a circle. The widest line, set
+/// straight, is measured first: the circle is the one on which that line
+/// takes up the angle asked for.
+fn bent_text(spec: &TextSpec, lines: &[&str]) -> Result<String, String> {
+    let straight = |line: &str| {
+        text_sheet(&TextSpec {
+            text: line.to_owned(),
+            bend: 0.0,
+            ..spec.clone()
+        })
+        .map(|sheet| sheet.width_mm)
+        .unwrap_or(0.0)
+    };
+    let widest = lines.iter().map(|line| straight(line)).fold(0.0, f64::max);
+    if widest <= 0.0 {
+        return Err(format!(
             "The font {} has no shapes for those characters. Choose another font.",
             spec.font
-        )
-    })
+        ));
+    }
+    let over = spec.bend > 0.0;
+    let angle = spec.bend.abs().min(MOST_BEND).to_radians();
+    let spacing = spec.size_mm * LINE_SPACING;
+    // The circle is opened out, if need be, until every line fits: under an
+    // arch the later lines sit inside it, and need some circle left to sit on.
+    let room = if over {
+        (lines.len() - 1) as f64 * spacing + spec.size_mm
+    } else {
+        spec.size_mm
+    };
+    let radius = (widest / angle).max(room);
+    // Later lines sit inside an arch, and outside a curve under the bottom,
+    // so that they read downwards either way.
+    let line_radius = |i: usize| radius + i as f64 * if over { -spacing } else { spacing };
+    let reach = radius + lines.len() as f64 * spacing + spec.size_mm * 2.0;
+    let (page, centre) = (reach * 2.0, reach);
+    // Each line runs along most of a circle, centred on its top or bottom,
+    // so that there is always room for the words to be centred on it.
+    let half = (MOST_BEND / 2.0).to_radians();
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{page:.1}mm\" height=\"{page:.1}mm\" viewBox=\"0 0 {page:.1} {page:.1}\">\n<defs>\n"
+    );
+    let mut placed = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let r = line_radius(i);
+        if r <= spec.size_mm * 0.25 {
+            // The circle is too tight to take this many lines.
+            break;
+        }
+        let (dx, dy) = (r * half.sin(), r * half.cos());
+        let (y, sweep) = if over {
+            (centre - dy, 1)
+        } else {
+            (centre + dy, 0)
+        };
+        svg.push_str(&format!(
+            "<path id=\"line{i}\" d=\"M{:.3} {y:.3}A{r:.3} {r:.3} 0 1 {sweep} {:.3} {y:.3}\"/>\n",
+            centre - dx,
+            centre + dx,
+        ));
+        placed.push((i, *line));
+    }
+    svg.push_str("</defs>\n");
+    for (i, line) in placed {
+        svg.push_str(&format!(
+            "<text xml:space=\"preserve\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\" font-style=\"{}\" text-anchor=\"middle\" fill=\"{PLAIN_COLOR}\"><textPath xlink:href=\"#line{i}\" startOffset=\"50%\">{}</textPath></text>\n",
+            escaped(&spec.font),
+            spec.size_mm,
+            if spec.bold { "bold" } else { "normal" },
+            if spec.italic { "italic" } else { "normal" },
+            escaped(line.trim()),
+        ));
+    }
+    svg.push_str("</svg>\n");
+    Ok(svg)
 }
 
 #[tauri::command]

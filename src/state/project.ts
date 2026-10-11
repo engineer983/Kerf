@@ -21,7 +21,7 @@ import type {
   TraceSettings,
 } from "../lib/ipc";
 
-export type Step = "device" | "import" | "trace" | "operations" | "machine";
+export type Step = "device" | "material" | "design" | "trace" | "operations" | "machine";
 
 export interface SourceImage {
   name: string;
@@ -56,7 +56,46 @@ export type OperationItem = Operation & {
   toolId?: string | null;
   /** False to leave the operation out of the generated G-code. */
   enabled?: boolean;
+  /** True for the operation that makes the added text and drawings, not the main artwork. */
+  forItems?: boolean;
 };
+
+/**
+ * Something added to the material beside the main artwork: words, or a
+ * drawing. It is exact lines, placed and sized on its own.
+ */
+export interface Item {
+  id: number;
+  name: string;
+  /** What the words were made from, so that they can be changed; absent for a drawing. */
+  text?: ipc.TextSpec;
+  /** The lines, as SVG elements drawn in a space `drawnWidth` by `drawnHeight`. */
+  body: string;
+  drawnWidth: number;
+  drawnHeight: number;
+  widthMm: number;
+  heightMm: number;
+  /** Distances from the bed's left edge and its origin-side edge, as for the artwork. */
+  left: number;
+  front: number;
+  aspectLocked: boolean;
+}
+
+const isCutout = (op: OperationItem) => op.kind.type === "cncCutout" || op.kind.type === "laserCutout";
+
+/**
+ * The included operations in the order the job runs them: the main
+ * artwork's, then the added items', then any cutouts, so that nothing is
+ * made on a piece already cut free. Items' operations only count while there
+ * are items.
+ */
+export function jobOrder(operations: OperationItem[], hasItems: boolean) {
+  const included = operations.filter((op) => op.enabled !== false && (hasItems || !op.forItems));
+  const main = included.filter((op) => !op.forItems && !isCutout(op));
+  const items = included.filter((op) => op.forItems);
+  const cutouts = included.filter((op) => !op.forItems && isCutout(op));
+  return { main, items, cutouts, all: [...main, ...items, ...cutouts] };
+}
 
 /** A cut right through the material, a little outside the artwork, with tabs. */
 export function defaultCutout(thickness: number): OperationKind {
@@ -323,6 +362,21 @@ interface ProjectState {
   pendingStep: Step | null;
   confirmStep: (dontWarnAgain: boolean) => void;
   cancelStep: () => void;
+  /** Text and drawings added beside the main artwork. */
+  items: Item[];
+  /** The item the canvas handles and the size fields act on; null is the main artwork. */
+  selected: number | null;
+  select: (id: number | null) => void;
+  /** Adds words to the material. Throws with the reason if they cannot be drawn. */
+  addText: (input: ipc.TextSpec) => Promise<void>;
+  /** Draws an item's words again from changed settings, keeping its place. */
+  changeText: (id: number, input: ipc.TextSpec) => Promise<void>;
+  /** Asks for a drawing file and adds it to the material. */
+  addDrawing: () => Promise<void>;
+  updateItem: (id: number, patch: Partial<Pick<Item, "widthMm" | "heightMm" | "left" | "front" | "aspectLocked">>) => void;
+  /** Moves and sizes an item, given as a rectangle in bed coordinates. */
+  setItemRect: (id: number, rect: { x: number; y: number; width: number; height: number }) => void;
+  removeItem: (id: number) => void;
   /**
    * A box or a set of layers, made from measurements. While there is one it
    * is what gets cut, at exactly the size it was drawn, in place of the
@@ -438,8 +492,6 @@ let gcodeGeneration = 0;
 
 const tenth = (mm: number) => Math.round(mm * 10) / 10;
 
-/** The longest side given to newly imported artwork, in mm, on a large bed. */
-const DEFAULT_LONG_SIDE_MM = 200;
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -455,14 +507,56 @@ export function artworkRect(
   return { x: s.left, y, width: s.widthMm, height };
 }
 
+/** Where an added item sits on the bed, in bed coordinates (mm, Y down from the back). */
+export function itemRect(item: Item, s: Pick<ProjectState, "bed" | "origin">) {
+  const y = s.origin === "backLeft" ? item.front : s.bed.height - item.front - item.heightMm;
+  return { x: item.left, y, width: item.widthMm, height: item.heightMm };
+}
+
+/** The space taken up by the artwork and every added item together, or null if there is nothing. */
+export function everythingRect(
+  s: Pick<ProjectState, "image" | "widthMm" | "heightMm" | "left" | "front" | "bed" | "origin" | "items">,
+) {
+  const rects = [artworkRect(s), ...s.items.map((item) => itemRect(item, s))].filter((r) => r !== null);
+  if (rects.length === 0) return null;
+  const x = Math.min(...rects.map((r) => r.x));
+  const y = Math.min(...rects.map((r) => r.y));
+  return {
+    x,
+    y,
+    width: Math.max(...rects.map((r) => r.x + r.width)) - x,
+    height: Math.max(...rects.map((r) => r.y + r.height)) - y,
+  };
+}
+
+/** The added items as one SVG the size of the bed, each drawn where it sits. */
+export function itemsSvg(s: Pick<ProjectState, "items" | "bed" | "origin">): string {
+  const placed = s.items
+    .map((item) => {
+      const r = itemRect(item, s);
+      return `<svg x="${r.x.toFixed(3)}" y="${r.y.toFixed(3)}" width="${r.width.toFixed(3)}" height="${r.height.toFixed(3)}" viewBox="0 0 ${item.drawnWidth} ${item.drawnHeight}" preserveAspectRatio="none">${item.body}</svg>`;
+    })
+    .join("\n");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${s.bed.width}mm" height="${s.bed.height}mm" viewBox="0 0 ${s.bed.width} ${s.bed.height}">\n${placed}\n</svg>`;
+}
+
+/** The elements inside a sheet's `<svg>`. */
+function sheetBody(svg: string): string {
+  const start = svg.indexOf(">", svg.indexOf("<svg")) + 1;
+  return svg.slice(start, svg.lastIndexOf("</svg>")).trim();
+}
+
 /** Where the piece of material sits: in the bed's origin corner. */
 export function stockRect(s: Pick<ProjectState, "stockWidth" | "stockLength" | "bed" | "origin">) {
   const y = s.origin === "backLeft" ? 0 : s.bed.height - s.stockLength;
   return { x: 0, y, width: s.stockWidth, height: s.stockLength };
 }
 
-/** Gap left around the artwork when the material size is set automatically, in mm. */
+/** Clear material left around new artwork when it is sized to fit, in mm. */
 const STOCK_MARGIN_MM = 10;
+/** The least material left outside the parts of a box or a set of layers, in mm. */
+const SHEET_EDGE_MM = 5;
+let nextItemId = 1;
 
 /** Distinct fill colours in a trace, lower-cased, in first-seen order. */
 export function traceColors(traced: Traced | null): string[] {
@@ -489,6 +583,7 @@ const UNDOABLE = [
   "heightSource",
   "detail",
   "depthFloor",
+  "items",
 ] as const;
 
 type Snapshot = Pick<ProjectState, (typeof UNDOABLE)[number]> & { traceSettings: TraceSettings };
@@ -525,7 +620,7 @@ function stepHistory(from: Snapshot[], to: Snapshot[]) {
 }
 
 /** The order the steps are worked through. */
-export const STEP_ORDER: Step[] = ["device", "import", "trace", "operations", "machine"];
+export const STEP_ORDER: Step[] = ["device", "material", "design", "trace", "operations", "machine"];
 const WARN_ON_BACK_KEY = "kerf.warnOnBack";
 
 /** Whether going back from a generated job asks first. */
@@ -552,7 +647,8 @@ export function setWarnOnBack(warn: boolean) {
  * from it. The canvas shows whichever is in use.
  */
 export function jobUses(operations: OperationItem[]): { picture: boolean; traced: boolean } {
-  const included = operations.filter((op) => op.enabled !== false).map((op) => op.kind.type);
+  // What makes the added text and drawings says nothing about the main artwork.
+  const included = operations.filter((op) => op.enabled !== false && !op.forItems).map((op) => op.kind.type);
   return {
     picture: included.some((type) => type === "laserImage" || type === "cncRelief"),
     traced: included.some((type) => type === "laserFill" || type === "laserCut" || type === "cncProfile"),
@@ -660,7 +756,9 @@ export const useProject = create<ProjectState>((set, get) => {
       const interval = { draft: 0.2, standard: 0.15, fine: 0.1 }[quality];
       // Speed and power depend on the laser and the material, which the app
       // does not know, so whatever is already set is kept.
-      const current = s.operations.find((op) => op.kind.type.startsWith("laser") && op.kind.type !== "laserCutout");
+      const current = s.operations.find(
+        (op) => op.kind.type.startsWith("laser") && op.kind.type !== "laserCutout" && !op.forItems,
+      );
       const kind: OperationKind =
         goal === "picture"
           ? { type: "laserImage", interval, dither: true }
@@ -708,6 +806,11 @@ export const useProject = create<ProjectState>((set, get) => {
         main.enabled = s.simple.part === "main";
         cut.enabled = s.simple.part === "cutOut";
       }
+    }
+    // Whatever makes the added text and drawings is kept as it was set, and
+    // on a router is made in the same run as the main part.
+    for (const op of s.operations.filter((op) => op.forItems)) {
+      operations.push({ ...op, enabled: operations[0].enabled });
     }
 
     set({
@@ -776,22 +879,18 @@ export const useProject = create<ProjectState>((set, get) => {
     past.length = 0;
     future.length = 0;
     const fixed = isFixed(design);
-    // A drawing larger than the machine can reach starts out scaled to fit.
-    const [widest, tallest] = sheetLimit();
-    const scale = fixed ? 1 : Math.min(1, widest / sheet.widthMm, tallest / sheet.heightMm);
-    const [widthMm, heightMm] = fixed ? [sheet.widthMm, sheet.heightMm] : [tenth(sheet.widthMm * scale), tenth(sheet.heightMm * scale)];
+    // A drawing larger than the material starts out scaled to fit it.
+    const [widthMm, heightMm] = fixed ? [sheet.widthMm, sheet.heightMm] : fitOnMaterial(sheet.widthMm, sheet.heightMm, false);
     set((s) => ({
       design,
       widthMm,
       heightMm,
       aspectLocked: true,
       cropping: false,
-      left: STOCK_MARGIN_MM,
-      front: STOCK_MARGIN_MM,
-      stockWidth: Math.ceil(widthMm) + STOCK_MARGIN_MM * 2,
-      stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
-      operations: keepOperations ? s.operations : fixed ? designOperations(design, s) : [fresh(s.machineKind, s)],
-      step: "operations",
+      ...centred(widthMm, heightMm),
+      operations: keepOperations
+        ? s.operations
+        : [...(fixed ? designOperations(design, s) : [fresh(s.machineKind, s)]), ...s.operations.filter((op) => op.forItems)],
       pendingStep: null,
       canUndo: false,
       canRedo: false,
@@ -810,10 +909,70 @@ export const useProject = create<ProjectState>((set, get) => {
     await showDesign(design);
   }
 
-  /** The largest sheet the machine can cut, leaving a margin of material around it. */
+  /** The largest sheet of parts that fits the material, and the machine, with a little left round it. */
   function sheetLimit() {
-    const { bed } = get();
-    return [bed.width - STOCK_MARGIN_MM * 2, bed.height - STOCK_MARGIN_MM * 2] as const;
+    const { bed, stockWidth, stockLength } = get();
+    return [Math.min(bed.width, stockWidth) - SHEET_EDGE_MM * 2, Math.min(bed.height, stockLength) - SHEET_EDGE_MM * 2] as const;
+  }
+
+  /**
+   * A size for something `width` by `height` that fits the material with a
+   * margin round it, keeping its shape. Pictures have no size of their own, so
+   * they are enlarged to fill it; drawings are only ever made smaller.
+   */
+  function fitOnMaterial(width: number, height: number, enlarge: boolean): [number, number] {
+    const { stockWidth, stockLength } = get();
+    const room = [Math.max(10, stockWidth - STOCK_MARGIN_MM * 2), Math.max(10, stockLength - STOCK_MARGIN_MM * 2)];
+    const scale = Math.min(room[0] / width, room[1] / height);
+    const used = enlarge ? scale : Math.min(1, scale);
+    return [tenth(width * used), tenth(height * used)];
+  }
+
+  /** The position that puts something of this size in the middle of the material. */
+  function centred(width: number, height: number) {
+    const { stockWidth, stockLength } = get();
+    return { left: tenth(Math.max(0, (stockWidth - width) / 2)), front: tenth(Math.max(0, (stockLength - height) / 2)) };
+  }
+
+  /** Keeps exactly one operation for the added items while there are any, and none when there are not. */
+  function itemsOperations(operations: OperationItem[], items: Item[], s: ProjectState): OperationItem[] {
+    const own = operations.filter((op) => !op.forItems);
+    if (items.length === 0) return own;
+    const existing = operations.filter((op) => op.forItems);
+    if (existing.length > 0) return operations;
+    const main = own.find((op) => !isCutout(op));
+    if (s.machineKind === "laser") {
+      // Engraved solid, with the main engraving's power and speed to start from.
+      const like = main?.kind.type.startsWith("laser") ? main : undefined;
+      return [
+        ...own,
+        { id: nextOperationId++, color: null, kind: { type: "laserFill", interval: 0.1 }, feed: like?.feed ?? 3000, power: like?.power ?? 50, passes: 1, forItems: true },
+      ];
+    }
+    // With the main operation's bit where it has one, so it is all one run.
+    const follow = equip({ ...defaultOperation("cnc"), toolId: main?.toolId ?? null, forItems: true }, s);
+    return [...own, follow];
+  }
+
+  /** Adds an item in the middle of the material, sized to fit it, and selects it. */
+  function place(name: string, sheet: ipc.Sheet, text?: ipc.TextSpec) {
+    const [widthMm, heightMm] = fitOnMaterial(sheet.widthMm, sheet.heightMm, false);
+    const item: Item = {
+      id: nextItemId++,
+      name,
+      text,
+      body: sheetBody(sheet.svg),
+      drawnWidth: sheet.widthMm,
+      drawnHeight: sheet.heightMm,
+      widthMm,
+      heightMm,
+      ...centred(widthMm, heightMm),
+      aspectLocked: true,
+    };
+    set((s) => {
+      const items = [...s.items, item];
+      return { items, selected: item.id, operations: itemsOperations(s.operations, items, s), ...staleGcode() };
+    });
   }
 
   /** What the picture is being used for, judged from the job as it stands. */
@@ -898,6 +1057,81 @@ export const useProject = create<ProjectState>((set, get) => {
     },
     cancelStep: () => set({ pendingStep: null }),
 
+    items: [],
+    selected: null,
+    select: (selected) => set({ selected }),
+    addText: async (input) => {
+      const sheet = await ipc.makeText(input);
+      place(sheet.parts[0], sheet, input);
+    },
+    changeText: async (id, input) => {
+      const sheet = await ipc.makeText(input);
+      set((s) => ({
+        items: s.items.map((item) => {
+          if (item.id !== id) return item;
+          // The words keep their place and their height; their width follows.
+          const heightMm = item.heightMm;
+          const widthMm = tenth((heightMm * sheet.widthMm) / sheet.heightMm);
+          const middle = item.left + item.widthMm / 2;
+          return {
+            ...item,
+            name: sheet.parts[0],
+            text: input,
+            body: sheetBody(sheet.svg),
+            drawnWidth: sheet.widthMm,
+            drawnHeight: sheet.heightMm,
+            widthMm,
+            left: tenth(middle - widthMm / 2),
+          };
+        }),
+        ...staleGcode(),
+      }));
+    },
+    addDrawing: async () => {
+      const opened = await ipc.openDrawing();
+      if (opened) place(opened.name, opened.sheet);
+    },
+    updateItem: (id, patch) =>
+      set((s) => ({
+        items: s.items.map((item) => {
+          if (item.id !== id) return item;
+          const next = { ...item, ...patch };
+          // With the proportions kept, changing one side scales the other.
+          if (next.aspectLocked && patch.widthMm !== undefined && patch.heightMm === undefined) {
+            next.heightMm = tenth((patch.widthMm * item.heightMm) / item.widthMm);
+          } else if (next.aspectLocked && patch.heightMm !== undefined && patch.widthMm === undefined) {
+            next.widthMm = tenth((patch.heightMm * item.widthMm) / item.heightMm);
+          }
+          return next;
+        }),
+        ...staleGcode(),
+      })),
+    setItemRect: (id, rect) =>
+      set((s) => ({
+        items: s.items.map((item) =>
+          item.id === id
+            ? {
+                ...item,
+                widthMm: tenth(rect.width),
+                heightMm: tenth(rect.height),
+                left: tenth(rect.x),
+                front: tenth(s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height),
+              }
+            : item,
+        ),
+        ...staleGcode(),
+      })),
+    removeItem: (id) =>
+      set((s) => {
+        const items = s.items.filter((item) => item.id !== id);
+        return {
+          items,
+          selected: s.selected === id ? null : s.selected,
+          operations: itemsOperations(s.operations, items, s),
+          ...staleGcode(),
+        };
+      }),
+
     design: null,
     makeBox: async (input) => {
       const s = get();
@@ -979,12 +1213,8 @@ export const useProject = create<ProjectState>((set, get) => {
       // The picture goes back to a size that suits it, as when it was imported.
       const widthMm = s.design.kind === "layers" ? s.design.input.widthMm : s.widthMm;
       const heightMm = tenth((widthMm * s.image.height) / s.image.width);
-      set({ design: null, widthMm, heightMm, trace: { ...s.trace, result: null }, ...staleGcode() });
-      set({
-        stockWidth: Math.ceil(widthMm) + STOCK_MARGIN_MM * 2,
-        stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
-        operations: [fresh(s.machineKind)],
-      });
+      set({ design: null, widthMm, heightMm, ...centred(widthMm, heightMm), trace: { ...s.trace, result: null }, ...staleGcode() });
+      set((now) => ({ operations: [fresh(s.machineKind), ...now.operations.filter((op) => op.forItems)] }));
       scheduleTrace();
       if (get().mode === "simple") void applySimple();
     },
@@ -1013,6 +1243,8 @@ export const useProject = create<ProjectState>((set, get) => {
         step: "device",
         pendingStep: null,
         optimizeNote: null,
+        items: [],
+        selected: null,
         trace: EMPTY_TRACE,
         simple: { goal: null, quality: "standard", depth: 4, cutOut: false, part: "main" },
         operations: [fresh(s.machineKind)],
@@ -1053,20 +1285,13 @@ export const useProject = create<ProjectState>((set, get) => {
         const previous = get().image;
         if (previous) URL.revokeObjectURL(previous.url);
 
-        // Start at half the bed, whichever side is the tighter fit, on a piece
-        // of material just larger than the artwork in the origin corner.
-        const { bed, trace, machineKind } = get();
-        const scale = Math.min(
-          (bed.width * 0.5) / image.width,
-          (bed.height * 0.5) / image.height,
-          DEFAULT_LONG_SIDE_MM / Math.max(image.width, image.height),
-        );
-        const widthMm = Math.round(image.width * scale);
-        const heightMm = (widthMm * image.height) / image.width;
+        // The picture fills the material, less a margin, and sits in its middle.
+        const { trace, machineKind } = get();
+        const [widthMm, heightMm] = fitOnMaterial(image.width, image.height, true);
         const placed = {
           image,
           widthMm,
-          heightMm: Math.round(heightMm * 10) / 10,
+          heightMm,
           aspectLocked: true,
           uncropped: null,
           cropping: false,
@@ -1074,23 +1299,22 @@ export const useProject = create<ProjectState>((set, get) => {
           design: null,
           heightSource: "brightness" as const,
           depth: NO_DEPTH,
-          left: STOCK_MARGIN_MM,
-          front: STOCK_MARGIN_MM,
-          stockWidth: widthMm + STOCK_MARGIN_MM * 2,
-          stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
+          ...centred(widthMm, heightMm),
         };
-        set({
+        set((s) => ({
           ...placed,
+          selected: null,
+          // Something dropped or pasted in before the Design step brings the app to it.
+          step: STEP_ORDER.indexOf(s.step) < STEP_ORDER.indexOf("design") ? "design" : s.step,
           projectId: `p-${Date.now().toString(36)}`,
-          operations: [fresh(machineKind, { ...get(), ...placed })],
+          // Text and drawings already added stay, with whatever makes them.
+          operations: [fresh(machineKind, { ...s, ...placed }), ...s.operations.filter((op) => op.forItems)],
           error: null,
           exportedTo: null,
           optimizeNote: null,
           trace: { ...EMPTY_TRACE, settings: trace.settings },
-          // Simple mode needs no tracing decisions, so it goes straight to the job.
-          step: get().mode === "simple" ? "operations" : "trace",
           ...staleGcode(),
-        });
+        }));
         // A design's picture is only for the gallery: the design itself follows.
         if (options?.forDesign) return;
         scheduleTrace();
@@ -1108,6 +1332,10 @@ export const useProject = create<ProjectState>((set, get) => {
       set((s) => ({
         image: null,
         design: null,
+        // Added text and drawings belong to the artwork they were added to.
+        items: [],
+        selected: null,
+        operations: s.operations.filter((op) => !op.forItems),
         error: null,
         exportedTo: null,
         trace: { ...EMPTY_TRACE, settings: s.trace.settings },
@@ -1257,7 +1485,12 @@ export const useProject = create<ProjectState>((set, get) => {
       set((s) => ({
         machineKind,
         machinePreset: CUSTOM_PRESET,
-        operations: s.design && isFixed(s.design) ? designOperations(s.design, { ...s, machineKind }) : [fresh(machineKind)],
+        // Added items are kept, with an operation of the new machine's kind to make them.
+        operations: itemsOperations(
+          s.design && isFixed(s.design) ? designOperations(s.design, { ...s, machineKind }) : [fresh(machineKind)],
+          s.items,
+          { ...s, machineKind },
+        ),
         ...staleGcode(),
       })),
     setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
@@ -1280,9 +1513,14 @@ export const useProject = create<ProjectState>((set, get) => {
         operations:
           s.machineKind === preset.kind
             ? s.operations
-            : s.design && isFixed(s.design)
-              ? designOperations(s.design, { ...s, machineKind: preset.kind })
-              : [fresh(preset.kind, s)],
+            : // Added items are kept, with an operation of the new machine's kind to make them.
+              itemsOperations(
+                s.design && isFixed(s.design)
+                  ? designOperations(s.design, { ...s, machineKind: preset.kind })
+                  : [fresh(preset.kind, s)],
+                s.items,
+                { ...s, machineKind: preset.kind },
+              ),
         ...staleGcode(),
       }));
     },
@@ -1360,7 +1598,9 @@ export const useProject = create<ProjectState>((set, get) => {
           design: null,
           optimizeNote: null,
         });
-        get().restore(saved.settings);
+        get().restore({ ...saved.settings, items: saved.settings.items ?? [] });
+        set({ selected: null });
+        nextItemId = Math.max(nextItemId, ...get().items.map((item) => item.id + 1));
         // A saved design is put back as the thing being cut.
         const design = saved.design ?? null;
         if (design?.sheets?.[design.sheet]) {
@@ -1497,6 +1737,8 @@ export const useProject = create<ProjectState>((set, get) => {
       const s = get();
       const rect = artworkRect(s);
       if (!rect) return;
+      const order = jobOrder(s.operations, s.items.length > 0);
+      const around = everythingRect(s);
       const generation = ++gcodeGeneration;
       set({ gcode: { ...EMPTY_GCODE, busy: true } });
       try {
@@ -1512,12 +1754,16 @@ export const useProject = create<ProjectState>((set, get) => {
             travelFeed: TRAVEL_FEED,
           },
           offset: [rect.x, rect.y],
-          operations: s.operations.filter((op) => op.enabled !== false),
+          // Cutouts are run last by the generator, wherever they are listed.
+          operations: [...order.main, ...order.cutouts],
         }, {
           enabled: s.heightSource === "depth" && s.depth.status === "ready",
           detail: s.detail,
           floor: s.depthFloor,
-        });
+        },
+        s.items.length > 0 && order.items.length > 0 ? { svg: itemsSvg(s), operations: order.items } : null,
+        // A cutout goes round everything on the material, not just the artwork.
+        around && s.items.length > 0 ? [around.x, around.y, around.width, around.height] : null);
         if (generation !== gcodeGeneration) return;
         set({ gcode: { ...EMPTY_GCODE, program } });
         usePlayback.getState().finish();

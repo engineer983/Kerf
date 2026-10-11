@@ -87,7 +87,7 @@ export function DevicePanel() {
       </Section>
 
       <button
-        onClick={() => actions.setStep("import")}
+        onClick={() => actions.setStep("material")}
         className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90"
       >
         Continue

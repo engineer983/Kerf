@@ -1,10 +1,11 @@
-import { ImagePlus, Layers, Settings2, Spline, Zap } from "lucide-react";
+import { Layers, PenTool, Settings2, Spline, Square, Zap } from "lucide-react";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { STEP_ORDER, useProject, type Step } from "../state/project";
 
 const STEPS: Record<Step, { label: string; icon: typeof Zap }> = {
   device: { label: "Device", icon: Settings2 },
-  import: { label: "Import", icon: ImagePlus },
+  material: { label: "Material", icon: Square },
+  design: { label: "Design", icon: PenTool },
   trace: { label: "Trace", icon: Spline },
   operations: { label: "Operations", icon: Layers },
   machine: { label: "Machine", icon: Zap },

@@ -56,12 +56,63 @@ pub fn generate_with(
     heightmap: Option<&Heightmap>,
     job: &Job,
 ) -> Result<Program, String> {
-    if job.operations.is_empty() {
+    generate_composed(artwork, heightmap, job, None, None)
+}
+
+/// Lettering and drawings laid out on the material beside the job's main
+/// artwork, made by operations of their own.
+pub struct Additions<'a> {
+    /// Drawn where it sits on the bed, so it needs no offset.
+    pub artwork: &'a Artwork,
+    /// Run after the job's own operations and before its cutouts.
+    pub operations: &'a [Operation],
+}
+
+fn is_cutout(operation: &Operation) -> bool {
+    matches!(
+        operation.kind,
+        OperationKind::CncCutout { .. } | OperationKind::LaserCutout { .. }
+    )
+}
+
+/// Like [`generate_with`], for a job with things added beside its main
+/// artwork. Whatever order the operations are given in, cutouts run last, so
+/// that nothing is engraved on a piece that has already been cut free.
+/// `cutout_around` is the rectangle, in bed coordinates as x, y, width and
+/// height, that cutouts go round in place of the main artwork's own: the
+/// space taken up by everything on the material.
+pub fn generate_composed(
+    artwork: &Artwork,
+    heightmap: Option<&Heightmap>,
+    job: &Job,
+    additions: Option<&Additions>,
+    cutout_around: Option<[f64; 4]>,
+) -> Result<Program, String> {
+    let added = additions.map_or(&[][..], |a| a.operations);
+    if job.operations.is_empty() && added.is_empty() {
         return Err("Add at least one operation.".into());
     }
-    for operation in &job.operations {
+    for operation in job.operations.iter().chain(added) {
         operation.validate(&job.machine)?;
     }
+    // Each operation, with whether it works on the additions.
+    let order: Vec<(&Operation, bool)> = job
+        .operations
+        .iter()
+        .filter(|o| !is_cutout(o))
+        .map(|o| (o, false))
+        .chain(added.iter().map(|o| (o, true)))
+        .chain(
+            job.operations
+                .iter()
+                .filter(|o| is_cutout(o))
+                .map(|o| (o, false)),
+        )
+        .collect();
+    let (cut_size, cut_at) = match cutout_around {
+        Some([x, y, width, height]) => ([width, height], [x, y]),
+        None => ([artwork.width, artwork.height], job.offset),
+    };
 
     let mut w = Writer::new(&job.machine);
     w.line(&format!(
@@ -72,9 +123,13 @@ pub fn generate_with(
     w.line("G21");
     w.line("G90");
 
-    let mut operation_starts = Vec::with_capacity(job.operations.len());
-    for operation in &job.operations {
+    let mut operation_starts = Vec::with_capacity(order.len());
+    for (operation, on_additions) in order {
         operation_starts.push(w.moves.len() / 4);
+        let (artwork, offset) = match additions {
+            Some(additions) if on_additions => (additions.artwork, [0.0, 0.0]),
+            _ => (artwork, job.offset),
+        };
         let shapes: Vec<&Shape> = artwork
             .shapes
             .iter()
@@ -90,7 +145,7 @@ pub fn generate_with(
                         points: polyline
                             .points
                             .iter()
-                            .map(|p| [p[0] + job.offset[0], p[1] + job.offset[1]])
+                            .map(|p| [p[0] + offset[0], p[1] + offset[1]])
                             .collect(),
                         closed: polyline.closed,
                     })
@@ -110,26 +165,20 @@ pub fn generate_with(
                 let polylines: Vec<&Polyline> = placed.iter().flatten().collect();
                 cnc_profile(&mut w, operation, &polylines);
             }
+            OperationKind::LaserImage { .. } | OperationKind::CncRelief { .. } if on_additions => {
+                return Err("Added text and drawings are lines, so they cannot be engraved as a picture or carved as a relief.".into());
+            }
             OperationKind::LaserImage { .. } => {
                 let image =
                     heightmap.ok_or("Image engraving needs an image to take shades from.")?;
                 crate::image_engrave::engrave(&mut w, operation, image, job.offset);
             }
             OperationKind::LaserCutout { .. } => {
-                let line = crate::cutout::laser_line(
-                    operation,
-                    [artwork.width, artwork.height],
-                    job.offset,
-                )?;
+                let line = crate::cutout::laser_line(operation, cut_size, cut_at)?;
                 laser_cut(&mut w, operation, &[&line]);
             }
             OperationKind::CncCutout { .. } => {
-                crate::cutout::cut(
-                    &mut w,
-                    operation,
-                    [artwork.width, artwork.height],
-                    job.offset,
-                )?;
+                crate::cutout::cut(&mut w, operation, cut_size, cut_at)?;
             }
             OperationKind::CncRelief { .. } => {
                 let heightmap =

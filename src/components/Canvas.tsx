@@ -5,7 +5,7 @@ import { findMaterial, paintMaterial } from "../lib/materials";
 import { Simulation, type Rect } from "../lib/simulation";
 import { setResultCanvas } from "../lib/thumbnail";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
-import { artworkRect, jobUses, stockRect, useProject } from "../state/project";
+import { artworkRect, everythingRect, itemRect, jobOrder, jobUses, stockRect, useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { Handles } from "./Handles";
 import { PlaybackBar } from "./PlaybackBar";
@@ -24,6 +24,30 @@ const MAX_MM_PER_PX = 5;
 /** Bit assumed for router jobs whose operation has none chosen. */
 const DEFAULT_BIT = { diameter: 3.175, kind: "flat" as const, angle: null, taperAngle: null, shank: 3.175 };
 
+/** Something on the material that is not selected: a faint frame that selects it when clicked. */
+function Target({ rect, px, onSelect }: { rect: Rect; px: number; onSelect: () => void }) {
+  return (
+    <rect
+      x={rect.x}
+      y={rect.y}
+      width={rect.width}
+      height={rect.height}
+      fill="transparent"
+      stroke="var(--muted)"
+      strokeWidth={px}
+      strokeDasharray={`${px * 3} ${px * 3}`}
+      style={{ pointerEvents: "auto", cursor: "pointer" }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        // Selecting must not also pan the canvas underneath.
+        e.stopPropagation();
+        onSelect();
+      }}
+      onDoubleClick={(e) => e.stopPropagation()}
+    />
+  );
+}
+
 export function Canvas() {
   const bed = useProject((s) => s.bed);
   const image = useProject((s) => s.image);
@@ -39,6 +63,10 @@ export function Canvas() {
   // A box or a set of layers is drawn as the lines to cut, with no picture behind.
   const designed = useProject((s) => s.design !== null);
   const fixedSize = useProject((s) => s.design !== null && isFixed(s.design));
+  // Text and drawings added beside the main artwork, and which is selected.
+  const items = useProject((s) => s.items);
+  const selected = useProject((s) => s.selected);
+  const selectedItem = items.find((item) => item.id === selected) ?? null;
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const program = useProject((s) => s.gcode.program);
@@ -142,6 +170,8 @@ export function Canvas() {
   }
 
   const placed = artworkRect({ image, widthMm, heightMm, left, front, bed, origin });
+  // What a cutout goes round: the artwork and everything added to it.
+  const around = everythingRect({ image, widthMm, heightMm, left, front, bed, origin, items });
 
   // The crop frame, in bed coordinates, while a crop is being chosen.
   const [cropRect, setCropRect] = useState<Rect | null>(null);
@@ -235,9 +265,7 @@ export function Canvas() {
       },
       imageInterval,
       // Each included router operation carves with its own bit.
-      tools: operations
-        .filter((o) => o.enabled !== false)
-        .map((o) => tools.find((t) => t.id === o.toolId) ?? bit),
+      tools: jobOrder(operations, items.length > 0).all.map((o) => tools.find((t) => t.id === o.toolId) ?? bit),
       operationStarts: program.operationStarts,
     });
     // The operations' settings are read as they were when the program was made:
@@ -441,18 +469,36 @@ export function Canvas() {
               dangerouslySetInnerHTML={{ __html: traced.body }}
             />
           )}
-          {/* The line each cutout follows, before any allowance for the bit's width. */}
-          {placed &&
+          {items.map((item) => {
+            const at = itemRect(item, { bed, origin });
+            return (
+              // Lines made by our own text and drawing readers, from numeric path data.
+              <svg
+                key={item.id}
+                x={at.x}
+                y={at.y}
+                width={at.width}
+                height={at.height}
+                viewBox={`0 0 ${item.drawnWidth} ${item.drawnHeight}`}
+                preserveAspectRatio="none"
+                className="design-lines"
+                opacity={program ? 0.15 : 1}
+                dangerouslySetInnerHTML={{ __html: item.body }}
+              />
+            );
+          })}
+          {/* The line each cutout follows, round everything on the material, before any allowance for the bit's width. */}
+          {around &&
             operations.map((o) => {
               if ((o.kind.type !== "cncCutout" && o.kind.type !== "laserCutout") || o.enabled === false) return null;
               const { offset: margin, outline, cornerRadius } = o.kind;
-              const [w, h] = [placed.width + margin * 2, placed.height + margin * 2];
+              const [w, h] = [around.width + margin * 2, around.height + margin * 2];
               if (w <= 0 || h <= 0) return null;
               const line = { fill: "none", stroke: "var(--fg)", strokeWidth: px * 1.5, strokeDasharray: `${px * 6} ${px * 4}` };
               return outline === "ellipse" ? (
-                <ellipse key={o.id} cx={placed.x + placed.width / 2} cy={placed.y + placed.height / 2} rx={w / 2} ry={h / 2} {...line} />
+                <ellipse key={o.id} cx={around.x + around.width / 2} cy={around.y + around.height / 2} rx={w / 2} ry={h / 2} {...line} />
               ) : (
-                <rect key={o.id} x={placed.x - margin} y={placed.y - margin} width={w} height={h} rx={Math.min(cornerRadius, w / 2, h / 2)} {...line} />
+                <rect key={o.id} x={around.x - margin} y={around.y - margin} width={w} height={h} rx={Math.min(cornerRadius, w / 2, h / 2)} {...line} />
               );
             })}
           {program && (
@@ -545,14 +591,38 @@ export function Canvas() {
               <Handles rect={cropRect} px={px} lockAspect={false} bounds={placed} dashed toBed={toBed} onChange={setCropRect} />
             </>
           ) : (
-            <Handles
-              rect={placed}
-              px={px}
-              lockAspect={aspectLocked}
-              moveOnly={fixedSize}
-              toBed={toBed}
-              onChange={useProject.getState().setArtworkRect}
-            />
+            <>
+              {/* Whatever is selected has the frame; anything else is clicked to select it. */}
+              {selectedItem && <Target rect={placed} px={px} onSelect={() => useProject.getState().select(null)} />}
+              {selectedItem ? (
+                <Handles
+                  rect={itemRect(selectedItem, { bed, origin })}
+                  px={px}
+                  lockAspect={selectedItem.aspectLocked}
+                  toBed={toBed}
+                  onChange={(rect) => useProject.getState().setItemRect(selectedItem.id, rect)}
+                />
+              ) : (
+                <Handles
+                  rect={placed}
+                  px={px}
+                  lockAspect={aspectLocked}
+                  moveOnly={fixedSize}
+                  toBed={toBed}
+                  onChange={useProject.getState().setArtworkRect}
+                />
+              )}
+              {items
+                .filter((item) => item.id !== selected)
+                .map((item) => (
+                  <Target
+                    key={item.id}
+                    rect={itemRect(item, { bed, origin })}
+                    px={px}
+                    onSelect={() => useProject.getState().select(item.id)}
+                  />
+                ))}
+            </>
           )}
         </svg>
       )}

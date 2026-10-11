@@ -150,6 +150,10 @@ export function generateGcode(
   job: Job,
   /** Carve reliefs from the estimated depth map, with this much photo texture (0 to 1). */
   depth: { enabled: boolean; detail: number; floor: number },
+  /** Text and drawings added beside the artwork, as an SVG the size of the bed, with what makes them. */
+  added: { svg: string; operations: Operation[] } | null = null,
+  /** The space everything takes up on the bed (x, y, width, height), which cutouts go round. */
+  cutoutAround: [number, number, number, number] | null = null,
 ): Promise<Generated> {
   return invoke("generate_gcode", {
     settings,
@@ -157,6 +161,8 @@ export function generateGcode(
     heightMm: size.heightMm,
     job,
     depth,
+    added,
+    cutoutAround,
   });
 }
 
@@ -465,6 +471,11 @@ export interface TextSpec {
   bold: boolean;
   italic: boolean;
   align: "left" | "center" | "right";
+  /**
+   * How far the words bend round a circle, in degrees: 0 is straight, above 0
+   * arches over the top, below 0 curves under the bottom.
+   */
+  bend?: number;
 }
 
 /** Reads an SVG document as plain lines, cropped to what is drawn. */

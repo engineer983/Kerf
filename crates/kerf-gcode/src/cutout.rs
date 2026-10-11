@@ -497,6 +497,79 @@ mod tests {
     }
 
     #[test]
+    fn a_sign_engraves_its_lettering_then_cuts_round_everything() {
+        // A plain 40 x 30 piece of artwork at (50, 60), with a line of
+        // lettering below it at Y 100, and the cutout listed first.
+        let mut job = laser_job(2.0, 1);
+        job.operations.push(Operation {
+            color: None,
+            kind: OperationKind::LaserCut,
+            feed: 3000.0,
+            power: 20.0,
+            passes: 1,
+        });
+        let base = Artwork::from_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="30mm" viewBox="0 0 40 30"><path d="M5 5H35" stroke="#000" fill="none"/></svg>"##,
+            0.05,
+        )
+        .unwrap();
+        let lettering = Artwork::from_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200mm" height="200mm" viewBox="0 0 200 200"><path d="M40 100H110" stroke="#000" fill="none"/></svg>"##,
+            0.05,
+        )
+        .unwrap();
+        let added = [Operation {
+            color: None,
+            kind: OperationKind::LaserCut,
+            feed: 1500.0,
+            power: 40.0,
+            passes: 1,
+        }];
+        let additions = crate::generate::Additions {
+            artwork: &lettering,
+            operations: &added,
+        };
+        // Everything on the material spans X 40-110 and Y 60-100.
+        let around = Some([40.0, 60.0, 70.0, 40.0]);
+        let program =
+            crate::generate::generate_composed(&base, None, &job, Some(&additions), around)
+                .unwrap();
+
+        assert_eq!(program.operation_starts.len(), 3);
+        let (main, added_at, cut) = (
+            program.text.find("S200 F3000").unwrap(),
+            program.text.find("S400 F1500").unwrap(),
+            program.text.find("S800 F800").unwrap(),
+        );
+        assert!(
+            main < added_at && added_at < cut,
+            "the cutout must come last"
+        );
+        // The lettering is cut where it was drawn, with no offset added.
+        assert!(program.text.contains("X110 Y100"));
+        // The cut goes 2 mm outside everything, not just the main artwork.
+        let b = program.bounds;
+        assert_eq!(
+            [b.min_x, b.min_y, b.max_x, b.max_y].map(|v| (v * 1000.0).round() / 1000.0),
+            [38.0, 58.0, 112.0, 102.0]
+        );
+
+        // A picture operation has nothing to work from in lettering.
+        let picture = [Operation {
+            kind: OperationKind::LaserImage {
+                interval: 0.1,
+                dither: true,
+            },
+            ..added[0].clone()
+        }];
+        let wrong = crate::generate::Additions {
+            artwork: &lettering,
+            operations: &picture,
+        };
+        assert!(crate::generate::generate_composed(&base, None, &job, Some(&wrong), None).is_err());
+    }
+
+    #[test]
     fn impossible_cutouts_are_refused() {
         assert!(generate(&artwork(), &job(cutout(Side::On, -20.0, 0)))
             .unwrap_err()

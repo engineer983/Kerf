@@ -36,6 +36,8 @@ export function toolActivity(name: string): string {
       return "Making the picture… this can take a minute or two";
     case "find_pictures":
       return "Searching for pictures…";
+    case "make_text":
+      return "Drawing the words…";
     case "use_found_picture":
     case "use_picture_from_address":
       return "Downloading the picture…";
@@ -257,7 +259,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: "make_text",
     description:
-      "Draw words in a font installed on the person's computer, as the outlines of their letters, and start a new project from them. Use it for signs, name plates, labels and lettering; it is exact, where drawing letters yourself in create_picture is not. The result can be resized like a picture, engraved solid or outlined on a laser, or followed with a bit on a router, and a cutout can be added round it. If the font asked for is not installed, the error lists some that are. Bold, simple fonts suit small sizes.",
+      "Draw words in a font installed on the person's computer, as the outlines of their letters. With addToDesign true they are added to what is already on the material, which is how a sign is made: a picture with words above, below or over it. Otherwise they start a new project on their own. The words can be straight, or bent along a curve to arch over a picture or run under it. Added words are placed in the middle of the material; move and size them with set_added_item. Use this for signs, name plates, labels and lettering; it is exact, where drawing letters yourself in create_picture is not. If the font asked for is not installed, the error lists some that are. Bold, simple fonts suit small sizes.",
     schema: {
       type: "object",
       properties: {
@@ -267,8 +269,27 @@ export const TOOLS: ToolSpec[] = [
         bold: { type: "boolean" },
         italic: { type: "boolean" },
         align: { type: "string", enum: ["left", "center", "right"], description: "How lines of different lengths line up. Defaults to center." },
+        curve: number("Degrees the words bend round a circle, -350 to 350. 0 is straight; above 0 arches over the top (to go above a picture), below 0 curves underneath (to go below one). 180 is half way round."),
+        addToDesign: { type: "boolean", description: "True to add the words to the current design. False, the default, starts a new project from them." },
       },
       required: ["text"],
+    },
+  },
+  {
+    name: "set_added_item",
+    description:
+      "Move, resize or remove one of the text or drawing items added beside the main artwork. Items are numbered from 1 in the order get_project lists them under `added`. Sizes and distances are in millimetres, measured as for set_artwork; an item keeps its proportions, so give a width or a height, not both. To change an item's words, remove it and add it again.",
+    schema: {
+      type: "object",
+      properties: {
+        item: number("Which added item, counting from 1."),
+        width: number("Its width."),
+        height: number("Its height."),
+        fromLeft: number("Distance of its left edge from the left of the bed."),
+        fromEdge: number("Distance from the bed edge on the machine's origin side."),
+        remove: { type: "boolean", description: "True to take it off the material." },
+      },
+      required: ["item"],
     },
   },
   {
@@ -377,6 +398,19 @@ function describeProject() {
     // and cannot be resized.
     design: s.design && { summary: describeDesign(s.design), sheets: s.design.sheets.length, sheetShown: s.design.sheet + 1, partsOnThisSheet: s.design.sheets[s.design.sheet].parts },
     material: { id: s.materialId, name: findMaterial(s.materialId).label, thicknessMm: s.thickness, widthMm: s.stockWidth, lengthMm: s.stockLength },
+    // Text and drawings placed on the material beside the main artwork, each
+    // movable and resizable on its own. One operation, marked forAddedItems,
+    // makes them all.
+    added: s.items.map((item, i) => ({
+      item: i + 1,
+      kind: item.text ? "text" : "drawing",
+      name: item.name,
+      words: item.text?.text,
+      widthMm: item.widthMm,
+      heightMm: item.heightMm,
+      fromLeftMm: item.left,
+      fromEdgeMm: item.front,
+    })),
     artwork: art && {
       widthMm: s.widthMm,
       heightMm: s.heightMm,
@@ -401,6 +435,7 @@ function describeProject() {
     operations: s.operations.map((op, i) => ({
       operation: i + 1,
       include: op.enabled !== false,
+      forAddedItems: op.forItems === true || undefined,
       bit: tools.find((t) => t.id === op.toolId)?.name ?? null,
       speedMmPerMin: op.feed,
       ...(op.kind.type.startsWith("laser") ? { powerPercent: op.power, passes: op.passes } : {}),
@@ -794,16 +829,54 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       }
       font = found;
     }
-    await useProject.getState().makeText({
+    const spec = {
       text: input.text.slice(0, 2000),
       font,
       sizeMm: num(input, "size", 1, 1000) ?? DEFAULT_TEXT.sizeMm,
       bold: flag(input, "bold") ?? false,
       italic: flag(input, "italic") ?? false,
       align: choice(input, "align", ["left", "center", "right"] as const) ?? "center",
-    });
+      bend: num(input, "curve", -350, 350) ?? 0,
+    };
+    const project = useProject.getState();
+    if (flag(input, "addToDesign")) {
+      if (!project.image) throw new ToolError("There is nothing on the material to add to yet. Leave addToDesign out to start a project from the words.");
+      await project.addText(spec);
+      const items = useProject.getState().items;
+      const added = items[items.length - 1];
+      return {
+        content: `Added as item ${items.length}: ${added.widthMm} x ${added.heightMm} mm, in the middle of the material (${added.left} mm from the left, ${added.front} mm from the edge). Move or resize it with set_added_item so that it sits where it should and does not overlap anything it should not.`,
+        summary: `Added the text "${added.name}"`,
+      };
+    }
+    await project.makeText(spec);
     const made = useProject.getState().design!;
     return { content: `${describeDesign(made)} It is loaded as a new project. Look at the project to see how it was set up.`, summary: "Drew the text" };
+  },
+
+  set_added_item: (input) => {
+    const s = useProject.getState();
+    const index = num(input, "item", 1, Math.max(1, s.items.length));
+    const item = index !== undefined && Number.isInteger(index) ? s.items[index - 1] : undefined;
+    if (!item) throw new ToolError(s.items.length ? `item must be a whole number from 1 to ${s.items.length}.` : "Nothing has been added to the design.");
+    if (flag(input, "remove")) {
+      s.removeItem(item.id);
+      return { content: "Removed. The remaining items are renumbered.", summary: `Removed "${item.name}"` };
+    }
+    const width = num(input, "width", 1, 5000);
+    const height = num(input, "height", 1, 5000);
+    const left = num(input, "fromLeft", -5000, 5000);
+    const front = num(input, "fromEdge", -5000, 5000);
+    if (width !== undefined) s.updateItem(item.id, { widthMm: width });
+    else if (height !== undefined) s.updateItem(item.id, { heightMm: height });
+    if (left !== undefined || front !== undefined) {
+      s.updateItem(item.id, { ...(left !== undefined && { left }), ...(front !== undefined && { front }) });
+    }
+    const now = useProject.getState().items.find((i) => i.id === item.id)!;
+    return {
+      content: `Item ${index} is now ${now.widthMm} x ${now.heightMm} mm, ${now.left} mm from the left and ${now.front} mm from the edge.`,
+      summary: `Moved or resized "${item.name}"`,
+    };
   },
 
   make_layers: async (input) => {
@@ -863,7 +936,7 @@ export async function runTool(name: string, input: unknown): Promise<ToolOutcome
 /** Standing instructions for the assistant. Kept unchanging so providers can cache it. */
 export const SYSTEM_PROMPT = `You are the assistant inside Kerf, a desktop app that turns a picture into a job for a laser engraver or a CNC router. The person you are helping makes things in a home workshop. They may be new to this, so explain in plain language and define a term the first time you use it.
 
-How the app works: the person picks a machine, imports a picture, and the app either traces it into outlines or uses it directly. In Operations they choose a material, place the artwork on it, and add operations. A laser can engrave the picture with its shading (image), fill traced shapes, or follow their outlines. A router can follow traced outlines (profile), carve the picture as a 3D relief, or cut the piece out with holding tabs. A relief takes its heights either from the picture's brightness or from an estimate of depth, which suits photographs and drawings of objects. Generating produces G-code and a preview; nothing reaches a machine until the person sends it themselves.
+How the app works, in numbered steps: 1 Device, the machine; 2 Material, what it is and how big the piece is; 3 Design, what goes on the material; 4 Trace, how a picture is turned into outlines; 5 Operations, what the machine does; 6 Machine, running it. The design starts with one main thing (a picture, a drawing, words or a box) and can have more words and drawings added around it, each placed and sized on its own, which is how a sign is laid out. Everything is fitted to the material, so the material's size should be right before the design is arranged. One operation makes all the added items, after the main artwork and before any cutout, and a cutout goes round everything together. A laser can engrave the picture with its shading (image), fill traced shapes, or follow their outlines. A router can follow traced outlines (profile), carve the picture as a 3D relief, or cut the piece out with holding tabs. A relief takes its heights either from the picture's brightness or from an estimate of depth, which suits photographs and drawings of objects. Generating produces G-code and a preview; nothing reaches a machine until the person sends it themselves.
 
 You can read the project and change its settings with your tools. Look at the project before advising or changing anything, since it may have changed since you last looked. When the person asks for a result ("make it deeper", "it's taking too long"), make the change rather than describing how they could, then say in a sentence or two what you changed and why. Your changes can be undone with Ctrl+Z, so prefer acting to asking, but do ask when the request could reasonably mean quite different things. After changing something that affects the job, generate the G-code again if they will want to see the result, and report the new time.
 

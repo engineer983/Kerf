@@ -57,7 +57,7 @@ pub fn lay_out(
         .find(|p| p.width > max_width + 1e-6 || p.height > max_height + 1e-6)
     {
         return Err(format!(
-            "The {} is {:.0} x {:.0} mm, which is larger than the {:.0} x {:.0} mm the machine can reach. Make it smaller.",
+            "The {} is {:.0} x {:.0} mm, which is larger than the {:.0} x {:.0} mm there is room for on the material. Use a larger piece, or make it smaller.",
             part.name, part.width, part.height, max_width, max_height
         ));
     }

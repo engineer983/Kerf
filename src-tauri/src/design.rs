@@ -202,6 +202,7 @@ mod tests {
             bold: false,
             italic: false,
             align: Align::Center,
+            bend: 0.0,
         };
         let one = text_sheet(&spec("HELLO", 20.0)).unwrap();
         // Capital letters stand about seven tenths of the size.
@@ -218,6 +219,32 @@ mod tests {
         let read = Artwork::from_svg(&o.svg, FLATTEN_TOLERANCE_MM).unwrap();
         assert_eq!(read.shapes.len(), 1);
         assert_eq!(read.shapes[0].polylines.len(), 2);
+        // Bent half way round a circle, the words span the circle's width,
+        // which is 2/pi of their straight length, and stand much taller.
+        let straight = text_sheet(&spec("HELLO WORLD", 20.0)).unwrap();
+        let bent = |bend: f64, text: &str| {
+            text_sheet(&TextSpec {
+                bend,
+                ..spec(text, 20.0)
+            })
+            .unwrap()
+        };
+        let arch = bent(180.0, "HELLO WORLD");
+        let share = arch.width_mm / straight.width_mm;
+        assert!((0.6..0.95).contains(&share), "{share}");
+        assert!(arch.height_mm > straight.height_mm * 2.0);
+        let under = bent(-180.0, "HELLO WORLD");
+        // Curved under, the letters stand inside the circle, not outside it,
+        // so the same words come out narrower by twice their height.
+        let narrower = arch.width_mm - under.width_mm;
+        assert!((15.0..45.0).contains(&narrower), "{narrower}");
+        assert!(under.height_mm > straight.height_mm * 2.0);
+        // Two lines still fit, one inside the other, however tight the curve:
+        // the circle opens out until the second line has room.
+        assert!(bent(120.0, "HELLO WORLD\nAGAIN").height_mm > 20.0);
+        let tight_one = bent(300.0, "GARDEN");
+        let tight_two = bent(300.0, "GARDEN\nRULES");
+        assert!(tight_two.width_mm > tight_one.width_mm + 10.0);
         assert!(text_sheet(&spec("   ", 20.0)).is_err());
         assert!(text_sheet(&spec("HELLO", 0.0)).is_err());
     }

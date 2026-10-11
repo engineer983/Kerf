@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useProject } from "../state/project";
 
-const NAMES = { device: "Device", import: "Import", trace: "Trace", operations: "Operations", machine: "Machine" };
+const NAMES = { device: "Device", material: "Material", design: "Design", trace: "Trace", operations: "Operations", machine: "Machine" };
 
 /** Asks before going back to the picture throws away the job that was generated. */
 export function ConfirmBack() {

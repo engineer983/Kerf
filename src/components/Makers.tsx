@@ -5,7 +5,7 @@ import { listFonts, type TextSpec } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
-import { Checkbox, NumberField, Select } from "./controls";
+import { Checkbox, NumberField, Select, Slider } from "./controls";
 
 const primary = "rounded-lg bg-accent px-4 py-2 font-medium text-accent-fg hover:opacity-90 disabled:opacity-40";
 const quiet = "rounded-lg border border-line px-4 py-2 transition-colors hover:text-fg";
@@ -249,13 +249,22 @@ function LayerMaker() {
 
 /** Fonts tried first for new text, in order; the first one installed is used. */
 const USUAL_FONTS = ["Arial", "Segoe UI", "Helvetica", "DejaVu Sans", "Liberation Sans"];
+/** Lines of text are set this far apart, as a multiple of the font's size; the backend uses the same. */
+const LINE_SPACING = 1.25;
 
 function TextMaker() {
   const design = useProject((s) => s.design);
   const machineKind = useProject((s) => s.machineKind);
+  const items = useProject((s) => s.items);
+  // What is being made: a new item on the material, a change to one, or the main artwork.
+  const target = useUi((s) => s.makerItem);
+  const editing = typeof target === "number" ? items.find((item) => item.id === target) : undefined;
   const [fonts, setFonts] = useState<string[]>([]);
-  const [text, setText] = useState<TextSpec>(() => (design?.kind === "text" ? design.input : DEFAULT_TEXT));
+  const [text, setText] = useState<TextSpec>(
+    () => editing?.text ?? (target === null && design?.kind === "text" ? design.input : DEFAULT_TEXT),
+  );
   const change = (patch: Partial<TextSpec>) => setText((t) => ({ ...t, ...patch }));
+  const bend = text.bend ?? 0;
 
   // The fonts are this computer's own, so the list is asked for.
   useEffect(() => {
@@ -267,12 +276,21 @@ function TextMaker() {
       .catch(() => setFonts([]));
   }, []);
 
+  const adding = target === "new";
+  const changing = editing !== undefined || (target === null && design?.kind === "text");
+  const make = () => {
+    const project = useProject.getState();
+    if (adding) return project.addText(text);
+    if (editing) return project.changeText(editing.id, text);
+    return project.makeText(text);
+  };
+
   return (
     <Maker
-      title="Text"
-      about="Words in any font installed on this computer, drawn as the outlines of their letters. A laser can engrave them solid or trace round them; a router follows their edges."
-      action={design?.kind === "text" ? "Make it again" : "Make the text"}
-      make={() => useProject.getState().makeText(text)}
+      title={adding ? "Add text" : "Text"}
+      about="Words in any font installed on this computer, drawn as the outlines of their letters, straight or bent along a curve. A laser can engrave them solid or trace round them; a router follows their edges."
+      action={adding ? "Add the text" : changing ? "Make it again" : "Make the text"}
+      make={make}
     >
       <label className="flex flex-col gap-1">
         Words
@@ -307,29 +325,30 @@ function TextMaker() {
       />
       <Checkbox label="Bold" hint={{ text: "Uses the font's heavier weight, where it has one." }} checked={text.bold} onChange={(bold) => change({ bold })} />
       <Checkbox label="Italic" hint={{ text: "Uses the font's slanted style, where it has one." }} checked={text.italic} onChange={(italic) => change({ italic })} />
-      <Select
-        label="Line up"
-        hint={{ text: "How lines of different lengths are lined up with each other." }}
-        value={text.align}
-        options={[
-          { value: "left", label: "Left" },
-          { value: "center", label: "Centre" },
-          { value: "right", label: "Right" },
-        ]}
-        onChange={(align) => change({ align })}
+      <Slider
+        label="Curve"
+        unit="°"
+        min={-350}
+        max={350}
+        step={5}
+        value={bend}
+        hint={{ text: "Bends the words round a circle. 0 is straight. To the right they arch over the top, to go above a picture; to the left they curve underneath, to go below one. 180 takes them half way round; 350 almost all the way. With several lines the circle is opened out until they all fit, so a tight curve bends them less than asked." }}
+        onChange={(value) => change({ bend: value })}
       />
-      <div
-        aria-label="Preview"
-        className="min-h-16 overflow-hidden rounded-lg border border-line bg-raised px-3 py-2 text-[26px] leading-tight whitespace-pre-wrap"
-        style={{
-          fontFamily: `"${text.font.replace(/"/g, "")}"`,
-          fontWeight: text.bold ? 700 : 400,
-          fontStyle: text.italic ? "italic" : "normal",
-          textAlign: text.align,
-        }}
-      >
-        {text.text || <span className="text-muted">A preview appears here.</span>}
-      </div>
+      {bend === 0 && (
+        <Select
+          label="Line up"
+          hint={{ text: "How lines of different lengths are lined up with each other." }}
+          value={text.align}
+          options={[
+            { value: "left", label: "Left" },
+            { value: "center", label: "Centre" },
+            { value: "right", label: "Right" },
+          ]}
+          onChange={(align) => change({ align })}
+        />
+      )}
+      <TextPreview text={text} />
       {machineKind === "cnc" && (
         <p className="text-muted">
           A router follows the edge of each letter with the middle of the bit, so letters come out a little
@@ -337,5 +356,75 @@ function TextMaker() {
         </p>
       )}
     </Maker>
+  );
+}
+
+/** Roughly how the words will look, drawn by the browser in the same font and on the same curve. */
+function TextPreview({ text }: { text: TextSpec }) {
+  const style = {
+    fontFamily: `"${text.font.replace(/"/g, "")}"`,
+    fontWeight: text.bold ? 700 : 400,
+    fontStyle: text.italic ? "italic" : "normal",
+  };
+  const box = "min-h-16 overflow-hidden rounded-lg border border-line bg-raised px-3 py-2";
+  const lines = text.text.split("\n").filter((line) => line.trim());
+  const bend = text.bend ?? 0;
+  if (lines.length === 0) {
+    return (
+      <div aria-label="Preview" className={`${box} text-muted`}>
+        A preview appears here.
+      </div>
+    );
+  }
+  if (bend === 0) {
+    return (
+      <div aria-label="Preview" className={`${box} text-[26px] leading-tight whitespace-pre-wrap`} style={{ ...style, textAlign: text.align }}>
+        {text.text}
+      </div>
+    );
+  }
+
+  // The same circle the backend uses: the one on which the widest line takes
+  // up the angle asked for. The drawing is made with a font 100 units high,
+  // since browsers do not set type well at a size of one.
+  const size = 100;
+  const spacing = size * LINE_SPACING;
+  const measure = document.createElement("canvas").getContext("2d")!;
+  measure.font = `${style.fontStyle} ${style.fontWeight} ${size}px ${style.fontFamily}`;
+  const widest = Math.max(...lines.map((line) => measure.measureText(line.trim()).width), size / 2);
+  const over = bend > 0;
+  const angle = (Math.min(350, Math.abs(bend)) * Math.PI) / 180;
+  // Opened out, as the backend does, until every line has circle to sit on.
+  const radius = Math.max(widest / angle, over ? (lines.length - 1) * spacing + size : size);
+  const half = (175 * Math.PI) / 180;
+  // The view is cropped to the part of the circle the words take up. Worked
+  // out for words over the top, then turned over for words underneath.
+  const outer = radius + (over ? size : (lines.length - 1) * spacing + size * 0.3);
+  const inner = Math.max(0, radius - (over ? lines.length * spacing : size));
+  const spread = angle / 2;
+  const across = spread >= Math.PI / 2 ? outer : outer * Math.sin(spread) + size / 2;
+  const lowest = -(spread >= Math.PI / 2 ? outer : inner) * Math.cos(spread) + size / 2;
+  const [top, bottom] = over ? [-outer, lowest] : [-lowest, outer];
+  return (
+    <div aria-label="Preview" className={box}>
+      <svg viewBox={`${-across} ${top} ${across * 2} ${bottom - top}`} className="mx-auto block max-h-56 w-full" fill="currentColor">
+        {lines.map((line, i) => {
+          const r = radius + i * (over ? -spacing : spacing);
+          if (r <= size / 4) return null;
+          const [dx, dy] = [r * Math.sin(half), r * Math.cos(half)];
+          const y = over ? -dy : dy;
+          return (
+            <g key={i}>
+              <path id={`preview-line-${i}`} d={`M${-dx} ${y}A${r} ${r} 0 1 ${over ? 1 : 0} ${dx} ${y}`} fill="none" />
+              <text fontSize={size} textAnchor="middle" style={style}>
+                <textPath href={`#preview-line-${i}`} startOffset="50%">
+                  {line.trim()}
+                </textPath>
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
   );
 }

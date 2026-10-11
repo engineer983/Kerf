@@ -45,6 +45,8 @@ export async function toPngFile(bytes: ArrayBuffer, name: string): Promise<File>
 export async function loadAsNewProject(file: File, options?: { drawnHeightMap?: boolean }): Promise<SourceImage> {
   const before = useProject.getState();
   if (before.image) await before.saveProject();
+  // A new project starts without the last one's added text and drawings.
+  for (const item of before.items) before.removeItem(item.id);
   await useProject.getState().importFile(file, options);
   const after = useProject.getState();
   if (after.error || !after.image || after.image === before.image) {
@@ -95,7 +97,7 @@ export function pastePicture(event: ClipboardEvent): boolean {
   if (typing || !/^https?:\/\/\S+$/i.test(text)) return false;
   pictureFromAddress(text)
     .then((picture) => useProject.getState().importFile(picture))
-    .catch((e) => useProject.setState({ error: e instanceof Error ? e.message : String(e), step: "import" }));
+    .catch((e) => useProject.setState({ error: e instanceof Error ? e.message : String(e), step: "design" }));
   return true;
 }
 

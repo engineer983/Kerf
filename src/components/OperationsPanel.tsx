@@ -1,12 +1,12 @@
 import { X } from "lucide-react";
 import { CUT_COLOR, isFixed, MARK_COLOR } from "../lib/design";
 import { isTauri, type OperationKind } from "../lib/ipc";
-import { findMaterial, MATERIALS } from "../lib/materials";
+import { findMaterial } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
-import { artworkRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
+import { everythingRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
-import { Checkbox, NumberField, Section, Segmented, Select, Slider } from "./controls";
+import { Checkbox, NumberField, Segmented, Select, Slider } from "./controls";
 import { DesignPanel } from "./DesignPanel";
 import { SimpleSetup } from "./SimpleSetup";
 
@@ -34,9 +34,7 @@ export function OperationsPanel() {
   const front = useProject((s) => s.front);
   const widthMm = useProject((s) => s.widthMm);
   const heightMm = useProject((s) => s.heightMm);
-  const aspectLocked = useProject((s) => s.aspectLocked);
-  const cropping = useProject((s) => s.cropping);
-  const cropped = useProject((s) => s.uncropped !== null);
+  const items = useProject((s) => s.items);
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
   const operations = useProject((s) => s.operations);
@@ -49,7 +47,7 @@ export function OperationsPanel() {
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
   const actions = useProject.getState();
 
-  if (!image) return <p className="text-muted">Import an image first.</p>;
+  if (!image) return <p className="text-muted">Put something on the material first, in step 3, Design.</p>;
   if (!isTauri()) {
     return <p className="text-muted">G-code needs the desktop app; it is not available in a browser.</p>;
   }
@@ -61,7 +59,7 @@ export function OperationsPanel() {
     operations.filter((o) => o.enabled !== false && o.toolId).map((o) => o.toolId),
   );
   const mixedBits = machineKind === "cnc" && bitsInUse.size > 1;
-  const art = artworkRect({ image, widthMm, heightMm, left, front, bed, origin });
+  const art = everythingRect({ image, widthMm, heightMm, left, front, bed, origin, items });
   const stock = stockRect({ stockWidth, stockLength, bed, origin });
   const overhangs =
     art !== null &&
@@ -90,105 +88,23 @@ export function OperationsPanel() {
       </div>
       {designed && <DesignPanel />}
       {!fixed && mode === "simple" && <SimpleSetup />}
-      <Section title="Material">
-        <Select
-          label="Type"
-          hint={{ text: "The material you are working on. It sets how the preview looks and, on a router, the cutting speeds." }}
-          value={materialId}
-          options={MATERIALS.map((m) => ({ value: m.id, label: m.label }))}
-          onChange={actions.setMaterial}
-        />
-        <NumberField
-          label="Thickness"
-          unit="mm"
-          min={0.1}
-          max={200}
-          value={thickness}
-          onChange={actions.setThickness}
-        />
-        <NumberField
-          label="Width"
-          unit="mm"
-          min={1}
-          max={5000}
-          value={stockWidth}
-          onChange={(value) => actions.setStock({ stockWidth: value })}
-        />
-        <NumberField
-          label="Length"
-          unit="mm"
-          min={1}
-          max={5000}
-          value={stockLength}
-          onChange={(value) => actions.setStock({ stockLength: value })}
-        />
-        {overhangs && (
-          <p role="alert" className="text-accent">
-            The artwork reaches past the edge of the material.
-          </p>
-        )}
-        <p className="text-muted">
-          The material sits in the {origin === "backLeft" ? "back" : "front"}-left corner of the bed.
-          {machineKind === "cnc"
-            ? " Router speeds are worked out from the material and the bit."
-            : " Laser speed and power are yours to set; the material only changes the preview."}
+      <p className="text-muted">
+        {findMaterial(materialId).label}, {thickness} mm thick, {stockWidth} × {stockLength} mm. Change the
+        material in step 2, and arrange the design in step 3.
+      </p>
+      {overhangs && (
+        <p role="alert" className="text-accent">
+          Something reaches past the edge of the material. Move or resize it in step 3, Design.
         </p>
-      </Section>
-
-      <Section title="Artwork">
-        <p className="text-muted">
-          {fixed
-            ? "Drag the design on the canvas to move it. It stays the size it was drawn at, so that its parts fit."
-            : "Drag the artwork on the canvas to move it, or its handles to resize it."}
-        </p>
-        {!fixed && (
-          <>
-            <NumberField label="Width" unit="mm" min={1} max={5000} value={widthMm} onChange={actions.setWidthMm} />
-            <NumberField label="Height" unit="mm" min={1} max={5000} value={heightMm} onChange={actions.setHeightMm} />
-            <Checkbox label="Keep proportions" checked={aspectLocked} onChange={actions.setAspectLocked} />
-          </>
-        )}
-        <NumberField
-          label="From left"
-          unit="mm"
-          min={-5000}
-          max={5000}
-          value={left}
-          onChange={(value) => actions.setPosition({ left: value })}
-        />
-        <NumberField
-          label={origin === "backLeft" ? "From back" : "From front"}
-          unit="mm"
-          min={-5000}
-          max={5000}
-          value={front}
-          onChange={(value) => actions.setPosition({ front: value })}
-        />
-        <div className={designed ? "hidden" : "grid grid-cols-2 gap-2"}>
-          <button
-            className="rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent"
-            onClick={() => actions.setCropping(!cropping)}
-          >
-            {cropping ? "Cancel crop" : "Crop…"}
-          </button>
-          <button
-            className="rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent disabled:opacity-40"
-            disabled={!cropped}
-            onClick={() => void actions.resetCrop()}
-          >
-            Undo crop
-          </button>
-        </div>
-      </Section>
-
+      )}
       {(mode === "advanced" || fixed) &&
         operations.map((operation, index) => (
           <OperationCard
             key={operation.id}
             operation={operation}
-            title={(fixed && operation.color && LINE_NAMES[operation.color]) || `Operation ${index + 1}`}
+            title={operation.forItems ? "Added text and drawings" : (fixed && operation.color && LINE_NAMES[operation.color]) || `Operation ${index + 1}`}
             colors={colors}
-            removable={operations.length > 1}
+            removable={operations.length > 1 && !operation.forItems}
           />
         ))}
 
@@ -387,10 +303,10 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           label="Type"
           value={kind.type}
           options={[
-            { value: "cncProfile", label: "Follow paths" },
-            { value: "cncRelief", label: "3D relief" },
-            { value: "cncCutout", label: "Cut out the piece" },
-          ]}
+            { value: "cncProfile" as const, label: "Follow paths" },
+            { value: "cncRelief" as const, label: "3D relief" },
+            { value: "cncCutout" as const, label: "Cut out the piece" },
+          ].filter((option) => !operation.forItems || option.value === "cncProfile")}
           hint={{ text: "What this operation does: follow the traced lines, carve the picture as a 3D relief, or cut around the artwork to free the piece." }}
           onChange={(type) => setOperationType(id, type)}
         />
@@ -399,11 +315,11 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           label="Type"
           value={kind.type}
           options={[
-            { value: "laserImage", label: "Image (photo)" },
-            { value: "laserFill", label: "Fill (engrave)" },
-            { value: "laserCut", label: "Line (cut)" },
-            { value: "laserCutout", label: "Cut out the piece" },
-          ]}
+            { value: "laserImage" as const, label: "Image (photo)" },
+            { value: "laserFill" as const, label: "Fill (engrave)" },
+            { value: "laserCut" as const, label: "Line (cut)" },
+            { value: "laserCutout" as const, label: "Cut out the piece" },
+          ].filter((option) => !operation.forItems || option.value === "laserFill" || option.value === "laserCut")}
           hint={{ text: "What this operation does: engrave the picture itself with its shading, fill traced shapes solidly, follow their outlines, or cut around the artwork to free the piece." }}
           onChange={(type) => setOperationType(id, type)}
         />
