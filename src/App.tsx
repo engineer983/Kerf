@@ -6,6 +6,7 @@ import { Inspector } from "./components/Inspector";
 import { Makers } from "./components/Makers";
 import { ChatDrawer } from "./components/ChatDrawer";
 import { ConfirmBack } from "./components/ConfirmBack";
+import { Help } from "./components/Help";
 import { Toolbox } from "./components/Toolbox";
 import { pastePicture } from "./lib/pictures";
 import { useUi } from "./state/ui";
@@ -33,6 +34,7 @@ export function App() {
       </div>
       <Toolbox />
       <Makers />
+      <Help />
       <ConfirmBack />
     </div>
   );

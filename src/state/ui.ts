@@ -33,6 +33,9 @@ interface UiState {
    * a change to the item with this id, or with null the main artwork itself.
    */
   makerItem: number | "new" | null;
+  /** The help topic being read, or null while the guide is closed. */
+  help: string | null;
+  setHelp: (topic: string | null) => void;
   setTheme: (theme: ThemeChoice) => void;
   toggleChat: () => void;
   setMaker: (maker: Maker | null, item?: number | "new" | null) => void;
@@ -43,6 +46,8 @@ export const useUi = create<UiState>((set) => ({
   chatOpen: false,
   maker: null,
   makerItem: null,
+  help: null,
+  setHelp: (help) => set({ help }),
   setMaker: (maker, item = null) => set({ maker, makerItem: maker ? item : null }),
   setTheme: (theme) => {
     try {

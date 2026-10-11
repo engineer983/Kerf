@@ -1,4 +1,7 @@
+import { CircleHelp } from "lucide-react";
+import { topicForStep } from "../lib/help";
 import { useProject, type Step } from "../state/project";
+import { useUi } from "../state/ui";
 import { DevicePanel } from "./DevicePanel";
 import { DesignStep } from "./DesignStep";
 import { MachinePanel } from "./MachinePanel";
@@ -18,10 +21,21 @@ const TITLES: Record<Step, string> = {
 
 export function Inspector() {
   const step = useProject((s) => s.step);
+  const machineKind = useProject((s) => s.machineKind);
 
   return (
     <aside className="flex w-[300px] shrink-0 flex-col border-l border-line bg-surface">
-      <h2 className="border-b border-line px-5 py-3 text-[13px] font-semibold">{TITLES[step]}</h2>
+      <div className="flex items-center border-b border-line px-5 py-3">
+        <h2 className="text-[13px] font-semibold">{TITLES[step]}</h2>
+        <button
+          onClick={() => useUi.getState().setHelp(topicForStep(step, machineKind))}
+          aria-label={`Help with ${TITLES[step]}`}
+          title="Open the guide at the part about this step"
+          className="ml-auto rounded p-0.5 text-muted transition-colors hover:text-fg"
+        >
+          <CircleHelp size={15} />
+        </button>
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-5 [scrollbar-gutter:stable]">
         {step === "device" ? (
           <DevicePanel />

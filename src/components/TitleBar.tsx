@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FilePlus2, MessageSquare, Monitor, Moon, Redo2, Save, Sun, Undo2, Wrench } from "lucide-react";
+import { CircleHelp, FilePlus2, MessageSquare, Monitor, Moon, Redo2, Save, Sun, Undo2, Wrench } from "lucide-react";
 import { getAppInfo } from "../lib/ipc";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
@@ -120,6 +120,14 @@ export function TitleBar() {
             </button>
           ))}
         </div>
+        <button
+          onClick={() => useUi.getState().setHelp("steps")}
+          title="How to do things in Kerf, and good practice at your machine"
+          className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:text-fg"
+        >
+          <CircleHelp size={14} />
+          Help
+        </button>
         <button
           onClick={toggleChat}
           aria-pressed={chatOpen}
