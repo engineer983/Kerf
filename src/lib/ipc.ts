@@ -100,6 +100,16 @@ export type OperationKind =
       tabs: number;
       tabWidth: number;
       tabHeight: number;
+    }
+  | {
+      /**
+       * The same line around the artwork, cut through by a laser. It runs in
+       * the same job as the engraving, after it.
+       */
+      type: "laserCutout";
+      offset: number;
+      outline: "rectangle" | "ellipse";
+      cornerRadius: number;
     };
 
 export interface Operation {

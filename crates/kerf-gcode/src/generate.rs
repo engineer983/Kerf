@@ -115,6 +115,14 @@ pub fn generate_with(
                     heightmap.ok_or("Image engraving needs an image to take shades from.")?;
                 crate::image_engrave::engrave(&mut w, operation, image, job.offset);
             }
+            OperationKind::LaserCutout { .. } => {
+                let line = crate::cutout::laser_line(
+                    operation,
+                    [artwork.width, artwork.height],
+                    job.offset,
+                )?;
+                laser_cut(&mut w, operation, &[&line]);
+            }
             OperationKind::CncCutout { .. } => {
                 crate::cutout::cut(
                     &mut w,

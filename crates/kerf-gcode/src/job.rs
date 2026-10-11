@@ -120,6 +120,14 @@ pub enum OperationKind {
         tab_width: f64,
         tab_height: f64,
     },
+    /// The same line around the artwork, cut by a laser. It runs in the same
+    /// job as any engraving, after it, since a laser has no bit to change.
+    /// The operation's power, speed and passes are what cut through.
+    LaserCutout {
+        offset: f64,
+        outline: Outline,
+        corner_radius: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,7 +168,8 @@ impl Operation {
         match self.kind {
             OperationKind::LaserCut
             | OperationKind::LaserFill { .. }
-            | OperationKind::LaserImage { .. } => {
+            | OperationKind::LaserImage { .. }
+            | OperationKind::LaserCutout { .. } => {
                 if machine.kind != MachineKind::Laser {
                     return Err("Laser operations need a laser machine profile.".into());
                 }
@@ -174,6 +183,16 @@ impl Operation {
                 | OperationKind::LaserImage { interval, .. } = self.kind
                 {
                     positive(interval, "Line interval")?;
+                }
+                if let OperationKind::LaserCutout {
+                    offset,
+                    corner_radius,
+                    ..
+                } = self.kind
+                {
+                    if !offset.is_finite() || !(corner_radius.is_finite() && corner_radius >= 0.0) {
+                        return Err("The cutout's offset and corner radius must be numbers, and the radius not negative.".into());
+                    }
                 }
             }
             OperationKind::CncProfile {

@@ -212,7 +212,6 @@ export function OperationsPanel() {
         </button>
         <button
           onClick={actions.addCutout}
-          disabled={machineKind !== "cnc"}
           title="Add a cut around the artwork, right through the material, to free the piece"
           className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg disabled:opacity-40"
         >
@@ -399,8 +398,9 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
             { value: "laserImage", label: "Image (photo)" },
             { value: "laserFill", label: "Fill (engrave)" },
             { value: "laserCut", label: "Line (cut)" },
+            { value: "laserCutout", label: "Cut out the piece" },
           ]}
-          hint={{ text: "What this operation does: engrave the picture itself with its shading, fill traced shapes solidly, or follow their outlines." }}
+          hint={{ text: "What this operation does: engrave the picture itself with its shading, fill traced shapes solidly, follow their outlines, or cut around the artwork to free the piece." }}
           onChange={(type) => setOperationType(id, type)}
         />
       )}
@@ -533,6 +533,29 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
         <>
           <NumberField label="Power" unit="%" min={0} max={100} value={operation.power} onChange={(power) => updateOperation(id, { power })} />
           <NumberField label="Passes" min={1} max={100} value={operation.passes} onChange={(passes) => updateOperation(id, { passes: Math.round(passes) })} />
+          {kind.type === "laserCutout" && (
+            <>
+              <NumberField label="Offset" unit="mm" min={-1000} max={1000} value={kind.offset} onChange={(offset) => setKind({ offset })} />
+              <Select
+                label="Shape"
+                value={kind.outline}
+                options={[
+                  { value: "rectangle", label: "Rectangle" },
+                  { value: "ellipse", label: "Oval" },
+                ]}
+                onChange={(outline) => setKind({ outline })}
+              />
+              {kind.outline === "rectangle" && (
+                <NumberField label="Corner radius" unit="mm" min={0} max={1000} value={kind.cornerRadius} onChange={(cornerRadius) => setKind({ cornerRadius })} />
+              )}
+              <p className="text-muted">
+                Cuts a line around the artwork, right through the material, to free the piece. It runs
+                in the same job, after the engraving. The power, speed and passes that get through
+                depend on your laser and material, so try them on an offcut; several faster passes
+                often char less than one slow one.
+              </p>
+            </>
+          )}
           {(kind.type === "laserFill" || kind.type === "laserImage") && (
             <NumberField label="Line interval" unit="mm" min={0.02} max={10} value={kind.interval} onChange={(interval) => setKind({ interval })} />
           )}

@@ -11,7 +11,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use serde::{Deserialize, Serialize};
 
 use crate::generate::{num, Writer, SPINDLE_DWELL_S};
-use crate::geometry::distance;
+use crate::geometry::{distance, Polyline};
 use crate::job::{Operation, OperationKind};
 
 /// Which side of the line the bit runs on.
@@ -122,6 +122,42 @@ fn with_marks(path: &[[f64; 2]], marks: &[f64]) -> Vec<([f64; 2], f64)> {
         out.push((pair[1], travelled));
     }
     out
+}
+
+/// The line a laser follows to cut the piece free: the artwork's outline
+/// moved out by the operation's offset. A laser's cut is too narrow to need
+/// keeping to one side of the line.
+pub(crate) fn laser_line(
+    operation: &Operation,
+    artwork: [f64; 2],
+    offset: [f64; 2],
+) -> Result<Polyline, String> {
+    let OperationKind::LaserCutout {
+        offset: margin,
+        outline,
+        corner_radius,
+    } = operation.kind
+    else {
+        return Err("This is not a laser cutout.".into());
+    };
+    if artwork[0] <= 0.0 || artwork[1] <= 0.0 {
+        return Err("There is no artwork to cut around.".into());
+    }
+    let (width, height) = (artwork[0] + 2.0 * margin, artwork[1] + 2.0 * margin);
+    if width <= 0.0 || height <= 0.0 {
+        return Err("The offset is so far inwards that nothing is left to cut around.".into());
+    }
+    Ok(Polyline {
+        points: bit_path(
+            offset[0] - margin,
+            offset[1] - margin,
+            width,
+            height,
+            corner_radius,
+            outline,
+        ),
+        closed: true,
+    })
 }
 
 pub(crate) fn cut(
@@ -395,6 +431,69 @@ mod tests {
         // (Within a step of the flattened curve.)
         assert!(ellipse.iter().any(|p| distance(*p, [40.0, 15.0]) < 1.0));
         assert!(ellipse.iter().any(|p| distance(*p, [20.0, 0.0]) < 1.0));
+    }
+
+    fn laser_job(margin: f64, passes: u32) -> Job {
+        let mut job = job(OperationKind::LaserCutout {
+            offset: margin,
+            outline: Outline::Rectangle,
+            corner_radius: 0.0,
+        });
+        job.machine.kind = MachineKind::Laser;
+        job.operations[0].power = 80.0;
+        job.operations[0].passes = passes;
+        job
+    }
+
+    #[test]
+    fn a_laser_cuts_the_same_line_with_its_own_power_and_passes() {
+        let program = generate(&artwork(), &laser_job(5.0, 2)).unwrap();
+        let b = program.bounds;
+        assert_eq!(
+            [b.min_x, b.min_y, b.max_x, b.max_y].map(|v| (v * 1000.0).round() / 1000.0),
+            [45.0, 55.0, 95.0, 95.0]
+        );
+        // Two laps of a 50 x 40 rectangle, at 80% of full power, with no Z moves.
+        assert!(
+            (program.cut_mm - 2.0 * 180.0).abs() < 0.01,
+            "cut {}",
+            program.cut_mm
+        );
+        assert!(program.text.contains("S800 F800"));
+        assert!(!program.text.contains('Z'));
+        assert!(generate(&artwork(), &laser_job(-20.0, 1))
+            .unwrap_err()
+            .contains("nothing is left"));
+    }
+
+    #[test]
+    fn a_laser_engraves_first_and_cuts_out_last_in_one_job() {
+        let mut job = laser_job(3.0, 1);
+        job.operations.insert(
+            0,
+            Operation {
+                color: None,
+                kind: OperationKind::LaserCut,
+                feed: 3000.0,
+                power: 20.0,
+                passes: 1,
+            },
+        );
+        let drawn = Artwork::from_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="30mm" viewBox="0 0 40 30"><path d="M10 10H30" stroke="#000" fill="none"/></svg>"##,
+            0.05,
+        )
+        .unwrap();
+        let program = generate(&drawn, &job).unwrap();
+        assert_eq!(program.operation_starts.len(), 2);
+        let engrave = program.text.find("S200 F3000").unwrap();
+        let cut = program.text.find("S800 F800").unwrap();
+        assert!(engrave < cut);
+        // One program, with the laser switched off only once, at the end.
+        assert_eq!(program.text.matches("M5").count(), 1);
+        // A router cannot run it.
+        job.machine.kind = MachineKind::Cnc;
+        assert!(generate(&drawn, &job).is_err());
     }
 
     #[test]

@@ -45,6 +45,6 @@ export const MACHINE_PRESETS: MachinePreset[] = [
     startGcode: "M14S1\nM15S1\nM16",
     endGcode: "M6",
     exportOnly: true,
-    note: "Export only. Untested on the machine. Kerf does not set the focus height, so focus the laser first. The Y direction is inferred: check it with a small, low-power, asymmetric test and keep the lid closed.",
+    note: "Export only. Untested on the machine. Kerf's files do not move the laser up or down, so run the machine's own auto-focus on the material first; it also measures the material's thickness, which is the number to enter here for cut-outs and boxes. The Y direction is inferred: check it with a small, low-power, asymmetric test and keep the lid closed.",
   },
 ];

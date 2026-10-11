@@ -78,6 +78,18 @@ export function defaultCutout(thickness: number): OperationKind {
   };
 }
 
+/**
+ * A laser's cut around the artwork, to free the piece. Whether it gets
+ * through depends on the laser and the material, so the power and speed are
+ * only somewhere to start from.
+ */
+export const DEFAULT_LASER_CUTOUT = {
+  kind: { type: "laserCutout", offset: 3, outline: "rectangle", cornerRadius: 0 } as OperationKind,
+  power: 100,
+  feed: 300,
+  passes: 1,
+};
+
 let nextOperationId = 1;
 
 /** Simple mode sets everything from a few choices; advanced shows every setting. */
@@ -612,7 +624,7 @@ export const useProject = create<ProjectState>((set, get) => {
       const interval = { draft: 0.2, standard: 0.15, fine: 0.1 }[quality];
       // Speed and power depend on the laser and the material, which the app
       // does not know, so whatever is already set is kept.
-      const current = s.operations.find((op) => op.kind.type.startsWith("laser"));
+      const current = s.operations.find((op) => op.kind.type.startsWith("laser") && op.kind.type !== "laserCutout");
       const kind: OperationKind =
         goal === "picture"
           ? { type: "laserImage", interval, dither: true }
@@ -627,6 +639,12 @@ export const useProject = create<ProjectState>((set, get) => {
         power: current?.power ?? 50,
         passes: current?.passes ?? 1,
       });
+      if (cutOut) {
+        // A laser needs no change of tool, so the cut runs straight after the
+        // engraving, in the same job. A cut already set up keeps its settings.
+        const earlier = s.operations.find((op) => op.kind.type === "laserCutout");
+        operations.push({ ...blank, ...DEFAULT_LASER_CUTOUT, ...earlier, id: nextOperationId++ });
+      }
     } else {
       const { tools } = useToolbox.getState();
       const rect = artworkRect(s);
@@ -1331,6 +1349,8 @@ export const useProject = create<ProjectState>((set, get) => {
               ? DEFAULT_RELIEF
               : type === "cncCutout"
                 ? defaultCutout(s.thickness)
+              : type === "laserCutout"
+                ? DEFAULT_LASER_CUTOUT.kind
               : type === "cncProfile"
                 ? defaultOperation("cnc").kind
                 : type === "laserImage"
@@ -1384,10 +1404,12 @@ export const useProject = create<ProjectState>((set, get) => {
       set((s) => ({
         operations: [
           ...s.operations,
-          equip(
-            { id: nextOperationId++, color: null, kind: defaultCutout(s.thickness), feed: 600, power: 0, passes: 1 },
-            s,
-          ),
+          s.machineKind === "laser"
+            ? { id: nextOperationId++, color: null, ...DEFAULT_LASER_CUTOUT }
+            : equip(
+                { id: nextOperationId++, color: null, kind: defaultCutout(s.thickness), feed: 600, power: 0, passes: 1 },
+                s,
+              ),
         ],
         ...staleGcode(),
       })),

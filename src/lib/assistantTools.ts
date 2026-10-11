@@ -44,7 +44,7 @@ export function toolActivity(name: string): string {
   }
 }
 
-const OPERATION_TYPES = ["laserImage", "laserFill", "laserCut", "cncProfile", "cncRelief", "cncCutout"] as const;
+const OPERATION_TYPES = ["laserImage", "laserFill", "laserCut", "laserCutout", "cncProfile", "cncRelief", "cncCutout"] as const;
 
 const number = (description: string) => ({ type: "number", description });
 
@@ -128,7 +128,7 @@ export const TOOLS: ToolSpec[] = [
         safeHeight: number("mm above the material."),
         stepover: number("Gap between rows of a relief, mm."),
         raisedAreas: { type: "string", enum: ["light", "dark"], description: "Relief: which parts of the picture stand proud." },
-        offset: number("Cutout: distance of the cut line outside the artwork, mm; negative is inside."),
+        offset: number("Cutout (router or laser): distance of the cut line outside the artwork, mm; negative is inside."),
         cutSide: { type: "string", enum: ["outside", "on", "inside"] },
         shape: { type: "string", enum: ["rectangle", "ellipse"] },
         cornerRadius: number("Cutout rectangle corner radius, mm."),
@@ -551,7 +551,7 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     if (type.startsWith("laser") !== (s.machineKind === "laser")) {
       throw new ToolError(`A ${s.machineKind === "laser" ? "laser" : "router"} cannot run a ${type} operation.`);
     }
-    if (type === "cncCutout") s.addCutout();
+    if (type === "cncCutout" || type === "laserCutout") s.addCutout();
     else {
       s.addOperation();
       const added = useProject.getState().operations.at(-1)!;
@@ -836,7 +836,7 @@ Speed is the opposite trade: a larger stepover or line interval, a larger bit, l
 
 Clean signs and logos: on a laser, fill the traced shapes; on a router, follow the traced paths, or carve a relief from brightness with some blur for a smooth, embossed look.
 
-To free the finished piece on a router, add a cutout last: outside the line, depth equal to the material's thickness, with tabs so the piece cannot come loose. Operations that use different bits cannot run as one job, because the bit must be changed and the height set again in between; include one at a time and tell the person the order to run them in.
+To free the finished piece on a laser, add a laserCutout last: a line around the artwork cut right through, in the same job as the engraving, since a laser has no bit to change. Its power, speed and passes are separate from the engraving's, and what gets through depends on their laser and material, so say they must test it; several faster passes often cut cleaner than one slow one. To free the finished piece on a router, add a cutout last: outside the line, depth equal to the material's thickness, with tabs so the piece cannot come loose. Operations that use different bits cannot run as one job, because the bit must be changed and the height set again in between; include one at a time and tell the person the order to run them in.
 
 Before you finish, check that the artwork fits on the material, that no depth exceeds the bit's cutting length, and that a relief does not go through the material.
 

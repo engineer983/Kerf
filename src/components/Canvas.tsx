@@ -415,7 +415,7 @@ export function Canvas() {
           {/* The line each cutout follows, before any allowance for the bit's width. */}
           {placed &&
             operations.map((o) => {
-              if (o.kind.type !== "cncCutout" || o.enabled === false) return null;
+              if ((o.kind.type !== "cncCutout" && o.kind.type !== "laserCutout") || o.enabled === false) return null;
               const { offset: margin, outline, cornerRadius } = o.kind;
               const [w, h] = [placed.width + margin * 2, placed.height + margin * 2];
               if (w <= 0 || h <= 0) return null;

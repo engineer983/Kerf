@@ -31,6 +31,8 @@ export function SimpleSetup() {
 
   const goal = simple.goal && goalsFor(machineKind).includes(simple.goal) ? simple.goal : defaultGoal(machineKind, photo);
   const [main, cut] = operations;
+  // On a laser, the cut around the piece has its own power and speed to set.
+  const laserCut = cut?.kind.type === "laserCutout" ? { ...cut, kind: cut.kind } : null;
   const bitName = (toolId?: string | null) => tools.find((t) => t.id === toolId)?.name;
   // The carving and the cut-out are separate runs when they need different bits.
   const twoParts = Boolean(cut && main && main.toolId !== cut.toolId);
@@ -106,13 +108,66 @@ export function SimpleSetup() {
           </>
         )}
 
-        {machineKind === "cnc" && (
+        {machineKind === "cnc" ? (
           <Checkbox
             label="Cut the piece out when done"
             hint={{ text: "Adds a cut around the artwork, right through the material, leaving small tabs so the piece stays put. Put scrap board underneath.", demo: "tabs" }}
             checked={simple.cutOut}
             onChange={(cutOut) => setSimple({ cutOut })}
           />
+        ) : (
+          <>
+            <Checkbox
+              label="Cut the piece out when done"
+              hint={{ text: "Adds a cut around the artwork, right through the material, to free the piece. It runs in the same job, straight after the engraving." }}
+              checked={simple.cutOut}
+              onChange={(cutOut) => setSimple({ cutOut })}
+            />
+            {laserCut && (
+              <>
+                <NumberField
+                  label="Cut power"
+                  unit="%"
+                  min={0}
+                  max={100}
+                  value={laserCut.power}
+                  hint={{ text: "How strongly the laser fires for the cut around the piece. Cutting through usually takes full power." }}
+                  onChange={(power) => updateOperation(laserCut.id, { power })}
+                />
+                <NumberField
+                  label="Cut speed"
+                  unit="mm/min"
+                  min={1}
+                  max={100000}
+                  value={laserCut.feed}
+                  hint={{ text: "How fast the laser moves for the cut around the piece. Slower cuts deeper, and chars more." }}
+                  onChange={(feed) => updateOperation(laserCut.id, { feed })}
+                />
+                <NumberField
+                  label="Cut passes"
+                  step={1}
+                  min={1}
+                  max={100}
+                  value={laserCut.passes}
+                  hint={{ text: "How many times the laser goes round the cut. Several faster passes often get through more cleanly than one slow one." }}
+                  onChange={(passes) => updateOperation(laserCut.id, { passes: Math.round(passes) })}
+                />
+                <NumberField
+                  label="Gap around the artwork"
+                  unit="mm"
+                  min={-1000}
+                  max={1000}
+                  value={laserCut.kind.offset}
+                  hint={{ text: "How far outside the artwork the cut runs. A negative number cuts inside its edge.", demo: "offset" }}
+                  onChange={(offset) => updateOperation(laserCut.id, { kind: { ...laserCut.kind, offset } })}
+                />
+                <p className="text-muted">
+                  The cut's power and speed depend on your laser and the material's thickness. Test on
+                  an offcut until it just falls free.
+                </p>
+              </>
+            )}
+          </>
         )}
       </Section>
 
