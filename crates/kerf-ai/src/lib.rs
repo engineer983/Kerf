@@ -141,18 +141,67 @@ pub fn list_models(endpoint: &Endpoint, key: Option<&str>) -> Result<Vec<ModelIn
         Protocol::OpenAi => (endpoint.url("models"), openai::headers(key)),
     };
     let reply = http::get(&url, &headers)?;
-    let mut models: Vec<ModelInfo> = reply["data"]
+    let mut models = parse_models(&reply)?;
+    if endpoint.protocol == Protocol::OpenAi {
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    Ok(models)
+}
+
+fn parse_models(reply: &Value) -> Result<Vec<ModelInfo>, String> {
+    Ok(reply["data"]
         .as_array()
         .ok_or("The provider's list of models was not in the expected form.")?
         .iter()
         .filter_map(|model| {
             let id = model["id"].as_str()?.to_owned();
-            let name = model["display_name"].as_str().unwrap_or(&id).to_owned();
+            // Where a provider says what each model accepts, as OpenRouter
+            // does, those that cannot call tools are left out: the assistant
+            // could talk through them but not change the project.
+            if let Some(accepted) = model["supported_parameters"].as_array() {
+                if !accepted.iter().any(|p| p == "tools") {
+                    return None;
+                }
+            }
+            let name = model["display_name"]
+                .as_str()
+                .or(model["name"].as_str())
+                .unwrap_or(&id)
+                .to_owned();
             Some(ModelInfo { id, name })
         })
-        .collect();
-    if endpoint.protocol == Protocol::OpenAi {
-        models.sort_by(|a, b| a.id.cmp(&b.id));
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn model_lists_are_read_from_each_providers_form() {
+        let anthropic =
+            json!({"data": [{"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5"}]});
+        assert_eq!(
+            parse_models(&anthropic).unwrap(),
+            [ModelInfo {
+                id: "claude-opus-5-5".into(),
+                name: "Claude Opus 5.5".into()
+            }]
+        );
+        let ollama = json!({"data": [{"id": "qwen2.5-coder:7b", "object": "model"}]});
+        assert_eq!(parse_models(&ollama).unwrap()[0].name, "qwen2.5-coder:7b");
+        assert!(parse_models(&json!({"error": "no"})).is_err());
     }
-    Ok(models)
+
+    #[test]
+    fn models_that_cannot_use_tools_are_left_out_where_that_is_known() {
+        let openrouter = json!({"data": [
+            {"id": "anthropic/claude-sonnet-5.5", "name": "Anthropic: Claude Sonnet 5.5", "supported_parameters": ["tools", "temperature"]},
+            {"id": "some/image-model", "name": "Image only", "supported_parameters": ["temperature"]}
+        ]});
+        let models = parse_models(&openrouter).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "Anthropic: Claude Sonnet 5.5");
+    }
 }

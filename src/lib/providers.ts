@@ -37,6 +37,16 @@ export const PROVIDERS: ProviderPreset[] = [
     note: "Hosted. Needs an API key from platform.openai.com; usage is billed to your account. Load the model list and pick one.",
   },
   {
+    id: "openrouter",
+    label: "OpenRouter",
+    protocol: "openAi",
+    baseUrl: "https://openrouter.ai/api/v1",
+    addressEditable: false,
+    defaultModel: "",
+    needsKey: true,
+    note: "Hosted. One key from openrouter.ai gives access to models from many companies; usage is billed to your OpenRouter account. Load the model list and pick one. Only models that can use tools are listed, since the assistant needs them to change your project.",
+  },
+  {
     id: "ollama",
     label: "Ollama (on this computer)",
     protocol: "openAi",
@@ -54,7 +64,7 @@ export const PROVIDERS: ProviderPreset[] = [
     addressEditable: true,
     defaultModel: "",
     needsKey: false,
-    note: "Any server that speaks the OpenAI chat API, such as LM Studio or OpenRouter. Enter its address, and a key if it needs one.",
+    note: "Any server that speaks the OpenAI chat API, such as LM Studio. Enter its address, and a key if it needs one.",
   },
 ];
 

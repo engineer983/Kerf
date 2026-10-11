@@ -1,8 +1,7 @@
 import { isTauri } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { Checkbox, NumberField, Section, Segmented, Slider } from "./controls";
-
-const percent = (v: number) => `${Math.round(v * 100)}%`;
+import { OptimizeButton } from "./OptimizeButton";
 
 export function TracePanel() {
   const image = useProject((s) => s.image);
@@ -26,6 +25,7 @@ export function TracePanel() {
 
   return (
     <div className="flex flex-col gap-5">
+      <OptimizeButton />
       <Segmented
         label="Trace mode"
         value={settings.mode}
@@ -61,7 +61,7 @@ export function TracePanel() {
             max={1}
             step={0.01}
             value={pre.brightness}
-            format={percent}
+            percent
             onChange={(brightness) => updatePreprocess({ brightness })}
           />
           <Slider
@@ -70,7 +70,7 @@ export function TracePanel() {
             max={1}
             step={0.01}
             value={pre.contrast}
-            format={percent}
+            percent
             onChange={(contrast) => updatePreprocess({ contrast })}
           />
           <Slider
@@ -79,7 +79,7 @@ export function TracePanel() {
             max={5}
             step={0.1}
             value={pre.blurSigma}
-            format={(v) => `${v.toFixed(1)} px`}
+            unit="px"
             onChange={(blurSigma) => updatePreprocess({ blurSigma })}
           />
           <Checkbox
@@ -113,7 +113,7 @@ export function TracePanel() {
           min={0}
           max={16}
           value={settings.speckle}
-          format={(v) => `${v} px`}
+          unit="px"
           onChange={(speckle) => updateTrace({ speckle })}
         />
         <Checkbox
@@ -127,7 +127,7 @@ export function TracePanel() {
           max={180}
           value={settings.cornerThreshold}
           disabled={!settings.curves}
-          format={(v) => `${v}°`}
+          unit="°"
           onChange={(cornerThreshold) => updateTrace({ cornerThreshold })}
         />
       </Section>

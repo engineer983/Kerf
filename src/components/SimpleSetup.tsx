@@ -1,6 +1,7 @@
 import { defaultGoal, goalsFor, useProject, type Goal, type Quality } from "../state/project";
 import { useToolbox } from "../state/tools";
 import { Checkbox, NumberField, Section, Segmented } from "./controls";
+import { OptimizeButton } from "./OptimizeButton";
 
 const GOALS: Record<Goal, { label: string; about: string }> = {
   picture: { label: "Engrave the picture", about: "Burns the picture with its shading, like a photograph." },
@@ -49,6 +50,7 @@ export function SimpleSetup() {
             <span className="text-muted">{GOALS[id].about}</span>
           </button>
         ))}
+        <OptimizeButton />
       </Section>
 
       <Section title="How fine?">

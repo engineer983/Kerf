@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import { estimateDepth } from "../lib/depth";
+import { measureTones, optimise, PURPOSE_LABELS, type Purpose } from "../lib/optimize";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { cutSettings } from "../lib/feeds";
@@ -294,7 +295,19 @@ interface ProjectState {
   exportedTo: string | null;
   operations: OperationItem[];
   gcode: GcodeState;
+  /**
+   * Moves to a step. Going back from a generated job to the picture clears
+   * the job, so that is asked about first unless the person has said not to.
+   */
   setStep: (step: Step) => void;
+  /** The earlier step waiting on the person's answer, while they are asked. */
+  pendingStep: Step | null;
+  confirmStep: (dontWarnAgain: boolean) => void;
+  cancelStep: () => void;
+  /** What the last optimisation did, for showing beside the button. */
+  optimizeNote: string | null;
+  /** Tunes the picture's adjustments to what is being made; returns what it did. */
+  optimizePicture: () => Promise<string>;
   /**
    * Starts a project from a picture. `drawnHeightMap` says the picture was
    * drawn so that its brightness is its height, which a carving should then
@@ -472,6 +485,18 @@ function stepHistory(from: Snapshot[], to: Snapshot[]) {
   useProject.setState({ canUndo: past.length > 0, canRedo: future.length > 0 });
 }
 
+/** The order the steps are worked through. */
+export const STEP_ORDER: Step[] = ["device", "import", "trace", "operations", "machine"];
+const WARN_ON_BACK_KEY = "kerf.warnOnBack";
+
+function warnsOnBack(): boolean {
+  try {
+    return localStorage.getItem(WARN_ON_BACK_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
 const DEVICE_KEY = "kerf.device";
 const DEVICE_KEYS = [
   "machinePreset",
@@ -641,12 +666,21 @@ export const useProject = create<ProjectState>((set, get) => {
     return { gcode: EMPTY_GCODE };
   }
 
-  // A machine chosen in an earlier session is used again; otherwise the app
-  // opens on the Device step so that one is chosen first.
+  // A machine chosen in an earlier session is offered again. The app always
+  // opens on the first step, so the work runs in order from there.
   const remembered = storedDevice();
 
+  /** What the picture is being used for, judged from the job as it stands. */
+  function purpose(): Purpose {
+    const s = get();
+    const included = s.operations.filter((op) => op.enabled !== false);
+    if (included.some((op) => op.kind.type === "cncRelief")) return "carving";
+    if (included.some((op) => op.kind.type === "laserImage")) return "engraving";
+    return "shapes";
+  }
+
   return {
-    step: remembered ? "import" : "device",
+    step: "device",
     image: null,
     bed: { width: 400, height: 400 },
     machineKind: "laser",
@@ -696,7 +730,46 @@ export const useProject = create<ProjectState>((set, get) => {
     operations: [defaultOperation(remembered?.machineKind ?? "laser")],
     gcode: EMPTY_GCODE,
 
-    setStep: (step) => set({ step }),
+    setStep: (step) => {
+      const s = get();
+      const made = STEP_ORDER.indexOf("operations");
+      const goingBack = STEP_ORDER.indexOf(s.step) >= made && STEP_ORDER.indexOf(step) < made;
+      if (!goingBack || !s.gcode.program) {
+        set({ step });
+      } else if (warnsOnBack()) {
+        set({ pendingStep: step });
+      } else {
+        // The canvas goes back to showing the picture, not the old job.
+        set({ step, ...staleGcode() });
+      }
+    },
+    pendingStep: null,
+    confirmStep: (dontWarnAgain) => {
+      const step = get().pendingStep;
+      if (!step) return;
+      if (dontWarnAgain) {
+        try {
+          localStorage.setItem(WARN_ON_BACK_KEY, "off");
+        } catch {
+          // Not remembered; they will be asked again next time.
+        }
+      }
+      set({ step, pendingStep: null, ...staleGcode() });
+    },
+    cancelStep: () => set({ pendingStep: null }),
+
+    optimizeNote: null,
+    optimizePicture: async () => {
+      const s = get();
+      if (!s.image) throw new Error("There is no picture loaded yet.");
+      const result = optimise(purpose(), await measureTones(s.image.url), s.trace.settings);
+      const note = result.changes.length
+        ? `Tuned for ${PURPOSE_LABELS[result.purpose]}: ${result.changes.join(", ")}.`
+        : `Already tuned for ${PURPOSE_LABELS[result.purpose]}; nothing needed changing.`;
+      if (result.changes.length) get().updateTrace(result.settings);
+      set({ optimizeNote: note });
+      return note;
+    },
 
     drawnHeightMap: false,
 
@@ -706,7 +779,9 @@ export const useProject = create<ProjectState>((set, get) => {
       get().clearImage();
       set((s) => ({
         projectId: null,
-        step: "import",
+        step: "device",
+        pendingStep: null,
+        optimizeNote: null,
         trace: EMPTY_TRACE,
         simple: { goal: null, quality: "standard", depth: 4, cutOut: false, part: "main" },
         operations: [fresh(s.machineKind)],
@@ -769,6 +844,7 @@ export const useProject = create<ProjectState>((set, get) => {
           operations: [fresh(machineKind, { ...get(), ...placed })],
           error: null,
           exportedTo: null,
+          optimizeNote: null,
           trace: { ...EMPTY_TRACE, settings: trace.settings },
           // Simple mode needs no tracing decisions, so it goes straight to the job.
           step: get().mode === "simple" ? "operations" : "trace",

@@ -73,6 +73,12 @@ export const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: "optimize_picture",
+    description:
+      "Tune the picture's adjustments to what the job makes from it, by measuring how light and dark the picture is. For shaded engraving and for carving it sets brightness and contrast so the tones fill the whole range, and smooths a carving slightly; for traced shapes it sets an automatic threshold, a little smoothing, speck removal, and which of light or dark is traced. Set the operations up first, since they decide what it tunes for. Returns what it changed. Use it as a starting point when a picture looks flat, faint or noisy, then adjust with update_trace if the person wants something different.",
+    schema: { type: "object", properties: {} },
+  },
+  {
     name: "set_material",
     description: "Change the material and the size of the piece. Changing the material recalculates router speeds.",
     schema: {
@@ -397,6 +403,11 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       ...(curves !== undefined && { curves }),
     });
     return { content: "Trace settings updated.", summary: "Changed the trace settings" };
+  },
+
+  optimize_picture: async () => {
+    const note = await useProject.getState().optimizePicture();
+    return { content: note, summary: "Optimised the picture" };
   },
 
   set_material: (input) => {

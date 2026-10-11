@@ -36,6 +36,8 @@ const BY_TEXT: Record<string, string> = {
   "Export G-code…": "Save the generated program as a file to send to the machine",
   "Open toolbox": "See and edit your router bits",
   Continue: "Go on to importing a picture",
+  "Stay here": "Keep the generated job and stay on this step",
+  "Go back": "Clear the generated job and go back",
 
   Simple: "Choose what you want made and let the settings be picked for you",
   Advanced: "Show every setting",

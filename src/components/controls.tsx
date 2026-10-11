@@ -23,19 +23,75 @@ interface SliderProps extends Hinted {
   max: number;
   step?: number;
   disabled?: boolean;
-  format?: (value: number) => string;
+  /** Shown after the number, such as "px". */
+  unit?: string;
+  /** The value is a fraction, shown and typed as a percentage. */
+  percent?: boolean;
   onChange: (value: number) => void;
 }
 
-export function Slider({ label, value, min, max, step = 1, disabled, format, hint, onChange }: SliderProps) {
+const decimalsOf = (step: number) => (String(step).split(".")[1] ?? "").length;
+/** Whether a change came from the field's arrows rather than from typing. */
+const fromArrows = (event: { nativeEvent: Event }) => !(event.nativeEvent as InputEvent).inputType;
+const numberBox =
+  "rounded-md border border-line bg-raised py-0.5 pr-0.5 pl-1.5 text-right font-mono text-[12px] select-text disabled:opacity-60";
+
+/**
+ * A slider whose value can also be typed, or nudged with the arrows beside the
+ * number (or the up and down keys) for finer steps than dragging allows.
+ */
+export function Slider({ label, value, min, max, step = 1, disabled, unit, percent, hint, onChange }: SliderProps) {
   const id = useId();
+  const scale = percent ? 100 : 1;
+  // Percentages are nudged a point at a time, however coarse the slider.
+  const shownStep = percent ? 1 : step;
+  const decimals = decimalsOf(shownStep);
+  const shown = (v: number) => String(Number((v * scale).toFixed(decimals)));
+  const [text, setText] = useState(shown(value));
+  // The box follows the value, except while what is typed already means it.
+  useEffect(() => {
+    setText((typed) => (typed.trim() !== "" && Number(typed) === Number(shown(value)) ? typed : shown(value)));
+  }, [value]);
+
+  /** Uses what is in the box, if it is a number; out-of-range numbers wait until typing ends. */
+  function apply(typed: string, finished: boolean) {
+    const parsed = Number(typed);
+    if (typed.trim() === "" || !Number.isFinite(parsed)) {
+      if (finished) setText(shown(value));
+      return;
+    }
+    const wanted = parsed / scale;
+    const within = Math.min(max, Math.max(min, wanted));
+    if (within !== wanted && !finished) return;
+    const next = Number(within.toFixed(6));
+    if (next !== value) onChange(next);
+    if (finished) setText(shown(next));
+  }
+
   return (
     <div className={disabled ? "opacity-40" : undefined}>
-      <div className="mb-1 flex justify-between">
+      <div className="mb-1 flex items-center justify-between gap-2">
         <label htmlFor={id}>
           <Hint hint={hint ?? hintFor(label)}>{label}</Hint>
         </label>
-        <span className="font-mono text-[12px] text-muted">{format ? format(value) : value}</span>
+        <span className="flex items-center gap-1 text-muted">
+          <input
+            type="number"
+            aria-label={`${label} value`}
+            title="Type a value, or use the arrows for small steps"
+            className={`${numberBox} w-[4.5rem]`}
+            step={shownStep}
+            value={text}
+            disabled={disabled}
+            onChange={(e) => {
+              setText(e.target.value);
+              apply(e.target.value, fromArrows(e));
+            }}
+            onBlur={() => apply(text, true)}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+          />
+          {(unit || percent) && <span className="font-mono text-[12px]">{percent ? "%" : unit}</span>}
+        </span>
       </div>
       <input
         id={id}
@@ -135,20 +191,28 @@ interface NumberFieldProps extends Hinted {
   min: number;
   max: number;
   unit?: string;
+  /** How far one press of an arrow moves the value. Chosen to suit the unit if not given. */
+  step?: number;
   onChange: (value: number) => void;
 }
 
-/** Commits on blur or Enter, so half-typed numbers never reach the project. */
-export function NumberField({ label, value, min, max, unit, hint, onChange }: NumberFieldProps) {
+const STEP_FOR_UNIT: Record<string, number> = { mm: 0.1, "mm/min": 10, rpm: 100, "%": 1, "°": 0.5 };
+
+/**
+ * Typed numbers commit on blur or Enter, so half-typed ones never reach the
+ * project. The arrows beside the number, and the up and down keys, nudge it
+ * and take effect at once.
+ */
+export function NumberField({ label, value, min, max, unit, step, hint, onChange }: NumberFieldProps) {
   const id = useId();
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
 
-  function commit() {
-    const parsed = Number(text);
-    if (text.trim() !== "" && Number.isFinite(parsed)) {
-      const clamped = Math.min(max, Math.max(min, parsed));
-      onChange(clamped);
+  function commit(typed: string) {
+    const parsed = Number(typed);
+    if (typed.trim() !== "" && Number.isFinite(parsed)) {
+      const clamped = Number(Math.min(max, Math.max(min, parsed)).toFixed(6));
+      if (clamped !== value) onChange(clamped);
       setText(String(clamped));
     } else {
       setText(String(value));
@@ -163,11 +227,15 @@ export function NumberField({ label, value, min, max, unit, hint, onChange }: Nu
       <div className="flex items-center gap-1.5">
         <input
           id={id}
-          inputMode="decimal"
-          className="w-20 rounded-md border border-line bg-raised px-2 py-1 text-right font-mono text-[12px] select-text"
+          type="number"
+          className={`${numberBox} w-[5.5rem] py-1`}
+          step={step ?? STEP_FOR_UNIT[unit ?? ""] ?? 1}
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          onBlur={commit}
+          onChange={(e) => {
+            setText(e.target.value);
+            if (fromArrows(e)) commit(e.target.value);
+          }}
+          onBlur={() => commit(text)}
           onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
         />
         {unit && <span className="text-muted">{unit}</span>}

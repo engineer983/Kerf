@@ -214,6 +214,15 @@ export const useAssistant = create<AssistantState>((set, get) => {
         });
         return;
       }
+      const isOpenRouterKey = key.trim().startsWith("sk-or-");
+      if (isOpenRouterKey !== (providerId === "openrouter") && (isOpenRouterKey || !isAnthropicKey)) {
+        set({
+          settingsError: isOpenRouterKey
+            ? "That looks like an OpenRouter key. It was not saved. Choose OpenRouter as the model provider, then paste it there."
+            : "That does not look like an OpenRouter key, which starts with sk-or-. It was not saved. Check the key, or choose the provider it belongs to.",
+        });
+        return;
+      }
       if (!isAnthropicKey && providerId === "anthropic") {
         set({
           settingsError:

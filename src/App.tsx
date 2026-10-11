@@ -4,6 +4,7 @@ import { Rail } from "./components/Rail";
 import { Canvas } from "./components/Canvas";
 import { Inspector } from "./components/Inspector";
 import { ChatDrawer } from "./components/ChatDrawer";
+import { ConfirmBack } from "./components/ConfirmBack";
 import { Toolbox } from "./components/Toolbox";
 import { pastePicture } from "./lib/pictures";
 import { useUi } from "./state/ui";
@@ -30,6 +31,7 @@ export function App() {
         {chatOpen && <ChatDrawer />}
       </div>
       <Toolbox />
+      <ConfirmBack />
     </div>
   );
 }

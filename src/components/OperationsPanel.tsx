@@ -282,7 +282,7 @@ function HeightSource() {
                 max={1}
                 step={0.05}
                 value={detail}
-                format={(v) => `${Math.round(v * 100)}%`}
+                percent
                 onChange={setDetail}
               />
               <Slider
@@ -291,7 +291,7 @@ function HeightSource() {
                 max={0.9}
                 step={0.05}
                 value={depthFloor}
-                format={(v) => `${Math.round(v * 100)}%`}
+                percent
                 onChange={setDepthFloor}
               />
             </>
