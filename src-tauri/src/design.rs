@@ -203,6 +203,7 @@ mod tests {
             italic: false,
             align: Align::Center,
             bend: 0.0,
+            around: None,
         };
         let one = text_sheet(&spec("HELLO", 20.0)).unwrap();
         // Capital letters stand about seven tenths of the size.

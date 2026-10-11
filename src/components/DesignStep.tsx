@@ -3,7 +3,7 @@ import { Image as ImageIcon, PenLine, Trash2, Type } from "lucide-react";
 import { isFixed } from "../lib/design";
 import { ACCEPTED_FILE_TYPES } from "../lib/image";
 import { inkscapeFound, isTauri } from "../lib/ipc";
-import { artworkRect, everythingRect, stockRect, useProject } from "../state/project";
+import { artworkRect, everythingRect, itemRect, stockRect, useProject } from "../state/project";
 import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Section } from "./controls";
 import { Gallery } from "./Gallery";
@@ -216,6 +216,27 @@ function Selected({ onReplace }: { onReplace: () => void }) {
   const name = item ? item.name : (s.image?.name.replace(/\.[^.]+$/, "") ?? "");
   const picture = !item && !s.design;
 
+  // A box to fit the selected thing into, starting as the material less a margin.
+  const [box, setBox] = useState(() => ({ width: Math.max(10, s.stockWidth - 20), height: Math.max(10, s.stockLength - 20) }));
+  const [stretch, setStretch] = useState(false);
+  /** Sizes the selected thing to a box: as large as fits inside it, or stretched to fill it exactly. */
+  function fit(target: { width: number; height: number }, onMaterial: boolean) {
+    const rect = item ? itemRect(item, s) : artworkRect(s);
+    if (!rect) return;
+    const scale = Math.min(target.width / rect.width, target.height / rect.height);
+    const [width, height] = stretch ? [target.width, target.height] : [rect.width * scale, rect.height * scale];
+    // It stays centred where it was, or goes to the middle of the material.
+    const [cx, cy] = onMaterial ? [stock.x + stock.width / 2, stock.y + stock.height / 2] : [rect.x + rect.width / 2, rect.y + rect.height / 2];
+    const next = { x: cx - width / 2, y: cy - height / 2, width, height };
+    if (item) {
+      if (stretch) s.updateItem(item.id, { aspectLocked: false });
+      s.setItemRect(item.id, next);
+    } else {
+      if (stretch) s.setAspectLocked(false);
+      s.setArtworkRect(next);
+    }
+  }
+
   return (
     <Section title={`Selected: ${name}`}>
       {fixed ? (
@@ -229,6 +250,47 @@ function Selected({ onReplace }: { onReplace: () => void }) {
             checked={locked}
             onChange={(on) => (item ? s.updateItem(item.id, { aspectLocked: on }) : s.setAspectLocked(on))}
           />
+          <div className="flex flex-col gap-3 rounded-lg border border-line p-3">
+            <span className="text-[11px] font-semibold tracking-wider text-muted uppercase">Fit into a box</span>
+            <NumberField
+              label="Box width"
+              unit="mm"
+              step={1}
+              min={1}
+              max={5000}
+              value={box.width}
+              hint={{ text: "The width of the space to fit the selected thing into." }}
+              onChange={(width) => setBox((b) => ({ ...b, width }))}
+            />
+            <NumberField
+              label="Box height"
+              unit="mm"
+              step={1}
+              min={1}
+              max={5000}
+              value={box.height}
+              hint={{ text: "The height of the space to fit the selected thing into." }}
+              onChange={(height) => setBox((b) => ({ ...b, height }))}
+            />
+            <Checkbox
+              label="Stretch to fill it exactly"
+              hint={{ text: "Off, it is made as large as fits inside the box, keeping its shape. On, it is stretched or squeezed to the box's exact width and height, which changes the shape of letters and pictures." }}
+              checked={stretch}
+              onChange={setStretch}
+            />
+            <div className="flex flex-wrap gap-2">
+              <button className={quiet} onClick={() => fit(box, false)} title="Size it to this box, keeping it centred where it is">
+                Fit to the box
+              </button>
+              <button
+                className={quiet}
+                onClick={() => fit({ width: Math.max(1, s.stockWidth - 20), height: Math.max(1, s.stockLength - 20) }, true)}
+                title="Size it to the material, less a 10 mm margin, and centre it there"
+              >
+                Fill the material
+              </button>
+            </div>
+          </div>
         </>
       )}
       <NumberField label="From left" unit="mm" min={-5000} max={5000} value={place.left} onChange={(left) => setPlace({ left })} />

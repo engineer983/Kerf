@@ -954,8 +954,34 @@ export const useProject = create<ProjectState>((set, get) => {
     return [...own, follow];
   }
 
-  /** Adds an item in the middle of the material, sized to fit it, and selects it. */
-  function place(name: string, sheet: ipc.Sheet, text?: ipc.TextSpec) {
+  /** Draws words, telling the backend how big the artwork is where they are to go round it. */
+  function drawText(input: ipc.TextSpec): Promise<ipc.TextMade> {
+    const { widthMm, heightMm } = get();
+    return ipc.makeText(input.around ? { ...input, around: { ...input.around, width: widthMm, height: heightMm } } : input);
+  }
+
+  /**
+   * Where a sheet goes, given where its top-left corner is to sit relative
+   * to the centre of the main artwork: its size as drawn, since it was drawn
+   * to fit round the artwork, and its place on the bed.
+   */
+  function aroundArtwork(sheet: ipc.Sheet, offset: [number, number]) {
+    const s = get();
+    const art = artworkRect(s)!;
+    const [x, y] = [art.x + art.width / 2 + offset[0], art.y + art.height / 2 + offset[1]];
+    return {
+      widthMm: tenth(sheet.widthMm),
+      heightMm: tenth(sheet.heightMm),
+      left: tenth(x),
+      front: tenth(s.origin === "backLeft" ? y : s.bed.height - y - sheet.heightMm),
+    };
+  }
+
+  /**
+   * Adds an item and selects it: in the middle of the material and sized to
+   * fit it, or with `offset` exactly where it was drawn to go round the artwork.
+   */
+  function place(name: string, sheet: ipc.Sheet, text?: ipc.TextSpec, offset?: [number, number] | null) {
     const [widthMm, heightMm] = fitOnMaterial(sheet.widthMm, sheet.heightMm, false);
     const item: Item = {
       id: nextItemId++,
@@ -967,6 +993,7 @@ export const useProject = create<ProjectState>((set, get) => {
       widthMm,
       heightMm,
       ...centred(widthMm, heightMm),
+      ...(offset && get().image ? aroundArtwork(sheet, offset) : {}),
       aspectLocked: true,
     };
     set((s) => {
@@ -1061,14 +1088,17 @@ export const useProject = create<ProjectState>((set, get) => {
     selected: null,
     select: (selected) => set({ selected }),
     addText: async (input) => {
-      const sheet = await ipc.makeText(input);
-      place(sheet.parts[0], sheet, input);
+      const { sheet, offset } = await drawText(input);
+      place(sheet.parts[0], sheet, input, offset);
     },
     changeText: async (id, input) => {
-      const sheet = await ipc.makeText(input);
+      const { sheet, offset } = await drawText(input);
       set((s) => ({
         items: s.items.map((item) => {
           if (item.id !== id) return item;
+          const drawn = { name: sheet.parts[0], text: input, body: sheetBody(sheet.svg), drawnWidth: sheet.widthMm, drawnHeight: sheet.heightMm };
+          // Words that go round the artwork are put back round it as it is now.
+          if (offset) return { ...item, ...drawn, ...aroundArtwork(sheet, offset) };
           // The words keep their place and their height; their width follows.
           const heightMm = item.heightMm;
           const widthMm = tenth((heightMm * sheet.widthMm) / sheet.heightMm);
@@ -1172,7 +1202,8 @@ export const useProject = create<ProjectState>((set, get) => {
 
     makeText: async (input) => {
       const s = get();
-      const sheet = await ipc.makeText(input);
+      // On their own, words have nothing to go round.
+      const { sheet } = await ipc.makeText({ ...input, around: null });
       // What was being worked on is kept, unless it is these words being changed.
       if (s.image && s.design?.kind !== "text") await s.saveProject();
       await startFrom({ kind: "text", input, sheets: [sheet], sheet: 0, madeFor: s.machineKind }, sheet.parts[0]);

@@ -270,6 +270,16 @@ export const TOOLS: ToolSpec[] = [
         italic: { type: "boolean" },
         align: { type: "string", enum: ["left", "center", "right"], description: "How lines of different lengths line up. Defaults to center." },
         curve: number("Degrees the words bend round a circle, -350 to 350. 0 is straight; above 0 arches over the top (to go above a picture), below 0 curves underneath (to go below one). 180 is half way round."),
+        around: {
+          type: "object",
+          description: "With addToDesign: set the words round the main artwork instead of straight or on a plain curve. They are drawn at the given size to fit round the artwork as it is now and placed exactly, so do not move or resize them afterwards. Fails if the words are too long to go round at that size.",
+          properties: {
+            shape: { type: "string", enum: ["circle", "oval", "frame"], description: "The line they follow: the circle through the artwork's corners, an oval that hugs it closer, or its own frame with rounded corners." },
+            side: { type: "string", enum: ["top", "bottom"], description: "Centred over the top, or under the bottom." },
+            gap: { type: "number", description: "Clear space between the artwork and the words, mm. Defaults to 5." },
+          },
+          required: ["shape", "side"],
+        },
         addToDesign: { type: "boolean", description: "True to add the words to the current design. False, the default, starts a new project from them." },
       },
       required: ["text"],
@@ -837,7 +847,16 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       italic: flag(input, "italic") ?? false,
       align: choice(input, "align", ["left", "center", "right"] as const) ?? "center",
       bend: num(input, "curve", -350, 350) ?? 0,
+      around: null as ipc.TextSpec["around"],
     };
+    if (typeof input.around === "object" && input.around !== null) {
+      const ring = input.around as Input;
+      const shape = choice(ring, "shape", ["circle", "oval", "frame"] as const);
+      const side = choice(ring, "side", ["top", "bottom"] as const);
+      if (!shape || !side) throw new ToolError("around needs a shape and a side.");
+      spec.around = { shape, side, gap: num(ring, "gap", -100, 500) ?? 5 };
+      spec.bend = 0;
+    }
     const project = useProject.getState();
     if (flag(input, "addToDesign")) {
       if (!project.image) throw new ToolError("There is nothing on the material to add to yet. Leave addToDesign out to start a project from the words.");
@@ -845,7 +864,9 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
       const items = useProject.getState().items;
       const added = items[items.length - 1];
       return {
-        content: `Added as item ${items.length}: ${added.widthMm} x ${added.heightMm} mm, in the middle of the material (${added.left} mm from the left, ${added.front} mm from the edge). Move or resize it with set_added_item so that it sits where it should and does not overlap anything it should not.`,
+        content: spec.around
+          ? `Added as item ${items.length}, set round the artwork: ${added.widthMm} x ${added.heightMm} mm, ${added.left} mm from the left and ${added.front} mm from the edge. It is already in place; check that everything still fits on the material.`
+          : `Added as item ${items.length}: ${added.widthMm} x ${added.heightMm} mm, in the middle of the material (${added.left} mm from the left, ${added.front} mm from the edge). Move or resize it with set_added_item so that it sits where it should and does not overlap anything it should not.`,
         summary: `Added the text "${added.name}"`,
       };
     }

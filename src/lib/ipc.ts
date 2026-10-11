@@ -476,6 +476,29 @@ export interface TextSpec {
    * arches over the top, below 0 curves under the bottom.
    */
   bend?: number;
+  /**
+   * Set the words round the main artwork instead: following a circle, an
+   * oval or the artwork's own frame, centred over its top or under its
+   * bottom. The artwork's size is filled in when the words are made.
+   */
+  around?: {
+    shape: "circle" | "oval" | "frame";
+    side: "top" | "bottom";
+    /** Clear space between the artwork and the words, in millimetres. */
+    gap: number;
+    width?: number;
+    height?: number;
+  } | null;
+}
+
+/** Words drawn as outlines. */
+export interface TextMade {
+  sheet: Sheet;
+  /**
+   * For words set round the artwork: where the sheet's top-left corner sits,
+   * in millimetres right of and below the artwork's centre.
+   */
+  offset: [number, number] | null;
 }
 
 /** Reads an SVG document as plain lines, cropped to what is drawn. */
@@ -498,6 +521,6 @@ export function listFonts(): Promise<string[]> {
   return invoke("list_fonts");
 }
 
-export function makeText(spec: TextSpec): Promise<Sheet> {
+export function makeText(spec: TextSpec): Promise<TextMade> {
   return invoke("make_text", { spec });
 }

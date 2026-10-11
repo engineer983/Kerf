@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import { DEFAULT_BOX, DEFAULT_LAYERS, DEFAULT_TEXT, insideOf, type BoxInput, type LayersInput } from "../lib/design";
+import { DEFAULT_BOX, DEFAULT_LAYERS, DEFAULT_TEXT, insideOf, ringPath, type BoxInput, type LayersInput } from "../lib/design";
 import { listFonts, type TextSpec } from "../lib/ipc";
 import { useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
@@ -265,6 +265,12 @@ function TextMaker() {
   );
   const change = (patch: Partial<TextSpec>) => setText((t) => ({ ...t, ...patch }));
   const bend = text.bend ?? 0;
+  // Words can go round the main artwork when they are added beside it.
+  const canGoRound = useProject((s) => s.image !== null) && target !== null;
+  const layout = text.around && canGoRound ? "around" : bend !== 0 ? "curve" : "straight";
+  const artworkWidth = useProject((s) => s.widthMm);
+  const artworkHeight = useProject((s) => s.heightMm);
+  const artworkSize = { width: artworkWidth, height: artworkHeight };
 
   // The fonts are this computer's own, so the list is asked for.
   useEffect(() => {
@@ -280,9 +286,11 @@ function TextMaker() {
   const changing = editing !== undefined || (target === null && design?.kind === "text");
   const make = () => {
     const project = useProject.getState();
-    if (adding) return project.addText(text);
-    if (editing) return project.changeText(editing.id, text);
-    return project.makeText(text);
+    // Whatever the layout is not, is left out, so a curve set earlier does not linger.
+    const spec = { ...text, around: layout === "around" ? text.around : null, bend: layout === "curve" ? bend : 0 };
+    if (adding) return project.addText(spec);
+    if (editing) return project.changeText(editing.id, spec);
+    return project.makeText(spec);
   };
 
   return (
@@ -325,17 +333,26 @@ function TextMaker() {
       />
       <Checkbox label="Bold" hint={{ text: "Uses the font's heavier weight, where it has one." }} checked={text.bold} onChange={(bold) => change({ bold })} />
       <Checkbox label="Italic" hint={{ text: "Uses the font's slanted style, where it has one." }} checked={text.italic} onChange={(italic) => change({ italic })} />
-      <Slider
-        label="Curve"
-        unit="°"
-        min={-350}
-        max={350}
-        step={5}
-        value={bend}
-        hint={{ text: "Bends the words round a circle. 0 is straight. To the right they arch over the top, to go above a picture; to the left they curve underneath, to go below one. 180 takes them half way round; 350 almost all the way. With several lines the circle is opened out until they all fit, so a tight curve bends them less than asked." }}
-        onChange={(value) => change({ bend: value })}
+      <Select
+        label="Layout"
+        hint={{ text: "How the words run: in straight lines, bent along a curve, or round the artwork that is already on the material." }}
+        value={layout}
+        options={[
+          { value: "straight" as const, label: "Straight" },
+          { value: "curve" as const, label: "On a curve" },
+          ...(canGoRound ? [{ value: "around" as const, label: "Round the artwork" }] : []),
+        ]}
+        onChange={(next) =>
+          change(
+            next === "straight"
+              ? { bend: 0, around: null }
+              : next === "curve"
+                ? { bend: bend || 120, around: null }
+                : { bend: 0, around: text.around ?? { shape: "circle", side: "top", gap: 5 } },
+          )
+        }
       />
-      {bend === 0 && (
+      {layout === "straight" && (
         <Select
           label="Line up"
           hint={{ text: "How lines of different lengths are lined up with each other." }}
@@ -348,7 +365,58 @@ function TextMaker() {
           onChange={(align) => change({ align })}
         />
       )}
-      <TextPreview text={text} />
+      {layout === "curve" && (
+        <Slider
+          label="Curve"
+          unit="°"
+          min={-350}
+          max={350}
+          step={5}
+          value={bend}
+          hint={{ text: "Bends the words round a circle. To the right they arch over the top, to go above a picture; to the left they curve underneath, to go below one. 180 takes them half way round; 350 almost all the way. With several lines the circle is opened out until they all fit, so a tight curve bends them less than asked." }}
+          onChange={(value) => change({ bend: value })}
+        />
+      )}
+      {layout === "around" && text.around && (
+        <>
+          <Select
+            label="Following"
+            hint={{ text: "The line the words follow round the artwork: the circle through its corners, an oval that hugs a wide or tall picture more closely, or its own frame with the corners rounded." }}
+            value={text.around.shape}
+            options={[
+              { value: "circle", label: "A circle" },
+              { value: "oval", label: "An oval" },
+              { value: "frame", label: "Its frame" },
+            ]}
+            onChange={(shape) => change({ around: { ...text.around!, shape } })}
+          />
+          <Select
+            label="Placed"
+            hint={{ text: "Where the words are centred. Long text carries on round the sides from there." }}
+            value={text.around.side}
+            options={[
+              { value: "top", label: "Over the top" },
+              { value: "bottom", label: "Under the bottom" },
+            ]}
+            onChange={(side) => change({ around: { ...text.around!, side } })}
+          />
+          <NumberField
+            label="Gap"
+            unit="mm"
+            step={1}
+            min={-100}
+            max={500}
+            value={text.around.gap}
+            hint={{ text: "Clear space between the artwork and the words." }}
+            onChange={(gap) => change({ around: { ...text.around!, gap } })}
+          />
+          <p className="text-muted">
+            The words are drawn at the letter size above, to fit round the artwork as it is now. If you
+            resize the artwork later, use Change the text to fit them round it again.
+          </p>
+        </>
+      )}
+      <TextPreview text={layout === "around" ? text : { ...text, around: null }} artwork={canGoRound ? artworkSize : null} />
       {machineKind === "cnc" && (
         <p className="text-muted">
           A router follows the edge of each letter with the middle of the bit, so letters come out a little
@@ -360,7 +428,7 @@ function TextMaker() {
 }
 
 /** Roughly how the words will look, drawn by the browser in the same font and on the same curve. */
-function TextPreview({ text }: { text: TextSpec }) {
+function TextPreview({ text, artwork }: { text: TextSpec; artwork: { width: number; height: number } | null }) {
   const style = {
     fontFamily: `"${text.font.replace(/"/g, "")}"`,
     fontWeight: text.bold ? 700 : 400,
@@ -373,6 +441,32 @@ function TextPreview({ text }: { text: TextSpec }) {
     return (
       <div aria-label="Preview" className={`${box} text-muted`}>
         A preview appears here.
+      </div>
+    );
+  }
+  if (text.around && artwork) {
+    // The artwork as a plain block, with the words where they will sit round
+    // it, at their true size: one unit to the millimetre.
+    const { shape, side, gap } = text.around;
+    const top = side === "top";
+    const spacing = text.sizeMm * LINE_SPACING;
+    const out = (i: number) => gap + (top ? (lines.length - 1 - i) * spacing : text.sizeMm * 0.75 + i * spacing);
+    const reach = Math.hypot(artwork.width, artwork.height) / 2 + Math.max(0, gap) + (lines.length + 1) * spacing;
+    return (
+      <div aria-label="Preview" className={box}>
+        <svg viewBox={`${-reach} ${-reach} ${reach * 2} ${reach * 2}`} className="mx-auto block max-h-64 w-full" fill="currentColor">
+          <rect x={-artwork.width / 2} y={-artwork.height / 2} width={artwork.width} height={artwork.height} rx={2} opacity={0.18} />
+          {lines.map((line, i) => (
+            <g key={i}>
+              <path id={`preview-ring-${i}`} d={ringPath(shape, side, artwork.width, artwork.height, out(i))} fill="none" />
+              <text fontSize={text.sizeMm} textAnchor="middle" style={style}>
+                <textPath href={`#preview-ring-${i}`} startOffset="50%">
+                  {line.trim()}
+                </textPath>
+              </text>
+            </g>
+          ))}
+        </svg>
       </div>
     );
   }

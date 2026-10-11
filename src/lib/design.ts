@@ -115,3 +115,33 @@ export async function pictureOf(sheet: Sheet, name: string): Promise<File> {
     URL.revokeObjectURL(url);
   }
 }
+
+/**
+ * The closed line that words follow round something `width` by `height`,
+ * as SVG path data about the origin, running `out` outside it. It mirrors
+ * the backend's, for previews: it starts opposite the side the words are on,
+ * so that half way along is the middle of that side, and runs so that the
+ * words read left to right there.
+ */
+export function ringPath(shape: "circle" | "oval" | "frame", side: "top" | "bottom", width: number, height: number, out: number): string {
+  const top = side === "top";
+  const start = top ? 1 : -1;
+  const sweep = top ? 1 : 0;
+  if (shape !== "frame") {
+    const [rx, ry] =
+      shape === "circle"
+        ? [Math.hypot(width, height) / 2 + out, Math.hypot(width, height) / 2 + out]
+        : [width / Math.SQRT2 + out, height / Math.SQRT2 + out];
+    return `M0 ${start * ry}A${rx} ${ry} 0 1 ${sweep} 0 ${-start * ry}A${rx} ${ry} 0 1 ${sweep} 0 ${start * ry}`;
+  }
+  const [hw, hh] = [width / 2 + out, height / 2 + out];
+  const c = Math.min(hw, hh) * 0.35;
+  const [near, far] = [-start * hh, start * hh];
+  const toward = (from: number, by: number) => from - start * by;
+  return (
+    `M0 ${far}L${-hw + c} ${far}A${c} ${c} 0 0 ${sweep} ${-hw} ${toward(far, c)}` +
+    `L${-hw} ${toward(near, -c)}A${c} ${c} 0 0 ${sweep} ${-hw + c} ${near}` +
+    `L${hw - c} ${near}A${c} ${c} 0 0 ${sweep} ${hw} ${toward(near, -c)}` +
+    `L${hw} ${toward(far, c)}A${c} ${c} 0 0 ${sweep} ${hw - c} ${far}Z`
+  );
+}
