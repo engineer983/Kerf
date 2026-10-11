@@ -382,7 +382,8 @@ export interface FoundPicture {
   height: number;
 }
 
-export function searchPictures(query: string, publicDomainOnly: boolean): Promise<FoundPicture[]> {
+/** The first few pictures a search matched, and how many matched in all. */
+export function searchPictures(query: string, publicDomainOnly: boolean): Promise<{ pictures: FoundPicture[]; total: number }> {
   return invoke("search_pictures", { query, publicDomainOnly });
 }
 

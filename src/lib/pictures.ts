@@ -53,6 +53,52 @@ export async function loadAsNewProject(file: File, options?: { drawnHeightMap?: 
   return after.image;
 }
 
+/** Downloads the picture at a web address, in whatever format, as a PNG file. */
+export async function pictureFromAddress(address: string, name?: string): Promise<File> {
+  let url: URL;
+  try {
+    url = new URL(address.trim());
+  } catch {
+    throw new Error("That is not a web address.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("That is not a web address.");
+  const bytes = await ipc.fetchPicture(url.href);
+  try {
+    // Named after the file in the address, where there is one.
+    const file = decodeURIComponent(url.pathname.split("/").pop() ?? "").replace(/\.[a-z0-9]{2,5}$/i, "");
+    return await toPngFile(bytes, pictureName(name ?? file, "picture from the web"));
+  } catch {
+    throw new Error(
+      "That address is a web page, not a picture. In the browser, right-click the picture itself and choose Copy image, then press Ctrl+V here.",
+    );
+  }
+}
+
+/**
+ * Loads what was pasted, if it is a picture or a picture's web address.
+ * Returns whether the paste was taken, so that ordinary pasting is left alone.
+ */
+export function pastePicture(event: ClipboardEvent): boolean {
+  const data = event.clipboardData;
+  if (!data) return false;
+  const project = useProject.getState();
+  const file = [...data.files].find((f) => f.type.startsWith("image/"));
+  if (file) {
+    // A copied picture arrives without a useful name.
+    const named = /^image\.[a-z]+$/i.test(file.name) ? new File([file], "pasted picture.png", { type: file.type }) : file;
+    void project.importFile(named);
+    return true;
+  }
+  // Text is only taken as an address when the person is not typing somewhere.
+  const typing = event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable]");
+  const text = data.getData("text/plain").trim();
+  if (typing || !/^https?:\/\/\S+$/i.test(text)) return false;
+  pictureFromAddress(text)
+    .then((picture) => useProject.getState().importFile(picture))
+    .catch((e) => useProject.setState({ error: e instanceof Error ? e.message : String(e), step: "import" }));
+  return true;
+}
+
 /** Who made a found picture and how it may be used, in a sentence. */
 export function creditLine(found: ipc.FoundPicture): string {
   const by = found.creator ? ` by ${found.creator}` : "";

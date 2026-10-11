@@ -50,7 +50,7 @@ pub async fn fetch_page_text(url: String) -> Result<PageText, String> {
 }
 
 /// Strips tags, scripts and styles, leaving the text a reader would see.
-fn html_to_text(html: &str) -> PageText {
+pub(crate) fn html_to_text(html: &str) -> PageText {
     let lower = html.to_ascii_lowercase();
     let title = lower
         .find("<title")

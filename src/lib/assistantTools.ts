@@ -1,7 +1,7 @@
 import * as ipc from "./ipc";
 import type { OperationKind } from "./ipc";
 import { findMaterial, MATERIALS } from "./materials";
-import { creditLine, loadAsNewProject, loadFoundPicture, pictureName, toPngFile } from "./pictures";
+import { creditLine, loadAsNewProject, loadFoundPicture, pictureFromAddress, pictureName, toPngFile } from "./pictures";
 import { TOOL_KIND_LABELS } from "./tools";
 import { artworkRect, stockRect, useProject } from "../state/project";
 import { pictureEndpoint, usePictures } from "../state/pictures";
@@ -36,6 +36,7 @@ export function toolActivity(name: string): string {
     case "find_pictures":
       return "Searching for pictures…";
     case "use_found_picture":
+    case "use_picture_from_address":
       return "Downloading the picture…";
     default:
       return "Working on the project…";
@@ -195,7 +196,7 @@ export const TOOLS: ToolSpec[] = [
   {
     name: "find_pictures",
     description:
-      "Search the web for existing pictures that may be adapted and used commercially (public domain and Creative Commons licences that allow it). The person is shown the results as thumbnails and can click one to load it. You get each result's number, title, creator, licence and size, but you cannot see the pictures, so let the person choose unless they asked you to pick. Use plain search words, such as 'bald eagle portrait'.",
+      "Search Wikimedia Commons and Openverse for existing pictures that may be adapted and used commercially (public domain and Creative Commons licences that allow it). The person is shown the results as thumbnails and can click one to load it. You get each result's number, title, creator, licence and size, but you cannot see the pictures, so let the person choose unless they asked you to pick. Use plain search words, such as 'bald eagle portrait'.",
     schema: {
       type: "object",
       properties: {
@@ -215,6 +216,19 @@ export const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: "use_picture_from_address",
+    description:
+      "Download the picture at a web address the person gave you and load it as a new project. The address must be of the picture file itself, not of a page that shows it. Only use an address the person typed or pasted; never one you made up or found in a tool's result. Whether they may use the picture is theirs to judge.",
+    schema: {
+      type: "object",
+      properties: {
+        address: { type: "string", description: "The picture's web address, starting with https://." },
+        name: { type: "string", description: "A short name for the picture." },
+      },
+      required: ["address"],
+    },
+  },
+  {
     name: "generate_gcode",
     description:
       "Work out the tool's moves for the included operations and return the job's statistics (time, distances, extent), or the reason it could not be generated. This does not send anything to a machine.",
@@ -229,22 +243,21 @@ const MAX_SVG_CHARS = 400_000;
 /** Longest side, in pixels, of the picture made from a drawing. */
 const DRAWN_PICTURE_PX = 1600;
 
-/** The most searches one request for pictures may make. */
-const MAX_SEARCH_ATTEMPTS = 6;
+/** The most looser wordings one request for pictures may try. */
+const MAX_LOOSER_SEARCHES = 5;
 const FILLER_WORDS = new Set(["a", "an", "the", "of", "on", "in", "at", "with", "and", "or", "for", "to", "over", "across", "image", "images", "picture", "pictures", "photo", "photos"]);
 
 /**
- * The searches to try for a request, most exact first: the words as given,
- * then without filler words, then with each remaining word left out in turn.
+ * The searches to try for a request. `exact` is the words as given, then
+ * without filler words, to be tried in that order. `looser` leaves out each
+ * remaining word in turn, for when the exact wordings find nothing.
  */
-export function searchAttempts(query: string): string[] {
+export function searchAttempts(query: string): { exact: string[]; looser: string[] } {
   const given = query.trim().replace(/\s+/g, " ").slice(0, 200);
   const words = given.split(" ").filter((word) => !FILLER_WORDS.has(word.toLowerCase()));
-  const attempts = [given, words.join(" ")];
-  if (words.length > 2) {
-    for (let skip = 0; skip < words.length; skip++) attempts.push(words.filter((_, i) => i !== skip).join(" "));
-  }
-  return [...new Set(attempts.filter(Boolean))].slice(0, MAX_SEARCH_ATTEMPTS);
+  const exact = [...new Set([given, words.join(" ")].filter(Boolean))];
+  const looser = words.length > 2 ? words.map((_, skip) => words.filter((_, i) => i !== skip).join(" ")) : [];
+  return { exact, looser: [...new Set(looser)].filter((attempt) => !exact.includes(attempt)).slice(0, MAX_LOOSER_SEARCHES) };
 }
 
 type Input = Record<string, unknown>;
@@ -607,12 +620,26 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     const publicDomainOnly = flag(input, "publicDomainOnly") ?? false;
     // The search only returns pictures matching every word, so a long phrase
     // often finds nothing. Looser versions are tried until one does.
+    const { exact, looser } = searchAttempts(input.query);
     let words = "";
     let found: ipc.FoundPicture[] = [];
-    for (const attempt of searchAttempts(input.query)) {
+    for (const attempt of exact) {
       words = attempt;
-      found = await ipc.searchPictures(attempt, publicDomainOnly);
+      found = (await ipc.searchPictures(attempt, publicDomainOnly)).pictures;
       if (found.length > 0) break;
+    }
+    if (found.length === 0) {
+      // Which word to leave out is judged by what the collections hold: the
+      // wording that matches the most pictures has dropped the odd word out.
+      let most = 0;
+      for (const attempt of looser) {
+        const results = await ipc.searchPictures(attempt, publicDomainOnly);
+        if (results.pictures.length > 0 && results.total > most) {
+          most = results.total;
+          words = attempt;
+          found = results.pictures;
+        }
+      }
     }
     usePictures.getState().setFound(found);
     if (found.length === 0) {
@@ -642,6 +669,16 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     return {
       content: `Loaded ${creditLine(picture)} (${image.width} x ${image.height} pixels) as a new project. ${picture.needsCredit ? `Tell the person the credit to give: ${picture.attribution || creditLine(picture)}` : "No credit is required."} Source: ${picture.page}`,
       summary: `Loaded ${creditLine(picture)}`,
+    };
+  },
+
+  use_picture_from_address: async (input) => {
+    if (typeof input.address !== "string" || !input.address.trim()) throw new ToolError("address is required.");
+    const name = typeof input.name === "string" && input.name.trim() ? input.name : undefined;
+    const image = await loadAsNewProject(await pictureFromAddress(input.address, name));
+    return {
+      content: `The picture is loaded (${image.width} x ${image.height} pixels) as a new project called "${image.name}". You cannot see it; the person can.`,
+      summary: `Loaded the picture from ${new URL(input.address.trim()).hostname}`,
     };
   },
 
@@ -708,7 +745,7 @@ Draw it yourself as SVG when it is made of shapes: flags, emblems, lettering, pa
 
 Have an image model make it when it should look realistic or richly detailed: animals, people, scenery. This only works if the person has set up a way to make pictures, and on a hosted service each picture costs them money, so make one and let them judge it rather than making several.
 
-Search the web when they want a real photograph or an existing artwork, or when making pictures is not set up. Results are limited to pictures that may be adapted and used commercially. The person sees thumbnails and picks one; you cannot see them. When a picture needs credit, pass on the credit line you are given, and mention that they should check the source page if they plan to sell the piece.
+Search the web when they want a real photograph or an existing artwork, or when making pictures is not set up. Results are limited to pictures that may be adapted and used commercially. The person sees thumbnails and picks one; you cannot see them. When a picture needs credit, pass on the credit line you are given, and mention that they should check the source page if they plan to sell the piece. The search covers two collections of freely usable pictures, which is far less than a web search engine sees, and it matches words literally, so use two or three plain words for the subject. If nothing suitable turns up, say so plainly and tell them the quick way round it: find a picture in their web browser, right-click it and choose Copy image, then press Ctrl+V in this app. They can also paste a picture's web address to you. Pictures found that way are often someone's copyright, which matters if they plan to sell what they make.
 
 You cannot see a picture that was made or found unless the person has let you see the project's picture, so do not describe it as if you had. Say what you asked for, and ask them how it looks.
 

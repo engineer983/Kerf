@@ -95,7 +95,10 @@ function ImportPanel() {
           </button>
         </>
       ) : (
-        <p className="text-muted">Or drop a file anywhere on the canvas.</p>
+        <p className="text-muted">
+          Or drop a file anywhere on the canvas. A picture copied in your web browser (right-click, Copy
+          image) can be pasted with Ctrl+V, and so can a picture's web address.
+        </p>
       )}
       {galleryError && (
         <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">

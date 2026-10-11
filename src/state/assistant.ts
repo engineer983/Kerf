@@ -260,7 +260,8 @@ export const useAssistant = create<AssistantState>((set, get) => {
       set({ busy: true, activity: "Thinking…" });
       // The picture goes with the first message of a conversation only: the
       // model keeps it in view from there, and resending it would cost more.
-      let first: unknown = userMessage(question);
+      const plain: unknown = userMessage(question);
+      let first = plain;
       if (get().sharePicture && get().history.length === 0) {
         try {
           const jpeg = await pictureForModel();
@@ -273,7 +274,21 @@ export const useAssistant = create<AssistantState>((set, get) => {
       set({ history });
       try {
         for (let round = 0; round < MAX_ROUNDS; round++) {
-          const turn = await ipc.assistantSend(target, get().providerId, SYSTEM_PROMPT, history, TOOLS);
+          let turn: ipc.AssistantTurn;
+          try {
+            turn = await ipc.assistantSend(target, get().providerId, SYSTEM_PROMPT, history, TOOLS);
+          } catch (e) {
+            // Many models, local ones especially, cannot take pictures and
+            // reject the whole request. The question is asked again without it.
+            if (round !== 0 || first === plain) throw e;
+            first = plain;
+            history[history.length - 1] = plain;
+            turn = await ipc.assistantSend(target, get().providerId, SYSTEM_PROMPT, history, TOOLS);
+            show({
+              kind: "notice",
+              text: "This model could not take the picture, so your message was sent without it. To stop this notice, untick \"Let the assistant see the picture\" in the assistant's settings.",
+            });
+          }
           // The reply goes into the history exactly as the provider sent it.
           history.push(turn.message);
           set({ history: [...history] });

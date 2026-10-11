@@ -334,8 +334,8 @@ function PictureSettings() {
         <span>
           Let the assistant search the web for pictures
           <span className="block text-muted">
-            Searches Openverse for public-domain and Creative Commons pictures that may be adapted and
-            used commercially. Free, with no key. The search words are sent to openverse.org.
+            Searches Wikimedia Commons and Openverse for public-domain and Creative Commons pictures that may be adapted and
+            used commercially. Free, with no key. The search words are sent to those two sites.
           </span>
         </span>
       </label>
