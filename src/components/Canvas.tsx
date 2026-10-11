@@ -34,6 +34,8 @@ export function Canvas() {
   const showSource = useProject((s) => s.showSource);
   const traced = useProject((s) => s.trace.result);
   const traceMode = useProject((s) => s.trace.settings.mode);
+  // A box or a set of layers is drawn as the lines to cut, with no picture behind.
+  const designed = useProject((s) => s.design !== null);
   const left = useProject((s) => s.left);
   const front = useProject((s) => s.front);
   const program = useProject((s) => s.gcode.program);
@@ -385,7 +387,7 @@ export function Canvas() {
           {materialUrl && (
             <image href={materialUrl} x={sx} y={sy} width={sw} height={sh} preserveAspectRatio="none" />
           )}
-          {image && placed && (showSource || !traced) && (
+          {image && placed && !designed && (showSource || !traced) && (
             <image
               href={image.url}
               x={placed.x}
@@ -405,7 +407,7 @@ export function Canvas() {
               height={placed.height}
               viewBox={`0 0 ${traced.width} ${traced.height}`}
               preserveAspectRatio="none"
-              className={traceMode === "outline" ? "trace-mono" : undefined}
+              className={designed ? "design-lines" : traceMode === "outline" ? "trace-mono" : undefined}
               opacity={program ? 0.15 : 1}
               dangerouslySetInnerHTML={{ __html: traced.body }}
             />
@@ -518,6 +520,7 @@ export function Canvas() {
               rect={placed}
               px={px}
               lockAspect={aspectLocked}
+              moveOnly={designed}
               toBed={toBed}
               onChange={useProject.getState().setArtworkRect}
             />

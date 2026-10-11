@@ -1,0 +1,11 @@
+[package]
+name = "kerf-make"
+description = "Designs made from measurements rather than traced: finger-jointed boxes and layered art"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+kerf-trace = { path = "../kerf-trace" }

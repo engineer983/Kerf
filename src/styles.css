@@ -79,3 +79,14 @@ input[type="number"]::-webkit-inner-spin-button {
   margin-left: 0.25rem;
   cursor: pointer;
 }
+
+/* A design is lines to cut: drawn as lines of even weight at any zoom, each
+   in the colour that says whether it is cut through or only marked. */
+.design-lines path {
+  fill: none;
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+}
+.design-lines path[stroke="#000000"] {
+  stroke: var(--accent);
+}

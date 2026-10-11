@@ -1,5 +1,6 @@
 import { defaultGoal, goalsFor, useProject, type Goal, type Quality } from "../state/project";
 import { useToolbox } from "../state/tools";
+import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Section, Segmented } from "./controls";
 import { OptimizeButton } from "./OptimizeButton";
 
@@ -50,6 +51,14 @@ export function SimpleSetup() {
             <span className="text-muted">{GOALS[id].about}</span>
           </button>
         ))}
+        <button
+          onClick={() => useUi.getState().setMaker("layers")}
+          title="Slice the picture into layers to cut from thin sheet and stack"
+          className="flex w-full flex-col rounded-xl border border-line p-3 text-left transition-colors hover:border-muted"
+        >
+          <span className="font-medium">Stacked layers…</span>
+          <span className="text-muted">Cuts the picture as layers to glue into a piece with real depth.</span>
+        </button>
         <OptimizeButton />
       </Section>
 

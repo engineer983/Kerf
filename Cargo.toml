@@ -25,6 +25,9 @@ opt-level = 3
 [profile.dev.package.kerf-trace]
 opt-level = 3
 
+[profile.dev.package.kerf-make]
+opt-level = 3
+
 [profile.dev.package.image]
 opt-level = 3
 

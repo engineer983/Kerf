@@ -1928,6 +1928,7 @@ dependencies = [
  "kerf-ai",
  "kerf-gcode",
  "kerf-grbl",
+ "kerf-make",
  "kerf-trace",
  "keyring",
  "serde",
@@ -1962,6 +1963,14 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serialport",
+]
+
+[[package]]
+name = "kerf-make"
+version = "0.1.0"
+dependencies = [
+ "kerf-trace",
+ "serde",
 ]
 
 [[package]]

@@ -391,3 +391,56 @@ export function searchPictures(query: string, publicDomainOnly: boolean): Promis
 export function fetchPicture(url: string): Promise<ArrayBuffer> {
   return invoke("fetch_picture", { url });
 }
+
+/** Parts laid out to be cut from one piece of material, as an SVG in millimetres. */
+export interface Sheet {
+  svg: string;
+  widthMm: number;
+  heightMm: number;
+  /** The names of the parts on the sheet, in reading order. */
+  parts: string[];
+}
+
+export interface BoxSpec {
+  /** Outside size, in millimetres. */
+  width: number;
+  depth: number;
+  height: number;
+  thickness: number;
+  /** Zero chooses a finger width to suit the material. */
+  fingerWidth: number;
+  lid: boolean;
+  /** The width of the cut itself: a laser's kerf, or a bit's diameter. */
+  cutWidth: number;
+  /** Carry the cut into inside corners, for a round bit. */
+  dogbones: boolean;
+}
+
+export interface LayerSpec {
+  layers: number;
+  widthMm: number;
+  smallestPieceMm: number;
+  /** Draw on each layer where the next one sits. */
+  marks: boolean;
+}
+
+/** Makes `svg` the design being cut in place of the traced picture; null goes back to the picture. */
+export function setDesign(svg: string | null): Promise<void> {
+  return invoke("set_design", { svg });
+}
+
+export function makeBox(spec: BoxSpec, sheetWidth: number, sheetHeight: number): Promise<Sheet[]> {
+  return invoke("make_box", { spec, sheetWidth, sheetHeight });
+}
+
+/** Slices the loaded picture into layers to stack. */
+export function makeLayers(
+  spec: LayerSpec,
+  settings: TraceSettings,
+  lightIsHigh: boolean,
+  depth: { enabled: boolean; detail: number; floor: number },
+  sheetWidth: number,
+  sheetHeight: number,
+): Promise<Sheet[]> {
+  return invoke("make_layers", { spec, settings, lightIsHigh, depth, sheetWidth, sheetHeight });
+}

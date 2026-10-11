@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { ACCEPTED_IMAGE_TYPES, formatBytes } from "../lib/image";
 import { useProject, type Step } from "../state/project";
+import { useUi } from "../state/ui";
 import { DevicePanel } from "./DevicePanel";
 import { Gallery } from "./Gallery";
 import { MachinePanel } from "./MachinePanel";
@@ -100,6 +101,25 @@ function ImportPanel() {
           image) can be pasted with Ctrl+V, and so can a picture's web address.
         </p>
       )}
+      <div className="flex flex-col gap-2 border-t border-line pt-4">
+        <h3 className="text-[11px] font-semibold tracking-wider text-muted uppercase">Or make something</h3>
+        <button
+          onClick={() => useUi.getState().setMaker("box")}
+          title="Draw the panels of a box with finger joints, from its size and your material's thickness"
+          className="rounded-lg border border-line px-3 py-2 text-left transition-colors hover:border-accent hover:text-accent"
+        >
+          Box maker…
+        </button>
+        <button
+          onClick={() => useUi.getState().setMaker("layers")}
+          disabled={!image}
+          title="Slice the picture into layers to cut from thin sheet and stack"
+          className="rounded-lg border border-line px-3 py-2 text-left transition-colors hover:border-accent hover:text-accent disabled:opacity-40"
+        >
+          Stacked layers…
+        </button>
+        {!image && <p className="text-muted">Stacked layers are made from a picture, so import one first.</p>}
+      </div>
       {galleryError && (
         <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
           {galleryError}

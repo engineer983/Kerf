@@ -5,6 +5,7 @@ import { OptimizeButton } from "./OptimizeButton";
 
 export function TracePanel() {
   const image = useProject((s) => s.image);
+  const design = useProject((s) => s.design);
   const bed = useProject((s) => s.bed);
   const widthMm = useProject((s) => s.widthMm);
   const heightMm = useProject((s) => s.heightMm);
@@ -15,6 +16,28 @@ export function TracePanel() {
     useProject.getState();
 
   if (!image) return <p className="text-muted">Import an image first.</p>;
+  if (design) {
+    return (
+      <div className="flex flex-col gap-4">
+        <p className="text-muted">
+          This {design.kind === "box" ? "box" : "set of layers"} is already drawn as exact lines, so there is
+          nothing to trace. You can save the lines as an SVG to use elsewhere.
+        </p>
+        <button
+          onClick={() => void exportSvg()}
+          className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90"
+        >
+          Export SVG…
+        </button>
+        {error && (
+          <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
+            {error}
+          </p>
+        )}
+        {exportedTo && <p className="break-all text-muted select-text">Saved to {exportedTo}</p>}
+      </div>
+    );
+  }
   if (!isTauri()) {
     return <p className="text-muted">Tracing needs the desktop app; it is not available in a browser.</p>;
   }

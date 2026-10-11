@@ -37,6 +37,9 @@ const BY_TEXT: Record<string, string> = {
   "Open toolbox": "See and edit your router bits",
   Continue: "Go on to importing a picture",
   "Stay here": "Keep the generated job and stay on this step",
+  "Change the box…": "Open the box maker with this box's sizes, to alter them",
+  "Change the layers…": "Open the layers maker with these settings, to alter them",
+  "Back to the picture": "Drop the layers and work from the picture again",
   "Go back": "Clear the generated job and go back",
 
   Simple: "Choose what you want made and let the settings be picked for you",

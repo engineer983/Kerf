@@ -136,6 +136,8 @@ pub async fn open_project(
     })
     .await?;
     *state.image.lock().unwrap() = Some(loaded);
+    // The interface sets a saved design again from the project's settings.
+    *state.design.lock().unwrap() = None;
     *state.gcode.lock().unwrap() = None;
     Ok(settings)
 }

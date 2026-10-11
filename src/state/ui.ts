@@ -24,13 +24,18 @@ function applyTheme(theme: ThemeChoice) {
 interface UiState {
   theme: ThemeChoice;
   chatOpen: boolean;
+  /** Which of the makers is open: the box maker, the layers maker, or neither. */
+  maker: "box" | "layers" | null;
   setTheme: (theme: ThemeChoice) => void;
   toggleChat: () => void;
+  setMaker: (maker: "box" | "layers" | null) => void;
 }
 
 export const useUi = create<UiState>((set) => ({
   theme: readTheme(),
   chatOpen: false,
+  maker: null,
+  setMaker: (maker) => set({ maker }),
   setTheme: (theme) => {
     try {
       localStorage.setItem(THEME_KEY, theme);

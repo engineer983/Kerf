@@ -3,6 +3,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Rail } from "./components/Rail";
 import { Canvas } from "./components/Canvas";
 import { Inspector } from "./components/Inspector";
+import { Makers } from "./components/Makers";
 import { ChatDrawer } from "./components/ChatDrawer";
 import { ConfirmBack } from "./components/ConfirmBack";
 import { Toolbox } from "./components/Toolbox";
@@ -31,6 +32,7 @@ export function App() {
         {chatOpen && <ChatDrawer />}
       </div>
       <Toolbox />
+      <Makers />
       <ConfirmBack />
     </div>
   );

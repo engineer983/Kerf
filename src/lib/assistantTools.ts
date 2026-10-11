@@ -1,3 +1,4 @@
+import { DEFAULT_BOX, DEFAULT_LAYERS, describeDesign } from "./design";
 import * as ipc from "./ipc";
 import type { OperationKind } from "./ipc";
 import { findMaterial, MATERIALS } from "./materials";
@@ -235,6 +236,41 @@ export const TOOLS: ToolSpec[] = [
     },
   },
   {
+    name: "make_box",
+    description:
+      "Draw the panels of a box held together by finger joints, and start a new project from them, set up to be cut. Sizes are the box's outside dimensions in millimetres. The panels are drawn to allow for the width of the cut (a laser's kerf, or the router bit's diameter with relief in the inside corners), and laid out on as many sheets as the machine's bed needs. Ask for the material's real, measured thickness if the person has not given it, since the joints are cut exactly that deep. Returns what was made. The person still sets a laser's power and speed themselves.",
+    schema: {
+      type: "object",
+      properties: {
+        width: number("Outside width, left to right."),
+        depth: number("Outside depth, front to back."),
+        height: number("Outside height."),
+        thickness: number("The material's thickness. Defaults to the project's material thickness."),
+        lid: { type: "boolean", description: "True for a closed box with a top panel. Defaults to an open top." },
+        fingerWidth: number("Roughly how wide each finger is. Leave out to let the app choose."),
+        kerf: number("Laser only: the width of the beam's cut, usually 0.1 to 0.2. Defaults to 0.15."),
+        bit: { type: "string", description: "Router only: the id or name of the flat end mill to cut with. Defaults to the first flat bit in the toolbox." },
+      },
+      required: ["width", "depth", "height"],
+    },
+  },
+  {
+    name: "make_layers",
+    description:
+      "Slice the project's picture into layers to cut from thin sheet and glue into a stack, like the contour lines of a map: layer 1 is a whole base and each layer after it is the part of the picture standing above the next level. Use it when the person wants layered or stacked art, a topographic look, or a 3D effect from flat sheet. Needs a picture loaded. For a photograph or a drawing of an object, take the heights from estimated depth; for a height map or simple artwork, from brightness. On a laser each layer can be marked with where the next one sits. Returns what was made.",
+    schema: {
+      type: "object",
+      properties: {
+        layers: number("How many layers, counting the base: 2 to 12. Defaults to 5."),
+        width: number("Width of the finished piece in millimetres."),
+        heightsFrom: { type: "string", enum: ["brightness", "depth"], description: "Defaults to depth for a photograph, brightness otherwise." },
+        highestParts: { type: "string", enum: ["light", "dark"], description: "Which end stands highest: light (or near), or dark (or far). Defaults to light." },
+        smallestPiece: number("Pieces smaller than this across, in millimetres, are left out. Defaults to 4."),
+        marks: { type: "boolean", description: "Laser only: mark each layer with the outline of the next. Defaults to true." },
+      },
+    },
+  },
+  {
     name: "generate_gcode",
     description:
       "Work out the tool's moves for the included operations and return the job's statistics (time, distances, extent), or the reason it could not be generated. This does not send anything to a machine.",
@@ -320,6 +356,9 @@ function describeProject() {
     picture: s.image
       ? { name: s.image.name, pixels: [s.image.width, s.image.height], looksLikeAPhoto: s.image.photo, cropped: s.uncropped !== null }
       : null,
+    // A box or a set of layers, which is cut in place of the traced picture
+    // and cannot be resized.
+    design: s.design && { summary: describeDesign(s.design), sheets: s.design.sheets.length, sheetShown: s.design.sheet + 1, partsOnThisSheet: s.design.sheets[s.design.sheet].parts },
     material: { id: s.materialId, name: findMaterial(s.materialId).label, thicknessMm: s.thickness, widthMm: s.stockWidth, lengthMm: s.stockLength },
     artwork: art && {
       widthMm: s.widthMm,
@@ -693,6 +732,57 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     };
   },
 
+  make_box: async (input) => {
+    const s = useProject.getState();
+    const width = num(input, "width", 10, 3000);
+    const depth = num(input, "depth", 10, 3000);
+    const height = num(input, "height", 10, 3000);
+    if (width === undefined || depth === undefined || height === undefined) throw new ToolError("width, depth and height are required.");
+    const flat = useToolbox.getState().tools.filter((t) => t.kind === "flat");
+    let toolId = flat[0]?.id ?? null;
+    if (typeof input.bit === "string") {
+      const wanted = input.bit.toLowerCase();
+      const bit = flat.find((t) => t.id === input.bit || t.name.toLowerCase() === wanted);
+      if (!bit) throw new ToolError(`No flat end mill called "${input.bit}" is in the toolbox.`);
+      toolId = bit.id;
+    }
+    await s.makeBox({
+      width,
+      depth,
+      height,
+      thickness: num(input, "thickness", 0.5, 50) ?? s.thickness,
+      lid: flag(input, "lid") ?? false,
+      fingerWidth: num(input, "fingerWidth", 0, 500) ?? 0,
+      kerf: num(input, "kerf", 0, 2) ?? DEFAULT_BOX.kerf,
+      toolId,
+    });
+    const made = useProject.getState().design!;
+    return {
+      content: `${describeDesign(made)} It is loaded as a new project and set up to be cut${made.sheets.length > 1 ? `, one sheet at a time; sheet 1 is showing, and the person chooses the others under Operations` : ""}.${s.machineKind === "laser" ? " The laser's power and speed for cutting through are the person's to set." : " Nothing holds a panel once it is cut free, so the sheet must be stuck down."}`,
+      summary: "Made a box",
+    };
+  },
+
+  make_layers: async (input) => {
+    const s = useProject.getState();
+    if (!s.image) throw new ToolError("There is no picture loaded yet.");
+    const layers = num(input, "layers", 2, 12);
+    const source = choice(input, "heightsFrom", ["brightness", "depth"] as const) ?? (s.image.photo ? "depth" : "brightness");
+    await s.makeLayers({
+      layers: layers === undefined ? DEFAULT_LAYERS.layers : Math.round(layers),
+      widthMm: num(input, "width", 10, 5000) ?? (s.design ? DEFAULT_LAYERS.widthMm : s.widthMm),
+      smallestPieceMm: num(input, "smallestPiece", 0, 100) ?? DEFAULT_LAYERS.smallestPieceMm,
+      marks: flag(input, "marks") ?? true,
+      source,
+      lightIsHigh: (choice(input, "highestParts", ["light", "dark"] as const) ?? "light") === "light",
+    });
+    const made = useProject.getState().design!;
+    return {
+      content: `${describeDesign(made)} The job is set up to cut them${made.sheets.length > 1 ? `, one sheet at a time; sheet 1 is showing` : ""}. Fewer layers came out than asked for if nothing in the picture stands high enough for the upper ones.`,
+      summary: "Sliced the picture into layers",
+    };
+  },
+
   generate_gcode: async () => {
     const s = useProject.getState();
     if (!s.image) throw new ToolError("There is no picture loaded yet.");
@@ -759,6 +849,8 @@ Have an image model make it when it should look realistic or richly detailed: an
 Search the web when they want a real photograph or an existing artwork, or when making pictures is not set up. Results are limited to pictures that may be adapted and used commercially. The person sees thumbnails and picks one; you cannot see them. When a picture needs credit, pass on the credit line you are given, and mention that they should check the source page if they plan to sell the piece. The search covers two collections of freely usable pictures, which is far less than a web search engine sees, and it matches words literally, so use two or three plain words for the subject. If nothing suitable turns up, say so plainly and tell them the quick way round it: find a picture in their web browser, right-click it and choose Copy image, then press Ctrl+V in this app. They can also paste a picture's web address to you. Pictures found that way are often someone's copyright, which matters if they plan to sell what they make.
 
 You cannot see a picture that was made or found unless the person has let you see the project's picture, so do not describe it as if you had. Say what you asked for, and ask them how it looks.
+
+You can also make two things that need no tracing. A box with finger joints is made from its outside size and the material's thickness: it starts a new project of panels to cut. Stacked layers slice the loaded picture into pieces to cut from thin sheet and glue into a stack. Both are exact lines kept at the size they were drawn, so they cannot be resized or engraved as pictures; to change one, make it again. When one needs more than one sheet, the person cuts a sheet at a time.
 
 You cannot connect to, move, start or stop a machine, and you should say so plainly if asked. Never suggest that a job is safe to leave running unattended.
 

@@ -1,4 +1,5 @@
 mod assistant;
+mod design;
 mod gallery;
 mod machine;
 mod pictures;
@@ -44,7 +45,7 @@ impl LoadedImage {
 }
 
 /// Curves are flattened to within this distance, in millimetres, for G-code.
-const FLATTEN_TOLERANCE_MM: f64 = 0.05;
+pub(crate) const FLATTEN_TOLERANCE_MM: f64 = 0.05;
 /// Longest side, in pixels, of the height map used for relief carving. A
 /// router bit cannot resolve more, and the carving time grows with it.
 const RELIEF_MAX_PX: u32 = 1500;
@@ -54,12 +55,14 @@ const GCODE_HEAD_LINES: usize = 60;
 #[derive(Default)]
 pub(crate) struct AppState {
     pub(crate) image: Mutex<Option<LoadedImage>>,
+    /// A box or layered design, which takes the place of the traced picture.
+    pub(crate) design: Mutex<Option<design::Design>>,
     /// Text of the most recently generated program, kept here for export and sending.
     pub(crate) gcode: Mutex<Option<String>>,
 }
 
 impl AppState {
-    fn image(&self, preview: bool) -> Result<Arc<DynamicImage>, String> {
+    pub(crate) fn image(&self, preview: bool) -> Result<Arc<DynamicImage>, String> {
         let guard = self.image.lock().unwrap();
         let loaded = guard.as_ref().ok_or("No image is loaded.")?;
         Ok(if preview {
@@ -105,12 +108,15 @@ async fn load_image(request: Request<'_>, state: State<'_, AppState>) -> Result<
     })
     .await?;
     *state.image.lock().unwrap() = Some(loaded);
+    // A new picture starts a new piece of work.
+    *state.design.lock().unwrap() = None;
     Ok(())
 }
 
 #[tauri::command]
 fn clear_image(state: State<'_, AppState>) {
     *state.image.lock().unwrap() = None;
+    *state.design.lock().unwrap() = None;
 }
 
 /// Keeps only a rectangle of the image, given in pixels of the current image.
@@ -172,6 +178,9 @@ async fn trace_image(
     preview: bool,
     state: State<'_, AppState>,
 ) -> Result<Traced, String> {
+    if let Some(design) = state.design.lock().unwrap().as_ref() {
+        return Ok(design.traced());
+    }
     let image = state.image(preview)?;
     blocking(move || kerf_trace::trace(&image, &settings)).await
 }
@@ -189,6 +198,12 @@ async fn export_svg(
 ) -> Result<Option<String>, String> {
     check_size(width_mm, height_mm)?;
     let image = state.image(false)?;
+    let design = state
+        .design
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|design| design.to_svg(width_mm, height_mm));
     blocking(move || {
         let Some(target) = app
             .dialog()
@@ -200,7 +215,10 @@ async fn export_svg(
             return Ok(None);
         };
         let path = target.into_path().map_err(|e| e.to_string())?;
-        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm);
+        let svg = match design {
+            Some(svg) => svg,
+            None => kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm),
+        };
         std::fs::write(&path, svg)
             .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
         Ok(Some(path.display().to_string()))
@@ -227,7 +245,7 @@ fn check_size(width_mm: f64, height_mm: f64) -> Result<(), String> {
 }
 
 /// Where a relief takes its heights from.
-struct DepthSource {
+pub(crate) struct DepthSource {
     depth: Arc<DynamicImage>,
     /// How much of the picture's own detail is laid over the depth, 0 to 1.
     detail: f32,
@@ -278,7 +296,7 @@ fn blend_depth(
 /// The image as heights: white is 1.0, black is 0.0, after the trace
 /// settings' brightness, contrast and blur. With a depth source the heights
 /// come from the depth map instead, with the photo's fine texture added.
-fn heightmap(
+pub(crate) fn heightmap(
     image: &DynamicImage,
     depth: Option<&DepthSource>,
     settings: &TraceSettings,
@@ -320,11 +338,25 @@ fn heightmap(
 /// How a relief uses the estimated depth map.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DepthOptions {
+pub(crate) struct DepthOptions {
     /// Carve from the depth map rather than from brightness.
-    enabled: bool,
+    pub(crate) enabled: bool,
     detail: f32,
     floor: f32,
+}
+
+/// The loaded picture's depth map, with how it is to be used.
+pub(crate) fn depth_source(
+    state: &AppState,
+    options: &DepthOptions,
+) -> Result<DepthSource, String> {
+    let guard = state.image.lock().unwrap();
+    let map = guard.as_ref().and_then(|loaded| loaded.depth.clone());
+    Ok(DepthSource {
+        depth: map.ok_or("Estimate the depth first, or use brightness.")?,
+        detail: options.detail,
+        floor: options.floor,
+    })
 }
 
 /// Traces at full resolution and generates G-code for `job`.
@@ -345,25 +377,31 @@ async fn generate_gcode(
         .iter()
         .any(|o| matches!(o.kind, OperationKind::CncRelief { .. }));
     let depth = if depth.enabled && is_relief {
-        let guard = state.image.lock().unwrap();
-        let map = guard.as_ref().and_then(|loaded| loaded.depth.clone());
-        Some(DepthSource {
-            depth: map.ok_or("Estimate the depth first, or carve from brightness.")?,
-            detail: depth.detail,
-            floor: depth.floor,
-        })
+        Some(depth_source(&state, &depth)?)
     } else {
         None
     };
+    let design = state
+        .design
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|design| design.to_svg(width_mm, height_mm));
     let (mut program, text) = blocking(move || {
-        let svg = kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm);
-        let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
         let carves_relief = job.operations.iter().any(|o| {
             matches!(
                 o.kind,
                 OperationKind::CncRelief { .. } | OperationKind::LaserImage { .. }
             )
         });
+        if design.is_some() && carves_relief {
+            return Err("This design is made of lines to cut, so it cannot be engraved as a picture or carved as a relief. Use an operation that follows the lines.".into());
+        }
+        let svg = match design {
+            Some(svg) => svg,
+            None => kerf_trace::trace(&image, &settings)?.to_svg(width_mm, height_mm),
+        };
+        let artwork = Artwork::from_svg(&svg, FLATTEN_TOLERANCE_MM)?;
         let heightmap = carves_relief
             .then(|| heightmap(&image, depth.as_ref(), &settings, width_mm, height_mm));
         let mut program = kerf_gcode::generate_with(&artwork, heightmap.as_ref(), &job)?;
@@ -447,7 +485,10 @@ pub fn run() {
             assistant::assistant_models,
             pictures::generate_picture,
             pictures::search_pictures,
-            pictures::fetch_picture
+            pictures::fetch_picture,
+            design::set_design,
+            design::make_box,
+            design::make_layers
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kerf");

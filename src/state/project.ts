@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { isAcceptedImage, loadImageFile } from "../lib/image";
 import { estimateDepth } from "../lib/depth";
+import { CUT_COLOR, MARK_COLOR, pictureOf, type BoxInput, type Design, type LayersInput } from "../lib/design";
 import { measureTones, optimise, PURPOSE_LABELS, type Purpose } from "../lib/optimize";
 import * as ipc from "../lib/ipc";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
@@ -304,6 +305,20 @@ interface ProjectState {
   pendingStep: Step | null;
   confirmStep: (dontWarnAgain: boolean) => void;
   cancelStep: () => void;
+  /**
+   * A box or a set of layers, made from measurements. While there is one it
+   * is what gets cut, at exactly the size it was drawn, in place of the
+   * traced picture.
+   */
+  design: Design | null;
+  /** Makes a finger-jointed box and starts a project from it. Throws with the reason if it cannot. */
+  makeBox: (input: BoxInput) => Promise<void>;
+  /** Slices the loaded picture into layers to stack. Throws with the reason if it cannot. */
+  makeLayers: (input: LayersInput) => Promise<void>;
+  /** Puts another of the design's sheets on the canvas. */
+  setDesignSheet: (sheet: number) => Promise<void>;
+  /** Goes back from layers to the picture they were made from. */
+  clearDesign: () => Promise<void>;
   /** What the last optimisation did, for showing beside the button. */
   optimizeNote: string | null;
   /** Tunes the picture's adjustments to what is being made; returns what it did. */
@@ -313,7 +328,7 @@ interface ProjectState {
    * drawn so that its brightness is its height, which a carving should then
    * follow directly instead of estimating depth.
    */
-  importFile: (file: File, options?: { drawnHeightMap?: boolean }) => Promise<void>;
+  importFile: (file: File, options?: { drawnHeightMap?: boolean; forDesign?: boolean }) => Promise<void>;
   clearImage: () => void;
   /** Saves the current project, then clears everything for a fresh start. */
   newProject: () => Promise<void>;
@@ -429,7 +444,7 @@ const STOCK_MARGIN_MM = 10;
 export function traceColors(traced: Traced | null): string[] {
   if (!traced) return [];
   const colors = new Set<string>();
-  for (const match of traced.body.matchAll(/fill="(#[0-9a-fA-F]{6})"/g)) {
+  for (const match of traced.body.matchAll(/(?:fill|stroke)="(#[0-9a-fA-F]{6})"/g)) {
     colors.add(match[1].toLowerCase());
   }
   return [...colors];
@@ -580,7 +595,8 @@ export const useProject = create<ProjectState>((set, get) => {
    */
   async function applySimple() {
     const s = get();
-    if (!s.image) return;
+    // A design is cut along its lines; there is nothing to choose.
+    if (!s.image || s.design) return;
     const { quality, cutOut } = s.simple;
     const goal =
       s.simple.goal && goalsFor(s.machineKind).includes(s.simple.goal)
@@ -670,6 +686,68 @@ export const useProject = create<ProjectState>((set, get) => {
   // opens on the first step, so the work runs in order from there.
   const remembered = storedDevice();
 
+  /** The operations that cut a design: its marks lightly first, then its outlines right through. */
+  function designOperations(design: Design, s: ProjectState = get()): OperationItem[] {
+    if (s.machineKind === "laser") {
+      // The right power and speed depend on the laser and the material, so
+      // these are only somewhere to start from; settings already made are kept.
+      const earlier = (color: string) => s.operations.find((op) => op.kind.type === "laserCut" && op.color === color);
+      const line = (color: string, power: number, feed: number): OperationItem => ({
+        id: nextOperationId++,
+        color,
+        kind: { type: "laserCut" },
+        power: earlier(color)?.power ?? power,
+        feed: earlier(color)?.feed ?? feed,
+        passes: earlier(color)?.passes ?? 1,
+      });
+      const marked = design.kind === "layers" && design.input.marks;
+      return [...(marked ? [line(MARK_COLOR, 15, 3000)] : []), line(CUT_COLOR, 100, 300)];
+    }
+    const through = defaultOperation("cnc");
+    const cut: OperationItem = {
+      ...through,
+      color: CUT_COLOR,
+      toolId: design.kind === "box" ? design.input.toolId : null,
+      kind: { ...through.kind, depth: s.thickness } as OperationKind,
+    };
+    return [equip(cut, s)];
+  }
+
+  /** Puts a design's current sheet on the canvas and sets the job up to cut it. */
+  async function showDesign(design: Design, keepOperations = false) {
+    const sheet = design.sheets[design.sheet];
+    await ipc.setDesign(sheet.svg);
+    cancelTrace();
+    // Earlier sizes no longer apply, so there is nothing sensible to undo back to.
+    past.length = 0;
+    future.length = 0;
+    set((s) => ({
+      design,
+      widthMm: sheet.widthMm,
+      heightMm: sheet.heightMm,
+      aspectLocked: true,
+      cropping: false,
+      left: STOCK_MARGIN_MM,
+      front: STOCK_MARGIN_MM,
+      stockWidth: Math.ceil(sheet.widthMm) + STOCK_MARGIN_MM * 2,
+      stockLength: Math.ceil(sheet.heightMm) + STOCK_MARGIN_MM * 2,
+      operations: keepOperations ? s.operations : designOperations(design, s),
+      step: "operations",
+      pendingStep: null,
+      canUndo: false,
+      canRedo: false,
+      trace: { ...s.trace, result: null, error: null },
+      ...staleGcode(),
+    }));
+    scheduleTrace();
+  }
+
+  /** The largest sheet the machine can cut, leaving a margin of material around it. */
+  const sheetLimit = () => {
+    const { bed } = get();
+    return [bed.width - STOCK_MARGIN_MM * 2, bed.height - STOCK_MARGIN_MM * 2] as const;
+  };
+
   /** What the picture is being used for, judged from the job as it stands. */
   function purpose(): Purpose {
     const s = get();
@@ -758,6 +836,80 @@ export const useProject = create<ProjectState>((set, get) => {
     },
     cancelStep: () => set({ pendingStep: null }),
 
+    design: null,
+    makeBox: async (input) => {
+      const s = get();
+      const tool = useToolbox.getState().tools.find((t) => t.id === input.toolId);
+      if (s.machineKind === "cnc" && !tool) throw new Error("Choose the bit the box will be cut with.");
+      const sheets = await ipc.makeBox(
+        {
+          width: input.width,
+          depth: input.depth,
+          height: input.height,
+          thickness: input.thickness,
+          fingerWidth: input.fingerWidth,
+          lid: input.lid,
+          cutWidth: s.machineKind === "cnc" ? tool!.diameter : input.kerf,
+          // A round bit cannot cut a square inside corner, so it is taken into each one.
+          dogbones: s.machineKind === "cnc",
+        },
+        ...sheetLimit(),
+      );
+      // What was being worked on is kept, unless it is this box being changed.
+      if (s.image && s.design?.kind !== "box") await s.saveProject();
+      const name = `Box ${input.width} x ${input.depth} x ${input.height}`;
+      await get().importFile(await pictureOf(sheets[0], name), { forDesign: true });
+      const failed = get().error;
+      if (failed) throw new Error(failed);
+      set({ thickness: input.thickness });
+      await showDesign({ kind: "box", input, sheets, sheet: 0, madeFor: s.machineKind });
+    },
+
+    makeLayers: async (input) => {
+      if (!get().image) throw new Error("Import a picture first.");
+      if (input.source === "depth") {
+        if (get().depth.status !== "ready") await get().estimateDepth();
+        const { status, message: why } = get().depth;
+        if (status !== "ready") throw new Error(`The picture's shape could not be worked out: ${why ?? "unknown reason"}`);
+      }
+      const s = get();
+      // A laser can mark where the next layer sits; a router cannot.
+      const marks = input.marks && s.machineKind === "laser";
+      const sheets = await ipc.makeLayers(
+        { layers: input.layers, widthMm: input.widthMm, smallestPieceMm: input.smallestPieceMm, marks },
+        s.trace.settings,
+        input.lightIsHigh,
+        // The smooth form alone: fine detail would only make ragged edges.
+        { enabled: input.source === "depth", detail: 0, floor: s.depthFloor },
+        ...sheetLimit(),
+      );
+      await showDesign({ kind: "layers", input: { ...input, marks }, sheets, sheet: 0, madeFor: s.machineKind });
+    },
+
+    setDesignSheet: async (sheet) => {
+      const { design } = get();
+      if (!design || !design.sheets[sheet]) return;
+      await showDesign({ ...design, sheet }, true);
+    },
+
+    clearDesign: async () => {
+      const s = get();
+      if (!s.design || !s.image) return;
+      await ipc.setDesign(null);
+      cancelTrace();
+      // The picture goes back to a size that suits it, as when it was imported.
+      const widthMm = s.design.kind === "layers" ? s.design.input.widthMm : s.widthMm;
+      const heightMm = tenth((widthMm * s.image.height) / s.image.width);
+      set({ design: null, widthMm, heightMm, trace: { ...s.trace, result: null }, ...staleGcode() });
+      set({
+        stockWidth: Math.ceil(widthMm) + STOCK_MARGIN_MM * 2,
+        stockLength: Math.ceil(heightMm) + STOCK_MARGIN_MM * 2,
+        operations: [fresh(s.machineKind)],
+      });
+      scheduleTrace();
+      if (get().mode === "simple") void applySimple();
+    },
+
     optimizeNote: null,
     optimizePicture: async () => {
       const s = get();
@@ -831,6 +983,7 @@ export const useProject = create<ProjectState>((set, get) => {
           uncropped: null,
           cropping: false,
           drawnHeightMap: options?.drawnHeightMap ?? false,
+          design: null,
           heightSource: "brightness" as const,
           depth: NO_DEPTH,
           left: STOCK_MARGIN_MM,
@@ -850,6 +1003,8 @@ export const useProject = create<ProjectState>((set, get) => {
           step: get().mode === "simple" ? "operations" : "trace",
           ...staleGcode(),
         });
+        // A design's picture is only for the gallery: the design itself follows.
+        if (options?.forDesign) return;
         scheduleTrace();
         if (get().mode === "simple") void applySimple();
       } catch (e) {
@@ -864,6 +1019,7 @@ export const useProject = create<ProjectState>((set, get) => {
       if (ipc.isTauri()) void ipc.clearImage();
       set((s) => ({
         image: null,
+        design: null,
         error: null,
         exportedTo: null,
         trace: { ...EMPTY_TRACE, settings: s.trace.settings },
@@ -872,24 +1028,33 @@ export const useProject = create<ProjectState>((set, get) => {
     },
 
     // With the proportions locked, changing one side scales the other with it.
+    // A design keeps the size it was drawn at, or its joints would no longer fit.
     setWidthMm: (widthMm) =>
-      set((s) => ({
-        widthMm,
-        heightMm: s.aspectLocked ? Math.round(((s.heightMm * widthMm) / s.widthMm) * 10) / 10 : s.heightMm,
-        ...staleGcode(),
-      })),
+      set((s) =>
+        s.design
+          ? {}
+          : {
+              widthMm,
+              heightMm: s.aspectLocked ? Math.round(((s.heightMm * widthMm) / s.widthMm) * 10) / 10 : s.heightMm,
+              ...staleGcode(),
+            },
+      ),
     setHeightMm: (heightMm) =>
-      set((s) => ({
-        heightMm,
-        widthMm: s.aspectLocked ? Math.round(((s.widthMm * heightMm) / s.heightMm) * 10) / 10 : s.widthMm,
-        ...staleGcode(),
-      })),
+      set((s) =>
+        s.design
+          ? {}
+          : {
+              heightMm,
+              widthMm: s.aspectLocked ? Math.round(((s.widthMm * heightMm) / s.heightMm) * 10) / 10 : s.widthMm,
+              ...staleGcode(),
+            },
+      ),
     setAspectLocked: (aspectLocked) => set({ aspectLocked }),
     setArtworkRect: (rect) =>
       set((s) => ({
         // A tenth of a millimetre is finer than either machine can place work.
-        widthMm: tenth(rect.width),
-        heightMm: tenth(rect.height),
+        widthMm: s.design ? s.widthMm : tenth(rect.width),
+        heightMm: s.design ? s.heightMm : tenth(rect.height),
         left: tenth(rect.x),
         front: tenth(s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height),
         ...staleGcode(),
@@ -1001,12 +1166,12 @@ export const useProject = create<ProjectState>((set, get) => {
         ...staleGcode(),
       })),
     setMachineKind: (machineKind) =>
-      set({
+      set((s) => ({
         machineKind,
         machinePreset: CUSTOM_PRESET,
-        operations: [fresh(machineKind)],
+        operations: s.design ? designOperations(s.design, { ...s, machineKind }) : [fresh(machineKind)],
         ...staleGcode(),
-      }),
+      })),
     setMaxPowerS: (maxPowerS) => set({ maxPowerS, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
     setOrigin: (origin) => set({ origin, machinePreset: CUSTOM_PRESET, ...staleGcode() }),
     applyMachinePreset: (id) => {
@@ -1024,7 +1189,12 @@ export const useProject = create<ProjectState>((set, get) => {
         endGcode: preset.endGcode,
         machineKind: preset.kind,
         // Operations are specific to the machine type; keep them when it is unchanged.
-        operations: s.machineKind === preset.kind ? s.operations : [fresh(preset.kind, s)],
+        operations:
+          s.machineKind === preset.kind
+            ? s.operations
+            : s.design
+              ? designOperations(s.design, { ...s, machineKind: preset.kind })
+              : [fresh(preset.kind, s)],
         ...staleGcode(),
       }));
     },
@@ -1054,7 +1224,7 @@ export const useProject = create<ProjectState>((set, get) => {
             savedAt: new Date().toISOString(),
             thumbnail: await makeThumbnail(s.image.url),
           },
-          JSON.stringify({ image, device, settings: snapshot(s), hasDepth: s.depth.status === "ready" }),
+          JSON.stringify({ image, device, settings: snapshot(s), hasDepth: s.depth.status === "ready", design: s.design }),
         );
         set({ galleryError: null });
         await get().refreshProjects();
@@ -1070,6 +1240,7 @@ export const useProject = create<ProjectState>((set, get) => {
           device: Device;
           settings: Snapshot;
           hasDepth: boolean;
+          design?: Design | null;
         };
         const picture = async (which: "image" | "depth") =>
           URL.createObjectURL(new Blob([await ipc.projectPicture(id, which)], { type: "image/png" }));
@@ -1098,8 +1269,16 @@ export const useProject = create<ProjectState>((set, get) => {
           exportedTo: null,
           galleryError: null,
           trace: { ...EMPTY_TRACE, settings: saved.settings.traceSettings },
+          design: null,
+          optimizeNote: null,
         });
         get().restore(saved.settings);
+        // A saved design is put back as the thing being cut.
+        const design = saved.design ?? null;
+        if (design?.sheets?.[design.sheet]) {
+          await ipc.setDesign(design.sheets[design.sheet].svg);
+          set({ design });
+        }
         scheduleTrace();
       } catch (e) {
         set({ galleryError: `The project could not be opened: ${message(e)}` });

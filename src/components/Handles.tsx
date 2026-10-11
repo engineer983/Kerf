@@ -78,13 +78,15 @@ interface HandlesProps {
   /** The rectangle must stay inside this one. */
   bounds?: Rect;
   dashed?: boolean;
+  /** The rectangle can be moved but not resized. */
+  moveOnly?: boolean;
   /** Converts a pointer position to bed coordinates. */
   toBed: (event: { clientX: number; clientY: number }) => [number, number];
   onChange: (rect: Rect) => void;
 }
 
 /** A frame around a rectangle that can be dragged to move it or resize it. */
-export function Handles({ rect, px, lockAspect, bounds, dashed, toBed, onChange }: HandlesProps) {
+export function Handles({ rect, px, lockAspect, bounds, dashed, moveOnly, toBed, onChange }: HandlesProps) {
   const drag = useRef<{ grip: Grip; from: [number, number]; start: Rect } | null>(null);
 
   const grab = (grip: Grip) => ({
@@ -125,7 +127,7 @@ export function Handles({ rect, px, lockAspect, bounds, dashed, toBed, onChange 
         style={{ cursor: "move" }}
         {...grab("move")}
       />
-      {HANDLES.map((h) => (
+      {(moveOnly ? [] : HANDLES).map((h) => (
         <rect
           key={h.id}
           x={rect.x + rect.width * h.fx - size / 2}

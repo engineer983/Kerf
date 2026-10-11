@@ -1,10 +1,13 @@
 import { X } from "lucide-react";
+import { CUT_COLOR, MARK_COLOR } from "../lib/design";
 import { isTauri, type OperationKind } from "../lib/ipc";
 import { findMaterial, MATERIALS } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
 import { artworkRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
 import { useToolbox } from "../state/tools";
+import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Section, Segmented, Select, Slider } from "./controls";
+import { DesignPanel } from "./DesignPanel";
 import { SimpleSetup } from "./SimpleSetup";
 
 const ALL_SHAPES = "all";
@@ -40,6 +43,7 @@ export function OperationsPanel() {
   const mode = useProject((s) => s.mode);
   const shaping = useProject((s) => s.depth.status === "working");
   const traced = useProject((s) => s.trace.result);
+  const designed = useProject((s) => s.design !== null);
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
   const actions = useProject.getState();
 
@@ -82,7 +86,7 @@ export function OperationsPanel() {
             : "Every setting is yours to change. Switching back to Simple replaces them with the automatic setup."}
         </p>
       </div>
-      {mode === "simple" && <SimpleSetup />}
+      {designed ? <DesignPanel /> : mode === "simple" && <SimpleSetup />}
       <Section title="Material">
         <Select
           label="Type"
@@ -130,11 +134,17 @@ export function OperationsPanel() {
 
       <Section title="Artwork">
         <p className="text-muted">
-          Drag the picture on the canvas to move it, or its handles to resize it.
+          {designed
+            ? "Drag the design on the canvas to move it. It stays the size it was drawn at, so that its parts fit."
+            : "Drag the picture on the canvas to move it, or its handles to resize it."}
         </p>
-        <NumberField label="Width" unit="mm" min={1} max={5000} value={widthMm} onChange={actions.setWidthMm} />
-        <NumberField label="Height" unit="mm" min={1} max={5000} value={heightMm} onChange={actions.setHeightMm} />
-        <Checkbox label="Keep proportions" checked={aspectLocked} onChange={actions.setAspectLocked} />
+        {!designed && (
+          <>
+            <NumberField label="Width" unit="mm" min={1} max={5000} value={widthMm} onChange={actions.setWidthMm} />
+            <NumberField label="Height" unit="mm" min={1} max={5000} value={heightMm} onChange={actions.setHeightMm} />
+            <Checkbox label="Keep proportions" checked={aspectLocked} onChange={actions.setAspectLocked} />
+          </>
+        )}
         <NumberField
           label="From left"
           unit="mm"
@@ -151,7 +161,7 @@ export function OperationsPanel() {
           value={front}
           onChange={(value) => actions.setPosition({ front: value })}
         />
-        <div className="grid grid-cols-2 gap-2">
+        <div className={designed ? "hidden" : "grid grid-cols-2 gap-2"}>
           <button
             className="rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent"
             onClick={() => actions.setCropping(!cropping)}
@@ -168,12 +178,12 @@ export function OperationsPanel() {
         </div>
       </Section>
 
-      {mode === "advanced" &&
+      {(mode === "advanced" || designed) &&
         operations.map((operation, index) => (
           <OperationCard
             key={operation.id}
             operation={operation}
-            title={`Operation ${index + 1}`}
+            title={(designed && operation.color && LINE_NAMES[operation.color]) || `Operation ${index + 1}`}
             colors={colors}
             removable={operations.length > 1}
           />
@@ -192,6 +202,13 @@ export function OperationsPanel() {
           className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
         >
           Add operation
+        </button>
+        <button
+          onClick={() => useUi.getState().setMaker("layers")}
+          title="Slice the picture into layers to cut from thin sheet and stack"
+          className="col-span-2 rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
+        >
+          Stacked layers…
         </button>
         <button
           onClick={actions.addCutout}
@@ -327,12 +344,16 @@ interface OperationCardProps {
   removable: boolean;
 }
 
+/** What a design's two kinds of line are for, in place of their colours. */
+const LINE_NAMES: Record<string, string> = { [CUT_COLOR]: "Lines to cut through", [MARK_COLOR]: "Guide marks" };
+
 function OperationCard({ operation, title, colors, removable }: OperationCardProps) {
   const { updateOperation, removeOperation, setOperationType, setOperationTool } =
     useProject.getState();
   const tools = useToolbox((s) => s.tools);
   const openToolbox = useToolbox((s) => s.setOpen);
   const material = useProject((s) => findMaterial(s.materialId));
+  const designed = useProject((s) => s.design !== null);
   const { id, kind } = operation;
   const isCnc = kind.type === "cncProfile" || kind.type === "cncRelief" || kind.type === "cncCutout";
   const thickness = useProject((s) => s.thickness);
@@ -421,7 +442,7 @@ function OperationCard({ operation, title, colors, removable }: OperationCardPro
           value={operation.color ?? ALL_SHAPES}
           options={[
             { value: ALL_SHAPES, label: "All shapes" },
-            ...colors.map((color) => ({ value: color, label: color })),
+            ...colors.map((color) => ({ value: color, label: (designed && LINE_NAMES[color]) || color })),
           ]}
           onChange={(color) => updateOperation(id, { color: color === ALL_SHAPES ? null : color })}
         />
