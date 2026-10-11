@@ -66,7 +66,7 @@ export default defineConfig(({ mode }) => {
       port: web ? 1421 : 1420,
       strictPort: true,
       host: host || false,
-      watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**", "**/target-*/**"] },
+      watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**", "**/target-*/**", "**/dist-web/**"] },
     },
   };
 });
