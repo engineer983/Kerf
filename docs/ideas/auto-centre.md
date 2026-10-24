@@ -179,13 +179,15 @@ Only a real camera over a real bed can settle these:
 6. Repeat with 18 mm stock, and on a router with the sheet clamped (frame only, no cutting, until the numbers are known).
 7. Record the numbers in the help text and in this plan.
 
-## Open questions
+## Decisions
 
-1. **When the material moves, does the design move with it?** *Recommend yes.* The layout was made on the material, so it should stay on it. Dragging the design itself is unaffected.
-2. **When an outline is applied, does it replace the typed width and length?** *Recommend:* the position always comes from the camera. The size comes from the camera too, unless it is within 10 mm of what was typed; then the typed size is kept, because a ruler beats a camera. The confirm panel shows both and has a "Keep my size" choice.
-3. **Is a rectangle enough for v1?** Offcuts are often L-shaped or ragged. *Recommend yes,* using the smallest rectangle around the material, with the shape warning. Placing a design inside an irregular outline is a later idea.
-4. **May the assistant set the material's position?** It can already set the size. *Recommend yes,* by adding `leftMm`/`frontMm` to the existing material tool, because it moves nothing but the drawing on screen. It still never runs detection or sees the camera.
-5. **Should "Find the material" run on its own every time a picture is taken?** *Recommend no.* It should always be pressed, so that the outline is never applied by surprise.
+Decided 2026-10-24, going with the recommendations.
+
+1. **When the material moves, does the design move with it?** *Decided: yes.* The layout was made on the material, so it should stay on it. Dragging the design itself is unaffected.
+2. **When an outline is applied, does it replace the typed width and length?** *Decided:* the position always comes from the camera. The size comes from the camera too, unless it is within 10 mm of what was typed; then the typed size is kept, because a ruler beats a camera. The confirm panel shows both and has a "Keep my size" choice.
+3. **Is a rectangle enough for v1?** Offcuts are often L-shaped or ragged. *Decided: yes,* using the smallest rectangle around the material, with the shape warning. Placing a design inside an irregular outline is a later idea.
+4. **May the assistant set the material's position?** It can already set the size. *Decided: yes,* by adding `leftMm`/`frontMm` to the existing material tool, because it moves nothing but the drawing on screen. It still never runs detection or sees the camera.
+5. **Should "Find the material" run on its own every time a picture is taken?** *Decided: no.* It should always be pressed, so that the outline is never applied by surprise.
 
 ## Build order
 

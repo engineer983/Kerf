@@ -210,13 +210,15 @@ Do each on scrap with the laser off (or the router's spindle off and the bit rai
 
 None. It also doesn't block ideas 1 and 2. If [auto-centre](README.md#2-auto-centre-the-design-on-the-material) (idea 2) later wants "move the head to the material's corner", it should reuse `kerf_grbl::jog` and the same deliberate-press rules.
 
-## Open questions
+## Decisions
 
-1. **How Hold is chosen.** As a fifth option in the distance selector, or a separate "Hold to move" checkbox? *Recommend the selector option.* It is one control, and the current mode is always visible.
-2. **Speed values.** Slow / Normal / Fast = 300 / 1000 / 3000 mm/min for X and Y, Z at one fifth, capped by `$110`–`$112`? *Recommend yes.* A small laser may want Fast lower; the cap handles most of that.
-3. **Keys.** Arrows for X and Y and Page Up / Page Down for Z, only while the pad is focused? *Recommend yes.* LightBurn and UGS use similar keys, and focus-only avoids clashing with the canvas.
-4. **Go to XY zero on a router.** Should it raise Z by a set amount first? *Recommend no for v1.* Kerf can't know a safe height without a homed Z, and the button tip tells the person to raise the bit. Revisit with probing.
-5. **Diagonal held jogs.** Allow them (two keys at once)? *Recommend no for v1.* With one axis at a time, a stuck key can only drive one axis. Diagonal steps by clicking aren't offered today either.
+Decided 2026-10-24, going with the recommendations.
+
+1. **How Hold is chosen.** As a fifth option in the distance selector, or a separate "Hold to move" checkbox? *Decided: the selector option.* It is one control, and the current mode is always visible.
+2. **Speed values.** Slow / Normal / Fast = 300 / 1000 / 3000 mm/min for X and Y, Z at one fifth, capped by `$110`–`$112`? *Decided: yes.* A small laser may want Fast lower; the cap handles most of that.
+3. **Keys.** Arrows for X and Y and Page Up / Page Down for Z, only while the pad is focused? *Decided: yes.* LightBurn and UGS use similar keys, and focus-only avoids clashing with the canvas.
+4. **Go to XY zero on a router.** Should it raise Z by a set amount first? *Decided: no for v1.* Kerf can't know a safe height without a homed Z, and the button tip tells the person to raise the bit. Revisit with probing.
+5. **Diagonal held jogs.** Allow them (two keys at once)? *Decided: no for v1.* With one axis at a time, a stuck key can only drive one axis. Diagonal steps by clicking aren't offered today either.
 
 ## Build order
 
