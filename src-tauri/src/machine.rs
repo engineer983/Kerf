@@ -2,11 +2,12 @@
 
 use std::sync::Mutex;
 
-use kerf_grbl::{Connection, PortInfo, DEFAULT_BAUD};
+use kerf_gcode::MachineKind;
+use kerf_grbl::{Connection, MachineState, PortInfo, Tool, DEFAULT_BAUD};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{blocking, AppState};
+use crate::{blocking, AppState, StoredProgram};
 
 /// Name of the event that carries every [`kerf_grbl::Event`] to the UI.
 const MACHINE_EVENT: &str = "machine";
@@ -18,6 +19,11 @@ impl MachineLink {
     fn with<T>(&self, action: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
         let guard = self.0.lock().unwrap();
         action(guard.as_ref().ok_or("No machine is connected.")?)
+    }
+
+    /// Closes the connection, which resets the machine if it is still running.
+    pub fn close(&self) {
+        drop(self.0.lock().unwrap().take());
     }
 }
 
@@ -58,8 +64,11 @@ pub enum MachineAction {
     Hold,
     Resume,
     Reset,
-    /// Streams the most recently generated program.
-    StartJob,
+    /// Streams the generated program, which must be the one with this id:
+    /// the one the interface shows.
+    StartJob {
+        program_id: u64,
+    },
     StopJob,
 }
 
@@ -97,7 +106,21 @@ pub async fn connect_machine(
 
 #[tauri::command]
 pub async fn disconnect_machine(link: State<'_, MachineLink>) -> Result<(), String> {
-    let connection = link.0.lock().unwrap().take();
+    let connection = {
+        let mut guard = link.0.lock().unwrap();
+        // Disconnecting resets a running machine, losing its position, so it is
+        // refused while the machine may be working. A lost port is different:
+        // it is reported, and the machine's own stop is the way to stop it.
+        if let Some(state) = guard.as_ref().and_then(Connection::state) {
+            if !matches!(
+                state,
+                MachineState::Idle | MachineState::Alarm | MachineState::Sleep
+            ) {
+                return Err("Stop the machine before disconnecting.".into());
+            }
+        }
+        guard.take()
+    };
     // Dropping joins the worker thread, so do it off the async runtime.
     blocking(move || {
         drop(connection);
@@ -159,10 +182,14 @@ pub fn machine_action(
         MachineAction::Hold => machine.hold(),
         MachineAction::Resume => machine.resume(),
         MachineAction::Reset => machine.reset(),
-        MachineAction::StartJob => {
+        MachineAction::StartJob { program_id } => {
             let gcode = state.gcode.lock().unwrap();
-            let program = gcode.as_deref().ok_or("Generate the G-code first.")?;
-            machine.start_job(program)
+            let program = StoredProgram::matching(&gcode, program_id)?;
+            let tool = match program.kind {
+                MachineKind::Laser => Tool::Laser,
+                MachineKind::Cnc => Tool::Spindle,
+            };
+            machine.start_job(&program.text, tool)
         }
         MachineAction::StopJob => machine.stop_job(),
     })

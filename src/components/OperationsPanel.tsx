@@ -3,7 +3,15 @@ import { CUT_COLOR, isFixed, MARK_COLOR } from "../lib/design";
 import { isTauri, type OperationKind } from "../lib/ipc";
 import { findMaterial } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
-import { everythingRect, stockRect, traceColors, useProject, type OperationItem } from "../state/project";
+import {
+  everythingRect,
+  MIXED_BITS_MESSAGE,
+  stockRect,
+  traceColors,
+  useProject,
+  usesMixedBits,
+  type OperationItem,
+} from "../state/project";
 import { useToolbox } from "../state/tools";
 import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Segmented, Select, Slider } from "./controls";
@@ -53,12 +61,7 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
-  // Two included router operations with different bits cannot run as one job:
-  // the bit has to be changed, and Z zeroed again, in between.
-  const bitsInUse = new Set(
-    operations.filter((o) => o.enabled !== false && o.toolId).map((o) => o.toolId),
-  );
-  const mixedBits = machineKind === "cnc" && bitsInUse.size > 1;
+  const mixedBits = usesMixedBits({ machineKind, operations, items });
   const art = everythingRect({ image, widthMm, heightMm, left, front, bed, origin, items });
   const stock = stockRect({ stockWidth, stockLength, bed, origin });
   const overhangs =
@@ -108,10 +111,9 @@ export function OperationsPanel() {
           />
         ))}
 
-      {mode === "advanced" && mixedBits && (
+      {mixedBits && (
         <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
-          These operations use different bits. Untick "Include in the job" on all but one, run it,
-          change the bit, zero Z again, then do the next.
+          {MIXED_BITS_MESSAGE}
         </p>
       )}
       <div className={mode === "advanced" ? "grid grid-cols-2 gap-2" : "hidden"}>
@@ -144,7 +146,7 @@ export function OperationsPanel() {
           onClick={() => void actions.generateGcode()}
           // Generating while the picture's shape is still being worked out
           // would quietly carve from brightness instead.
-          disabled={busy || !traced || shaping}
+          disabled={busy || !traced || shaping || mixedBits}
           className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           {busy ? "Generating…" : shaping ? "Working out the shape…" : "Generate G-code"}

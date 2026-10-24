@@ -220,11 +220,20 @@ pub(crate) fn cut(
     // material left, so the bit's centre is lifted for that plus its own width.
     let tab_top = -(depth - tab_height.clamp(0.0, depth));
     let lifted = tab_width + tool_diameter;
-    let tabs = if tab_width > 0.0 && tab_height > 0.0 && lifted * (tabs as f64) < length * 0.8 {
-        tabs as usize
-    } else {
-        0
-    };
+    // A piece cut free without its tabs can be thrown by the bit, so tabs
+    // that cannot be made are an error, never quietly left out.
+    if tabs > 0 && (tab_width <= 0.0 || tab_height <= 0.0) {
+        return Err("Tabs need a width and a height greater than zero. To cut without tabs, set the number of tabs to 0.".into());
+    }
+    if lifted * (tabs as f64) >= length * 0.8 {
+        return Err(format!(
+            "{tabs} tabs {} mm wide do not fit round this {:.0} mm cut with a {} mm bit. Use fewer or narrower tabs.",
+            num(tab_width),
+            length,
+            num(tool_diameter)
+        ));
+    }
+    let tabs = tabs as usize;
     let spans: Vec<[f64; 2]> = (0..tabs)
         .map(|i| {
             let centre = length * (i as f64 + 0.5) / tabs as f64;
@@ -314,6 +323,7 @@ mod tests {
                 end_gcode: String::new(),
             },
             offset: [50.0, 60.0],
+            material_thickness: None,
             operations: vec![Operation {
                 color: None,
                 kind,
@@ -582,5 +592,54 @@ mod tests {
         assert!(generate(&artwork(), &off_bed)
             .unwrap_err()
             .contains("does not fit"));
+    }
+
+    #[test]
+    fn tabs_that_do_not_fit_are_refused_not_dropped() {
+        // A 140 mm loop: twelve tabs, each lifting the bit for 10 mm, leave
+        // too little cut between them.
+        let error = generate(&artwork(), &job(cutout(Side::On, 0.0, 12))).unwrap_err();
+        assert!(
+            error.contains("12 tabs") && error.contains("do not fit"),
+            "{error}"
+        );
+
+        let mut flat = cutout(Side::On, 0.0, 4);
+        if let OperationKind::CncCutout { tab_height, .. } = &mut flat {
+            *tab_height = 0.0;
+        }
+        let error = generate(&artwork(), &job(flat)).unwrap_err();
+        assert!(error.contains("number of tabs to 0"), "{error}");
+
+        // No tabs asked for is still allowed.
+        assert!(generate(&artwork(), &job(cutout(Side::On, 0.0, 0))).is_ok());
+    }
+
+    #[test]
+    fn cuts_deeper_than_the_material_are_refused() {
+        // The cutout is 6 mm deep; 1 mm past the material is allowed.
+        let mut through = job(cutout(Side::Outside, 2.0, 4));
+        through.material_thickness = Some(5.0);
+        assert!(generate(&artwork(), &through).is_ok());
+
+        let mut thin = job(cutout(Side::Outside, 2.0, 4));
+        thin.material_thickness = Some(3.0);
+        let error = generate(&artwork(), &thin).unwrap_err();
+        assert!(
+            error.contains("6 mm deep") && error.contains("only 3 mm thick"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn operations_with_different_bits_are_refused() {
+        let mut two = job(cutout(Side::Outside, 2.0, 4));
+        let mut wider = two.operations[0].clone();
+        if let OperationKind::CncCutout { tool_diameter, .. } = &mut wider.kind {
+            *tool_diameter = 6.0;
+        }
+        two.operations.push(wider);
+        let error = generate(&artwork(), &two).unwrap_err();
+        assert!(error.contains("different sizes"), "{error}");
     }
 }

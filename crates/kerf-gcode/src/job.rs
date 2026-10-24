@@ -153,6 +153,77 @@ pub struct Job {
     /// bed's top-left (back-left) corner with Y pointing towards the front.
     pub offset: [f64; 2],
     pub operations: Vec<Operation>,
+    /// The material's thickness in millimetres, when known. Router depths
+    /// beyond it (plus a little, to cut cleanly through) are refused.
+    #[serde(default)]
+    pub material_thickness: Option<f64>,
+}
+
+/// How far a router may cut below the material, into whatever is under it,
+/// to be sure of cutting right through.
+pub const THROUGH_CUT_ALLOWANCE_MM: f64 = 1.0;
+
+impl Job {
+    /// Checks that hold across all of a job's operations, `added` included.
+    pub(crate) fn check(&self, added: &[Operation]) -> Result<(), String> {
+        let operations: Vec<&Operation> = self.operations.iter().chain(added).collect();
+
+        // One job is cut with one bit: changing it means stopping and zeroing
+        // Z again, which a single program cannot do.
+        let mut bits: Vec<f64> = operations
+            .iter()
+            .filter_map(|o| o.kind.tool_diameter())
+            .collect();
+        bits.sort_by(f64::total_cmp);
+        bits.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        if bits.len() > 1 {
+            let sizes: Vec<String> = bits.iter().map(|d| format!("{d} mm")).collect();
+            return Err(format!(
+                "These operations use bits of different sizes ({}). Include the operations for one bit at a time, and zero Z again after changing it.",
+                sizes.join(", ")
+            ));
+        }
+
+        if let Some(thickness) = self.material_thickness {
+            if !(thickness.is_finite() && thickness > 0.0) {
+                return Err("The material's thickness must be greater than zero.".into());
+            }
+            let limit = thickness + THROUGH_CUT_ALLOWANCE_MM;
+            for (index, operation) in operations.iter().enumerate() {
+                if let Some(depth) = operation.kind.depth() {
+                    if depth > limit + 1e-9 {
+                        return Err(format!(
+                            "Operation {} cuts {depth} mm deep, but the material is only {thickness} mm thick. Make it at most {limit} mm deep, or correct the thickness in step 2, Material.",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl OperationKind {
+    /// How deep a router operation cuts; `None` for a laser.
+    pub fn depth(&self) -> Option<f64> {
+        match *self {
+            Self::CncProfile { depth, .. }
+            | Self::CncRelief { depth, .. }
+            | Self::CncCutout { depth, .. } => Some(depth),
+            _ => None,
+        }
+    }
+
+    /// The router bit's diameter, for operations that are told it.
+    pub fn tool_diameter(&self) -> Option<f64> {
+        match *self {
+            Self::CncRelief { tool_diameter, .. } | Self::CncCutout { tool_diameter, .. } => {
+                Some(tool_diameter)
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Operation {

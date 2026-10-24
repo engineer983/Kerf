@@ -338,6 +338,7 @@ mod tests {
                 end_gcode: String::new(),
             },
             offset: [10.0, 10.0],
+            material_thickness: None,
             operations: vec![Operation {
                 color: None,
                 kind,

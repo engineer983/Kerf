@@ -38,6 +38,9 @@ impl MachineState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Status {
     pub state: MachineState,
+    /// The number after the state, as in `Hold:0`. For a hold, 0 means the
+    /// machine has come to rest and 1 that it is still slowing down.
+    pub sub_state: Option<u32>,
     /// Machine position, if the report carries `MPos`.
     pub machine_position: Option<[f64; 3]>,
     /// Work position, if the report carries `WPos`.
@@ -100,8 +103,10 @@ impl Response {
 
 fn parse_status(body: &str) -> Option<Status> {
     let mut fields = body.split('|');
+    let state = fields.next()?;
     let mut status = Status {
-        state: MachineState::parse(fields.next()?),
+        state: MachineState::parse(state),
+        sub_state: state.split_once(':').and_then(|(_, n)| n.parse().ok()),
         machine_position: None,
         work_position: None,
         work_offset: None,
@@ -183,6 +188,7 @@ mod tests {
             panic!("expected a status report");
         };
         assert_eq!(status.state, MachineState::Hold);
+        assert_eq!(status.sub_state, Some(0));
         assert_eq!(status.machine_position, Some([10.0, -5.5, 2.0]));
         assert_eq!(status.work_offset, Some([1.0, 2.0, 3.0]));
         assert_eq!((status.feed, status.spindle), (Some(1200.0), Some(8000.0)));
@@ -196,6 +202,7 @@ mod tests {
             panic!("expected a status report");
         };
         assert_eq!(status.state, MachineState::Other);
+        assert_eq!(status.sub_state, None);
         assert_eq!(status.work_position, Some([1.0, 2.0, 3.0]));
         assert_eq!(status.feed, Some(500.0));
     }

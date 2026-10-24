@@ -81,7 +81,13 @@ export const useMachine = create<MachineStore>((set, get) => {
           }
           break;
         case "disconnected":
-          set({ ...DISCONNECTED, error: event.reason && `Connection lost: ${event.reason}` });
+          set({
+            ...DISCONNECTED,
+            // Once the port is gone Kerf can no longer stop the machine.
+            error:
+              event.reason &&
+              `Connection lost: ${event.reason}. If the machine is still moving, use its own stop or emergency stop.`,
+          });
           log("Disconnected.");
           break;
       }

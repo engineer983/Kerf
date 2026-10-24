@@ -6,16 +6,17 @@ mod machine;
 mod pictures;
 mod web;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kerf_core::design::Design;
 use kerf_core::{Added, DepthOptions, Generated, JobInput, LoadedImage};
-use kerf_gcode::Job;
+use kerf_gcode::{Job, MachineKind};
 use kerf_trace::image::DynamicImage;
 use kerf_trace::{TraceSettings, Traced};
 use serde::Serialize;
 use tauri::ipc::{InvokeBody, Request};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, RunEvent, State};
 use tauri_plugin_dialog::DialogExt;
 
 #[derive(Default)]
@@ -23,8 +24,39 @@ pub(crate) struct AppState {
     pub(crate) image: Mutex<Option<LoadedImage>>,
     /// A box or layered design, which takes the place of the traced picture.
     pub(crate) design: Mutex<Option<Design>>,
-    /// Text of the most recently generated program, kept here for export and sending.
-    pub(crate) gcode: Mutex<Option<String>>,
+    /// The most recently generated program, kept here for export and sending.
+    pub(crate) gcode: Mutex<Option<StoredProgram>>,
+    /// The id given to the latest request to generate a program.
+    latest_program: AtomicU64,
+}
+
+/// A generated program, with what it is for.
+pub(crate) struct StoredProgram {
+    /// Matches the `programId` the interface was given with this program, so
+    /// that what is exported or run is what is on screen.
+    pub(crate) id: u64,
+    pub(crate) kind: MachineKind,
+    pub(crate) text: String,
+}
+
+impl StoredProgram {
+    /// The program's text, if it is the one the interface is showing.
+    pub(crate) fn matching(stored: &Option<Self>, id: u64) -> Result<&Self, String> {
+        match stored {
+            Some(program) if program.id == id => Ok(program),
+            Some(_) => Err("The G-code has changed since it was shown. Generate it again.".into()),
+            None => Err("Generate the G-code first.".into()),
+        }
+    }
+}
+
+/// A generated program as the interface sees it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedProgram {
+    #[serde(flatten)]
+    generated: Generated,
+    program_id: u64,
 }
 
 impl AppState {
@@ -210,7 +242,9 @@ async fn generate_gcode(
     // cutouts go round.
     cutout_around: Option<[f64; 4]>,
     state: State<'_, AppState>,
-) -> Result<Generated, String> {
+) -> Result<GeneratedProgram, String> {
+    let id = state.latest_program.fetch_add(1, Ordering::SeqCst) + 1;
+    let kind = job.machine.kind;
     *state.gcode.lock().unwrap() = None;
     let input = JobInput {
         image: state.image(false)?,
@@ -225,8 +259,16 @@ async fn generate_gcode(
         cutout_around,
     };
     let (generated, text) = blocking(move || kerf_core::generate(input)).await?;
-    *state.gcode.lock().unwrap() = Some(text);
-    Ok(generated)
+    let mut stored = state.gcode.lock().unwrap();
+    // A slower, earlier request must not replace the program of a later one.
+    if state.latest_program.load(Ordering::SeqCst) != id {
+        return Err("A newer program has been asked for since.".into());
+    }
+    *stored = Some(StoredProgram { id, kind, text });
+    Ok(GeneratedProgram {
+        generated,
+        program_id: id,
+    })
 }
 /// Writes the last generated program where the user chooses.
 /// Returns the saved path, or `None` if the dialog was cancelled.
@@ -234,14 +276,12 @@ async fn generate_gcode(
 async fn export_gcode(
     app: AppHandle,
     suggested_name: String,
+    program_id: u64,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let text = state
-        .gcode
-        .lock()
-        .unwrap()
-        .clone()
-        .ok_or("Generate the G-code first.")?;
+    let text = StoredProgram::matching(&state.gcode.lock().unwrap(), program_id)?
+        .text
+        .clone();
     blocking(move || {
         let Some(target) = app
             .dialog()
@@ -305,6 +345,13 @@ pub fn run() {
             drawing::list_fonts,
             drawing::make_text
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Kerf");
+        .build(tauri::generate_context!())
+        .expect("error while starting Kerf")
+        .run(|app, event| {
+            // Closing the connection resets a machine that is still running,
+            // which nothing could stop from Kerf once it has quit.
+            if let RunEvent::Exit = event {
+                app.state::<machine::MachineLink>().close();
+            }
+        });
 }

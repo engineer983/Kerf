@@ -95,6 +95,7 @@ pub fn generate_composed(
     for operation in job.operations.iter().chain(added) {
         operation.validate(&job.machine)?;
     }
+    job.check(added)?;
     // Each operation, with whether it works on the additions.
     let order: Vec<(&Operation, bool)> = job
         .operations
@@ -364,24 +365,100 @@ fn cnc_profile(w: &mut Writer, operation: &Operation, polylines: &[&Polyline]) {
     }
 }
 
-/// Greedy nearest-neighbour ordering by start point, to shorten travel moves.
+/// Orders paths to shorten travel moves, nearest start point first, except
+/// that anything inside a closed path is cut before it. Cutting an outline
+/// first can free the piece, which a router bit may then throw, or which can
+/// shift or tip up before the cuts inside it are made.
 fn order_by_travel<'a>(polylines: &[&'a Polyline], from: [f64; 2]) -> Vec<&'a Polyline> {
-    let mut remaining = polylines.to_vec();
+    let boxes: Vec<[f64; 4]> = polylines.iter().map(|p| bounding_box(&p.points)).collect();
+    // For each path, the closed paths it lies inside, and for each closed
+    // path, how many paths inside it are still to be cut.
+    let mut containers: Vec<Vec<usize>> = vec![Vec::new(); polylines.len()];
+    let mut uncut_inside = vec![0usize; polylines.len()];
+    for (outer, outline) in polylines.iter().enumerate() {
+        if !outline.closed || outline.points.len() < 3 {
+            continue;
+        }
+        for (inner, path) in polylines.iter().enumerate() {
+            // A strictly smaller box rules out cycles, so some path is always
+            // ready to cut.
+            if inner != outer
+                && box_within(boxes[inner], boxes[outer])
+                && box_area(boxes[inner]) < box_area(boxes[outer]) - 1e-9
+                && inside(path.points[0], &outline.points)
+            {
+                containers[inner].push(outer);
+                uncut_inside[outer] += 1;
+            }
+        }
+    }
+
+    let mut remaining: Vec<usize> = (0..polylines.len()).collect();
     let mut ordered = Vec::with_capacity(remaining.len());
     let mut position = from;
     while !remaining.is_empty() {
-        let (nearest, _) = remaining
+        let (slot, _) = remaining
             .iter()
             .enumerate()
-            .map(|(i, p)| (i, distance(position, p.points[0])))
+            .filter(|(_, &i)| uncut_inside[i] == 0)
+            .map(|(slot, &i)| (slot, distance(position, polylines[i].points[0])))
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("remaining is not empty");
-        let polyline = remaining.swap_remove(nearest);
+            .expect("a path with nothing left inside it");
+        let index = remaining.swap_remove(slot);
+        for &outer in &containers[index] {
+            uncut_inside[outer] -= 1;
+        }
+        let polyline = polylines[index];
         // A closed path, or an open one cut an even number of times, ends where it starts.
         position = polyline.points[0];
         ordered.push(polyline);
     }
     ordered
+}
+
+/// `[min_x, min_y, max_x, max_y]`.
+fn bounding_box(points: &[[f64; 2]]) -> [f64; 4] {
+    points.iter().fold(
+        [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ],
+        |b, p| {
+            [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ]
+        },
+    )
+}
+
+fn box_within(inner: [f64; 4], outer: [f64; 4]) -> bool {
+    inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+fn box_area(b: [f64; 4]) -> f64 {
+    (b[2] - b[0]) * (b[3] - b[1])
+}
+
+/// Whether `point` is inside the polygon `outline`, by the even-odd rule.
+fn inside(point: [f64; 2], outline: &[[f64; 2]]) -> bool {
+    let mut result = false;
+    let mut previous = outline[outline.len() - 1];
+    for &current in outline {
+        if (current[1] > point[1]) != (previous[1] > point[1]) {
+            let x = current[0]
+                + (point[1] - current[1]) / (previous[1] - current[1]) * (previous[0] - current[0]);
+            if point[0] < x {
+                result = !result;
+            }
+        }
+        previous = current;
+    }
+    result
 }
 
 /// Formats a number with up to three decimals and no trailing zeros.
@@ -607,6 +684,7 @@ mod tests {
         Job {
             machine: machine(MachineKind::Laser),
             offset: [20.0, 30.0],
+            material_thickness: None,
             operations: vec![Operation {
                 color: None,
                 kind,
@@ -615,6 +693,90 @@ mod tests {
                 passes,
             }],
         }
+    }
+
+    /// The order in which each loop of a ring is cut, by its first cutting
+    /// move's X: the outer square starts at X20, the inner one at X30.
+    fn first_cuts(program: &Program) -> Vec<&str> {
+        code(program)
+            .into_iter()
+            .filter(|l| l.starts_with("G0 X"))
+            .collect()
+    }
+
+    fn ring() -> Artwork {
+        // An outer square starting at the corner nearest the origin, and a hole.
+        artwork(
+            40,
+            r##"<path d="M0 0H40V40H0Z M10 10H30V30H10Z" fill="#000000"/>"##,
+        )
+    }
+
+    #[test]
+    fn holes_are_cut_before_the_outline_round_them() {
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.offset = [10.0, 10.0];
+        let program = generate(&ring(), &job).unwrap();
+        let rapids = first_cuts(&program);
+        // The inner loop's corner (bed 20, 20) is reached before the outer one's (10, 10).
+        let inner = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X20 Y80"))
+            .expect("inner loop");
+        let outer = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X10 Y90"))
+            .expect("outer loop");
+        assert!(inner < outer, "{rapids:?}");
+    }
+
+    #[test]
+    fn a_router_cuts_holes_before_the_outline_too() {
+        let job = Job {
+            machine: machine(MachineKind::Cnc),
+            offset: [10.0, 10.0],
+            material_thickness: Some(3.0),
+            operations: vec![Operation {
+                color: None,
+                kind: OperationKind::CncProfile {
+                    depth: 3.0,
+                    depth_per_pass: 1.5,
+                    plunge_feed: 200.0,
+                    safe_z: 5.0,
+                    spindle_rpm: 16000.0,
+                },
+                feed: 800.0,
+                power: 0.0,
+                passes: 1,
+            }],
+        };
+        let program = generate(&ring(), &job).unwrap();
+        let rapids = first_cuts(&program);
+        let inner = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X20 Y80"))
+            .expect("inner loop");
+        let outer = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X10 Y90"))
+            .expect("outer loop");
+        assert!(inner < outer, "{rapids:?}");
+    }
+
+    #[test]
+    fn separate_shapes_are_still_ordered_by_distance() {
+        let squares = artwork(
+            40,
+            r##"<path d="M30 30H40V40H30Z" fill="#000000"/><path d="M0 0H10V10H0Z" fill="#000000"/>"##,
+        );
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.offset = [0.0, 0.0];
+        let program = generate(&squares, &job).unwrap();
+        let rapids = first_cuts(&program);
+        // From X0 Y0 the square at machine X30 Y70 (76 mm away) comes before
+        // the one at X0 Y100, even though it is listed first in neither.
+        assert_eq!(rapids.len(), 3, "{rapids:?}");
+        assert!(rapids[0].starts_with("G0 X30 Y70"), "{rapids:?}");
     }
 
     /// Program lines without the leading comment.
@@ -808,6 +970,7 @@ mod tests {
         let job = Job {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
+            material_thickness: None,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -890,6 +1053,7 @@ mod tests {
         let job = Job {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
+            material_thickness: None,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {

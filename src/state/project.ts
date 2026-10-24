@@ -99,6 +99,32 @@ export function jobOrder(operations: OperationItem[], hasItems: boolean) {
   return { main, items, cutouts, all: [...main, ...items, ...cutouts] };
 }
 
+/**
+ * Whether the router operations in the job use more than one bit. They cannot
+ * run as one job: the bit has to be changed, and Z zeroed again, in between.
+ */
+export function usesMixedBits(s: { machineKind: MachineKind; operations: OperationItem[]; items: unknown[] }): boolean {
+  if (s.machineKind !== "cnc") return false;
+  const bits = new Set(jobOrder(s.operations, s.items.length > 0).all.map((o) => o.toolId).filter(Boolean));
+  return bits.size > 1;
+}
+
+/**
+ * Router cuts that went exactly through the old thickness go through the new
+ * one too, rather than stopping short or cutting deep into what is beneath.
+ */
+function followThickness(operations: OperationItem[], from: number, to: number): OperationItem[] {
+  if (from === to) return operations;
+  return operations.map((op) =>
+    (op.kind.type === "cncCutout" || op.kind.type === "cncProfile") && Math.abs(op.kind.depth - from) < 0.001
+      ? { ...op, kind: { ...op.kind, depth: to } }
+      : op,
+  );
+}
+
+export const MIXED_BITS_MESSAGE =
+  'These operations use different bits. Untick "Include in the job" on all but one, run it, change the bit, zero Z again, then do the next.';
+
 /** A cut right through the material, a little outside the artwork, with tabs. */
 export function defaultCutout(thickness: number): OperationKind {
   return {
@@ -1710,15 +1736,17 @@ export const useProject = create<ProjectState>((set, get) => {
     setMaterial: (materialId) =>
       set((s) => {
         const next = { ...s, materialId };
+        const thickness = findMaterial(materialId).thickness;
         // Speeds depend on the material, so router operations are recalculated.
         return {
           materialId,
-          thickness: findMaterial(materialId).thickness,
-          operations: s.operations.map((op) => equip(op, next)),
+          thickness,
+          operations: followThickness(s.operations, s.thickness, thickness).map((op) => equip(op, next)),
           ...staleGcode(),
         };
       }),
-    setThickness: (thickness) => set({ thickness }),
+    setThickness: (thickness) =>
+      set((s) => ({ thickness, operations: followThickness(s.operations, s.thickness, thickness), ...staleGcode() })),
     setStock: (patch) => set(patch),
     setSpindleRpm: (spindleRpm) =>
       set((s) => ({
@@ -1816,6 +1844,10 @@ export const useProject = create<ProjectState>((set, get) => {
       const order = jobOrder(s.operations, s.items.length > 0);
       const around = everythingRect(s);
       const generation = ++gcodeGeneration;
+      if (usesMixedBits(s)) {
+        set({ gcode: { ...EMPTY_GCODE, error: MIXED_BITS_MESSAGE } });
+        return;
+      }
       set({ gcode: { ...EMPTY_GCODE, busy: true } });
       try {
         const program = await ipc.generateGcode(s.trace.settings, s, {
@@ -1832,6 +1864,7 @@ export const useProject = create<ProjectState>((set, get) => {
           offset: [rect.x, rect.y],
           // Cutouts are run last by the generator, wherever they are listed.
           operations: [...order.main, ...order.cutouts],
+          materialThickness: s.thickness,
         }, {
           enabled: s.heightSource === "depth" && s.depth.status === "ready",
           detail: s.detail,
@@ -1858,7 +1891,7 @@ export const useProject = create<ProjectState>((set, get) => {
       const generation = gcodeGeneration;
       const suggestedName = `${image.name.replace(/\.[^.]+$/, "")}.gcode`;
       try {
-        const path = await ipc.exportGcode(suggestedName);
+        const path = await ipc.exportGcode(suggestedName, gcode.program.programId);
         if (path && generation === gcodeGeneration) {
           set((s) => ({ gcode: { ...s.gcode, exportedTo: path, error: null } }));
         }

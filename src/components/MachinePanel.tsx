@@ -19,6 +19,7 @@ const primary =
 export function MachinePanel() {
   const preset = useProject((s) => MACHINE_PRESETS.find((p) => p.id === s.machinePreset));
   const program = useProject((s) => s.gcode.program);
+  const machineKind = useProject((s) => s.machineKind);
   const m = useMachine();
   const [step, setStep] = useState("1");
   const [command, setCommand] = useState("");
@@ -57,6 +58,11 @@ export function MachinePanel() {
 
   const running = jobIsActive(m.job);
   const idle = m.connected && m.state === "idle" && !running;
+  // Moving, or perhaps about to: still working through a job's last lines,
+  // jogging, or paused.
+  const moving = running || m.state === "run" || m.state === "jog" || m.state === "hold";
+  const canDisconnect = !running && (m.state === null || ["idle", "alarm", "sleep"].includes(m.state));
+  const modeProblem = laserModeProblem(machineKind, m.settings[32]);
   const distance = Number(step);
   const jog = (x: number, y: number, z: number) =>
     void m.act({ type: "jog", x: x * distance, y: y * distance, z: z * distance, feed: z ? JOG_FEED_Z : JOG_FEED });
@@ -89,7 +95,12 @@ export function MachinePanel() {
           </button>
         </div>
         {m.connected ? (
-          <button onClick={() => void m.disconnect()} disabled={running} className={`${quiet} text-muted`}>
+          <button
+            onClick={() => void m.disconnect()}
+            disabled={!canDisconnect}
+            title={canDisconnect ? undefined : "Stop the machine before disconnecting"}
+            className={`${quiet} text-muted`}
+          >
             Disconnect
           </button>
         ) : (
@@ -177,11 +188,18 @@ export function MachinePanel() {
                 >
                   Frame the job outline
                 </button>
+                {modeProblem && (
+                  <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
+                    {modeProblem}
+                  </p>
+                )}
                 <button
                   className={primary}
-                  disabled={!idle}
+                  disabled={!idle || modeProblem !== null || program.programId === undefined}
                   onClick={() => {
-                    if (armed) void m.act({ type: "startJob" });
+                    if (armed && program.programId !== undefined) {
+                      void m.act({ type: "startJob", programId: program.programId });
+                    }
                     setArmed(!armed);
                   }}
                 >
@@ -205,14 +223,16 @@ export function MachinePanel() {
                 {m.job.message && <p className="mt-2 text-accent">{m.job.message}</p>}
               </div>
             )}
-            {(running || m.state === "hold") && (
+            {moving && (
               <div className="grid grid-cols-2 gap-2">
-                {m.state === "hold" ? (
+                {running && m.state === "hold" ? (
                   <button className={quiet} onClick={() => void m.act({ type: "resume" })}>Resume</button>
-                ) : (
+                ) : running ? (
                   <button className={quiet} onClick={() => void m.act({ type: "hold" })}>Pause</button>
+                ) : (
+                  <span />
                 )}
-                <button className={primary} onClick={() => void m.act({ type: running ? "stopJob" : "reset" })}>
+                <button className={primary} onClick={() => void m.act({ type: "stopJob" })}>
                   Stop
                 </button>
               </div>
@@ -244,6 +264,25 @@ export function MachinePanel() {
       )}
     </div>
   );
+}
+
+/**
+ * Why the machine's laser mode (GRBL setting $32) does not suit the job, or
+ * null if it does. The desktop app refuses to start the job either way; this
+ * says so before the button is pressed.
+ */
+function laserModeProblem(kind: "laser" | "cnc", value: string | undefined): string | null {
+  if (value === undefined) {
+    return "Kerf has not read the machine's settings yet, so it cannot check laser mode ($32). Send $$ from the console below.";
+  }
+  const on = Number(value) === 1;
+  if (kind === "laser" && !on) {
+    return "Laser mode is off ($32=" + value + "). Without it the laser stays on whenever the machine pauses. Send $32=1 from the console below.";
+  }
+  if (kind === "cnc" && on) {
+    return "Laser mode is on ($32=1), so the spindle would stop on every rapid move. For a router, send $32=0 from the console below.";
+  }
+  return null;
 }
 
 interface JogButtonProps {

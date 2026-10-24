@@ -135,6 +135,8 @@ export interface Job {
   /** Top-left of the artwork, in mm from the bed's back-left corner. */
   offset: [number, number];
   operations: Operation[];
+  /** The material's thickness in mm; router depths much beyond it are refused. */
+  materialThickness?: number;
 }
 
 export interface Generated {
@@ -151,6 +153,11 @@ export interface Generated {
   /** Index in `moves` of the first move of each operation. */
   operationStarts: number[];
   head: string;
+  /**
+   * Identifies this program in the desktop app, so that exporting or running
+   * it is refused once it has been replaced. The browser version has none.
+   */
+  programId?: number;
 }
 
 export function generateGcode(
@@ -176,8 +183,8 @@ export function generateGcode(
 }
 
 /** Resolves to the saved path, or null if the user cancelled. */
-export function exportGcode(suggestedName: string): Promise<string | null> {
-  return invoke("export_gcode", { suggestedName });
+export function exportGcode(suggestedName: string, programId: number | undefined): Promise<string | null> {
+  return invoke("export_gcode", { suggestedName, programId });
 }
 
 export interface PortInfo {
@@ -226,7 +233,7 @@ export type MachineAction =
   | { type: "hold" }
   | { type: "resume" }
   | { type: "reset" }
-  | { type: "startJob" }
+  | { type: "startJob"; programId: number }
   | { type: "stopJob" };
 
 export function listPorts(): Promise<PortInfo[]> {
