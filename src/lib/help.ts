@@ -80,6 +80,52 @@ export const HELP_TOPICS: HelpTopic[] = [
       },
     ],
   },
+  {
+    id: "camera",
+    title: "A camera over the bed",
+    group: "Getting started",
+    blocks: [
+      {
+        text: "A camera pointed down at the bed (a USB webcam is fine) lets you see the design on top of what's really on the bed. Kerf opens the camera only when you take a picture, closes it straight after, and never saves or sends the picture anywhere.",
+      },
+      {
+        heading: "Setting it up",
+        steps: [
+          "Fix the camera so it can't move. Every time it moves, it needs lining up again.",
+          "In step 1, Device, find the Camera section, press Find cameras, and choose yours. The first time, the computer asks whether Kerf may use the camera.",
+          "Take a picture with the bed clear, then press Line up the camera.",
+          "Drag each numbered marker onto the corner it names. If a corner can't be seen, put the marker on another place you can measure and type where it is.",
+          "Leave Check ticked: the blue grid should sit on the real bed, the red arrow should point along X and the green one along Y. If Kerf says the picture looks mirrored, a marker is on the wrong corner.",
+          "Press Use this lining up. From then on, the button in the canvas's bottom-right corner takes a new picture whenever you like.",
+        ],
+      },
+      {
+        heading: "How close it is",
+        points: [
+          "The picture is lined up at the bed's surface. The top of thick material sits nearer the camera, so it looks larger and shifted outwards. The shift is roughly the distance from the spot under the camera, times the thickness, divided by the camera's height. With the camera 400 mm up, a point 200 mm out on 18 mm stock is about 9 mm off.",
+          "Wide-angle lenses curve straight lines near the edges of the picture. Kerf doesn't straighten that yet, so the corners you lined up on are the most accurate places.",
+          "If the bed size changes, or you use another camera, Kerf asks for lining up again. Changing the X0 Y0 corner doesn't move the picture.",
+          "If the camera gets knocked or moved, line it up again. Kerf can't tell. The canvas shows when it was last lined up.",
+          "The orange outline is where Kerf thinks the material is. If the real sheet in the picture is somewhere else, move the material or the sheet before cutting.",
+          "After a job runs, or the material size changes, the picture is marked as maybe out of date. Take a new one.",
+        ],
+      },
+      {
+        heading: "Before cutting",
+        warning:
+          "The picture shows the bed's corner as X0 Y0, but a job runs from the machine's work zero. If you've moved the zero (Zero XY here, or G10 or G92), the job won't go where the picture shows it, and Kerf says so on the canvas. Kerf can't see a zero moved by other software, or on a machine without homing switches, where 0,0 is wherever the head was when it was switched on. Either way, trace the job with Frame first, with the laser off, and check it stays on the material and clear of clamps.",
+      },
+      {
+        heading: "If the camera doesn't work",
+        points: [
+          "Windows: check Settings > Privacy & security > Camera, including \"Let desktop apps access your camera\". Close any other program using the camera.",
+          "Mac: the camera needs macOS 12 or later. Check System Settings > Privacy & Security > Camera, and allow Kerf.",
+          "Linux: your user must be in the video group. The deb needs the gstreamer1.0-plugins-good package; the AppImage brings its own.",
+          "In a browser, the page must be https or localhost, and the browser asks before letting it use the camera.",
+        ],
+      },
+    ],
+  },
 
   // ---- Laser ---------------------------------------------------------------
   {

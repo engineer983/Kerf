@@ -1,6 +1,6 @@
 # Camera view of the bed
 
-Status: planned. Reviewed 2026-10-24 by `web-parity-checker`, `release-checker` and `gcode-safety-reviewer`; their findings are folded in below.
+Status: built 2026-10-24 (camera untested on macOS and Linux, and on real hardware). Plan reviewed 2026-10-24 by `web-parity-checker`, `release-checker` and `gcode-safety-reviewer`; their findings are folded in below.
 
 ## The idea
 
@@ -230,3 +230,10 @@ Decided 2026-10-24, going with the recommendations.
   - loading a new picture keeps the camera still
   - with camera access refused, no camera, or `pnpm dev:web` opened over a LAN address, a plain-English message appears and nothing breaks.
 - The scrap test above has been run once, and its numbers recorded in the help text.
+
+## As built
+
+- **Moved work origin:** the warning appears when the XY zero was moved this session ("Zero XY here", or a console line with G10, G92, G54 to G59, or `$RST=#`/`$RST=*`; see `movesWorkZero` in `src/state/machine.ts`). Warning whenever the reported work offset isn't zero was dropped: many machines keep a permanent offset set at the bed corner, so it would warn all the time. Instead, the note always shown with the picture says it assumes the job's 0,0 is the bed corner, which also covers machines without homing.
+- **Follow-up:** remember the work offset at lining-up time (or a "this is the bed corner" button in Machine) and warn when the connected machine's offset differs. This catches a zero moved by other software or before a restart. It needs the offset passed up from `kerf-grbl` (read-only) and a `gcode-safety-reviewer` pass.
+- The lining-up date shows on the canvas, so a knocked camera is easier to suspect, and the material keeps an orange outline over the picture.
+- **Extra scrap test:** on a machine without homing, power on with the head away from the corner, frame the job, and confirm the frame lands away from where the picture shows it.

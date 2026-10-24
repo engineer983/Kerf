@@ -7,6 +7,7 @@ import { Makers } from "./components/Makers";
 import { ChatDrawer } from "./components/ChatDrawer";
 import { ConfirmBack } from "./components/ConfirmBack";
 import { Help } from "./components/Help";
+import { CameraLineUp } from "./components/CameraLineUp";
 import { Toolbox } from "./components/Toolbox";
 import { pastePicture } from "./lib/pictures";
 import { useUi } from "./state/ui";
@@ -35,6 +36,7 @@ export function App() {
       <Toolbox />
       <Makers />
       <Help />
+      <CameraLineUp />
       <ConfirmBack />
     </div>
   );

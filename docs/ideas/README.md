@@ -4,9 +4,9 @@ Rough ideas for Kerf, waiting to be planned. To plan one, ask Claude to use the 
 
 | # | Idea | Status | Plan |
 |---|------|--------|------|
-| 1 | Camera view of the bed | planned | [camera-view.md](camera-view.md) |
-| 2 | Auto-centre the design on the material | idea | — |
-| 3 | Control the connected machine (X, Y, Z, homing) | idea | — |
+| 1 | Camera view of the bed | built | [camera-view.md](camera-view.md) |
+| 2 | Auto-centre the design on the material | planned | [auto-centre.md](auto-centre.md) |
+| 3 | Control the connected machine (X, Y, Z, homing) | planned | [machine-control.md](machine-control.md) |
 
 ## 1. Camera view of the bed
 

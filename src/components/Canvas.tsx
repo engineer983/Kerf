@@ -8,6 +8,8 @@ import { setResultCanvas } from "../lib/thumbnail";
 import { PLAYBACK_SECONDS, usePlayback } from "../state/playback";
 import { artworkRect, everythingRect, itemRect, jobOrder, jobUses, stockRect, useProject } from "../state/project";
 import { useToolbox } from "../state/tools";
+import { useCamera } from "../state/camera";
+import { CameraCorner, CameraNotes } from "./CameraCorner";
 import { Handles } from "./Handles";
 import { PlaybackBar } from "./PlaybackBar";
 import { View3D } from "./View3D";
@@ -79,6 +81,8 @@ export function Canvas() {
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
   const tools = useToolbox((s) => s.tools);
+  const cameraPicture = useCamera((s) => (s.show ? s.bedPictureUrl : null));
+  const cameraOpacity = useCamera((s) => s.opacity);
   const mode = usePlayback((s) => s.mode);
   const playing = usePlayback((s) => s.playing);
   const progress = usePlayback((s) => s.progress);
@@ -450,8 +454,28 @@ export function Canvas() {
               </g>
             );
           })}
+          {/* The camera's view of the bed, lined up in canvas millimetres, so it
+              stays put whichever corner is the origin. */}
+          {cameraPicture && (
+            <image
+              href={cameraPicture}
+              x={0}
+              y={0}
+              width={bed.width}
+              height={bed.height}
+              preserveAspectRatio="none"
+              opacity={cameraOpacity}
+              style={{ pointerEvents: "none" }}
+            />
+          )}
           {materialUrl && (
-            <image href={materialUrl} x={sx} y={sy} width={sw} height={sh} preserveAspectRatio="none" />
+            // Over a camera picture, the drawn material is faint so the real one shows through.
+            <image href={materialUrl} x={sx} y={sy} width={sw} height={sh} preserveAspectRatio="none" opacity={cameraPicture ? 0.25 : 1} />
+          )}
+          {materialUrl && cameraPicture && (
+            // Where Kerf thinks the material is stays plain to see, so a sheet
+            // that is really somewhere else on the bed stands out.
+            <rect x={sx} y={sy} width={sw} height={sh} fill="none" stroke="var(--accent)" strokeWidth={px * 2} style={{ pointerEvents: "none" }} />
           )}
           {uses.picture && image && placed && (
             // The same steps the backend takes: to grey, then contrast and
@@ -705,10 +729,15 @@ export function Canvas() {
         <div className="pointer-events-none absolute inset-3 rounded-xl border-2 border-dashed border-accent" />
       )}
 
-      <div className="pointer-events-none absolute top-3 left-3 rounded-md border border-line bg-surface/90 px-2 py-1 font-mono text-[11px] text-muted">
-        {bed.width} × {bed.height} mm
-        {view && ` · ${(100 / (view.mmPerPx * 3.7795)).toFixed(0)}%`}
+      <div className="pointer-events-none absolute top-3 left-3 flex max-w-[60%] flex-col gap-1">
+        <div className="self-start rounded-md border border-line bg-surface/90 px-2 py-1 font-mono text-[11px] text-muted">
+          {bed.width} × {bed.height} mm
+          {view && ` · ${(100 / (view.mmPerPx * 3.7795)).toFixed(0)}%`}
+        </div>
+        {!(simulation && mode === "3d") && <CameraNotes thickness={thickness} />}
       </div>
+
+      {!(simulation && mode === "3d") && <CameraCorner />}
     </main>
   );
 }

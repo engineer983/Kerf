@@ -4,6 +4,7 @@
 //!
 //! Nothing here touches files, windows or the network.
 
+pub mod camera;
 pub mod design;
 pub mod drawing;
 

@@ -1,4 +1,5 @@
 mod assistant;
+mod camera;
 mod design;
 mod drawing;
 mod gallery;
@@ -26,6 +27,9 @@ pub(crate) struct AppState {
     pub(crate) design: Mutex<Option<Design>>,
     /// The most recently generated program, kept here for export and sending.
     pub(crate) gcode: Mutex<Option<StoredProgram>>,
+    /// The latest picture from the camera over the bed. Separate from the
+    /// work above, so loading or clearing a picture keeps it.
+    pub(crate) camera_still: Mutex<Option<Arc<kerf_trace::image::RgbaImage>>>,
     /// The id given to the latest request to generate a program.
     latest_program: AtomicU64,
 }
@@ -306,6 +310,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .manage(machine::MachineLink::default())
+        .setup(|_app| {
+            #[cfg(target_os = "linux")]
+            camera::allow_camera_on_linux(_app)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
             load_image,
@@ -318,6 +327,9 @@ pub fn run() {
             export_svg,
             generate_gcode,
             export_gcode,
+            camera::set_camera_still,
+            camera::check_camera_fit,
+            camera::camera_bed_picture,
             machine::list_ports,
             machine::connect_machine,
             machine::disconnect_machine,

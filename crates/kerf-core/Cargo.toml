@@ -11,3 +11,5 @@ serde = { workspace = true, features = ["derive"] }
 kerf-trace = { path = "../kerf-trace" }
 kerf-gcode = { path = "../kerf-gcode" }
 kerf-make = { path = "../kerf-make" }
+[dev-dependencies]
+serde_json.workspace = true

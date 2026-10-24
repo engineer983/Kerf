@@ -1980,6 +1980,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "ureq",
+ "webkit2gtk",
 ]
 
 [[package]]
@@ -2000,6 +2001,7 @@ dependencies = [
  "kerf-make",
  "kerf-trace",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

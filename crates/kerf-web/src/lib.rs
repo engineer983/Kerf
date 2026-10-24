@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 use base64::Engine;
 use kerf_ai::{Endpoint, ImageEndpoint, Shape, ToolSpec};
+use kerf_core::camera::{self, BedPictureRequest, CameraFit, CameraStill};
 use kerf_core::design::Design;
 use kerf_core::drawing::TextSpec;
 use kerf_core::{Added, DepthOptions, JobInput, LoadedImage};
 use kerf_gcode::Job;
 use kerf_make::{BoxSpec, LayerSpec};
-use kerf_trace::image::DynamicImage;
+use kerf_trace::image::{DynamicImage, RgbaImage};
 use kerf_trace::TraceSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,9 @@ struct State {
     design: Option<Design>,
     /// Text of the most recently generated program, kept for saving.
     gcode: Option<String>,
+    /// The latest picture from the camera over the bed. Kept apart from the
+    /// work above: loading or clearing a picture doesn't throw it away.
+    camera_still: Option<Arc<RgbaImage>>,
 }
 
 thread_local! {
@@ -206,14 +210,30 @@ struct Unreached {
 /// of the file it was given, for those that take one. The answer is JSON.
 pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
     match command {
+        "set_camera_still" => {
+            let still = CameraStill::load(file)?;
+            let (width, height) = (still.image.width(), still.image.height());
+            with(|state| state.camera_still = Some(still.image));
+            reply(json!({ "width": width, "height": height }))
+        }
+        "check_camera_fit" => {
+            #[derive(Deserialize)]
+            struct Input {
+                fit: CameraFit,
+            }
+            reply(camera::check_fit(&args::<Input>(input)?.fit)?)
+        }
+
         "app_info" => reply(json!({ "name": "Kerf", "version": env!("CARGO_PKG_VERSION") })),
 
         "load_image" => {
             let loaded = LoadedImage::load(file)?;
             with(|state| {
-                // A new picture starts a new piece of work.
+                // A new picture starts a new piece of work, but the bed hasn't
+                // changed, so the camera's picture stays.
                 *state = State {
                     image: Some(loaded),
+                    camera_still: state.camera_still.take(),
                     ..State::default()
                 }
             });
@@ -476,6 +496,15 @@ pub fn picture_png(which: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// The latest camera still redrawn to the bed, as a PNG file. `input` is a
+/// [`BedPictureRequest`] as JSON.
+pub fn camera_picture_png(input: &str) -> Result<Vec<u8>, String> {
+    let request: BedPictureRequest = args(input)?;
+    let still =
+        with(|state| state.camera_still.clone()).ok_or("Take a picture with the camera first.")?;
+    camera::camera_bed_picture_png(&still, &request)
+}
+
 /// Makes failures inside the engine show in the browser's console.
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -486,6 +515,12 @@ pub fn start() {
 #[wasm_bindgen]
 pub fn call(command: &str, input: &str, file: &[u8]) -> Result<String, JsError> {
     run(command, input, file).map_err(|e| JsError::new(&e))
+}
+
+/// [`camera_picture_png`], for the page to call.
+#[wasm_bindgen]
+pub fn camera_picture(input: &str) -> Result<Vec<u8>, JsError> {
+    camera_picture_png(input).map_err(|e| JsError::new(&e))
 }
 
 /// [`picture_png`], for the page to call.
@@ -620,5 +655,18 @@ mod tests {
         assert!(run("connect_machine", "{}", &[])
             .unwrap_err()
             .contains("not available in the browser"));
+    }
+
+    #[test]
+    fn the_camera_still_survives_loading_a_new_picture() {
+        let size = run("set_camera_still", "{}", &square()).unwrap();
+        assert_eq!(size, r#"{"height":120,"width":120}"#);
+        run("load_image", "{}", &square()).unwrap();
+        run("clear_image", "{}", &[]).unwrap();
+
+        let request = r#"{"fit":{"points":[{"px":0,"py":0,"x":0,"y":0},{"px":120,"py":0,"x":60,"y":0},{"px":120,"py":120,"x":60,"y":60},{"px":0,"py":120,"x":0,"y":60}],"bedWidth":60,"bedHeight":60,"pictureWidth":120,"pictureHeight":120},"bed":{"width":60,"height":60}}"#;
+        let png = camera_picture_png(request).unwrap();
+        let picture = kerf_trace::image::load_from_memory(&png).unwrap();
+        assert_eq!((picture.width(), picture.height()), (120, 120));
     }
 }

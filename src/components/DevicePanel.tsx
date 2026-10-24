@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Drill, Zap } from "lucide-react";
 import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { setWarnOnBack, useProject, warnsOnBack } from "../state/project";
+import { CameraSection } from "./CameraSection";
 import { Checkbox, NumberField, Section, Select } from "./controls";
 
 const card = (active: boolean) =>
@@ -85,6 +86,8 @@ export function DevicePanel() {
           </p>
         )}
       </Section>
+
+      <CameraSection />
 
       <button
         onClick={() => actions.setStep("material")}

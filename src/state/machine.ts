@@ -26,6 +26,12 @@ interface MachineStore {
   job: JobProgress | null;
   console: string[];
   error: string | null;
+  /**
+   * The XY work zero was moved this session (by "Zero XY here" or a G10/G92
+   * typed in the console). The camera picture assumes zero is the bed's
+   * corner, so it says so. Kept after disconnecting: the machine remembers.
+   */
+  originMoved: boolean;
   refreshPorts: () => Promise<void>;
   setPort: (port: string) => void;
   connect: () => Promise<void>;
@@ -100,6 +106,7 @@ export const useMachine = create<MachineStore>((set, get) => {
     ...DISCONNECTED,
     console: [],
     error: null,
+    originMoved: false,
 
     refreshPorts: async () => {
       try {
@@ -142,6 +149,7 @@ export const useMachine = create<MachineStore>((set, get) => {
       if (action.type === "line") log(`> ${action.text}`);
       try {
         await ipc.machineAction(action);
+        if (movesWorkZero(action)) set({ originMoved: true });
       } catch (e) {
         set({ error: message(e) });
       }
@@ -149,4 +157,16 @@ export const useMachine = create<MachineStore>((set, get) => {
   };
 });
 
-export const jobIsActive = (job: JobProgress | null) => job?.state === "running";
+/**
+ * Whether an action may move the XY work zero: "Zero XY here", or a console
+ * line that sets an offset (G10, G92, even typed without spaces), switches
+ * to another set of zeros (G54 to G59), or clears them ($RST=# or $RST=*).
+ * Only used to warn, so it errs on the side of saying yes.
+ */
+export function movesWorkZero(action: MachineAction): boolean {
+  if (action.type === "setOrigin") return !action.z;
+  if (action.type !== "line") return false;
+  return /G0*(10|92)(?!\d)|G0*5[4-9](?!\d)|\$RST=[#*]/i.test(action.text);
+}
+
+export const jobIsActive =(job: JobProgress | null) => job?.state === "running";

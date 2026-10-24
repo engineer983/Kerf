@@ -2,11 +2,14 @@
  * Runs Kerf's engine (the Rust code, built as WebAssembly) off the page's own
  * thread, so that tracing and generating a job do not freeze the interface.
  */
-import init, { call, picture } from "./pkg/kerf_web.js";
+import init, { call, camera_picture, picture } from "./pkg/kerf_web.js";
 
 export interface EngineRequest {
   id: number;
-  /** A command of the engine's, or `picture` for one of the pictures as a PNG. */
+  /**
+   * A command of the engine's, or one that answers with a PNG: `picture` for
+   * one of the pictures, `camera_bed_picture` for the camera still redrawn to the bed.
+   */
   command: string;
   /** The command's arguments as JSON; for `picture`, which one. */
   input: string;
@@ -25,6 +28,9 @@ self.onmessage = async (event: MessageEvent<EngineRequest>) => {
     await ready;
     if (command === "picture") {
       const bytes = picture(input);
+      scope.postMessage({ id, bytes }, [bytes.buffer]);
+    } else if (command === "camera_bed_picture") {
+      const bytes = camera_picture(input);
       scope.postMessage({ id, bytes }, [bytes.buffer]);
     } else {
       scope.postMessage({ id, result: call(command, input, file ?? NOTHING) });
