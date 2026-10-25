@@ -46,6 +46,21 @@ pub enum MachineAction {
         feed: f64,
     },
     CancelJog,
+    /// Starts moving along one axis while the button or key is held. Each
+    /// of `x`, `y`, `z` is −1, 0 or 1, and only one may be non-zero.
+    HoldJogStart {
+        x: f64,
+        y: f64,
+        z: f64,
+        feed: f64,
+    },
+    /// The button or key is still held; without this the move stops.
+    HoldJogAlive,
+    HoldJogStop,
+    /// Moves back to the work zero in X and Y, at the current height.
+    GoToXyZero {
+        feed: f64,
+    },
     Home,
     /// Clears an alarm lock.
     Unlock,
@@ -78,6 +93,18 @@ fn finite(values: &[f64]) -> Result<(), String> {
     } else {
         Err("A coordinate or speed is not a number.".into())
     }
+}
+
+/// A held jog's direction: one axis only, so that a stuck key can only ever
+/// drive one axis.
+fn hold_direction(axes: [f64; 3]) -> Result<[i8; 3], String> {
+    let one_axis = "Hold to move goes along one axis at a time.";
+    if axes.iter().any(|&v| v != -1.0 && v != 0.0 && v != 1.0)
+        || axes.iter().filter(|&&v| v != 0.0).count() != 1
+    {
+        return Err(one_axis.into());
+    }
+    Ok(axes.map(|v| v as i8))
 }
 
 #[tauri::command]
@@ -142,15 +169,23 @@ pub fn machine_action(
             if feed <= 0.0 {
                 return Err("The jog speed must be greater than zero.".into());
             }
-            let mut line = String::from("$J=G91 G21");
-            for (axis, distance) in [('X', x), ('Y', y), ('Z', z)] {
-                if distance != 0.0 {
-                    line.push_str(&format!(" {axis}{distance:.3}"));
-                }
-            }
-            machine.send_line(&format!("{line} F{feed:.0}"))
+            // Refused while the laser or spindle is on.
+            machine.jog(x, y, z, feed)
         }
         MachineAction::CancelJog => machine.cancel_jog(),
+        MachineAction::HoldJogStart { x, y, z, feed } => {
+            finite(&[x, y, z, feed])?;
+            machine.start_held_jog(hold_direction([x, y, z])?, feed)
+        }
+        MachineAction::HoldJogAlive => machine.keep_held_jog(),
+        MachineAction::HoldJogStop => machine.stop_held_jog(),
+        MachineAction::GoToXyZero { feed } => {
+            finite(&[feed])?;
+            if feed <= 0.0 {
+                return Err("The speed must be greater than zero.".into());
+            }
+            machine.go_to_xy_zero(feed)
+        }
         MachineAction::Home => machine.send_line("$H"),
         MachineAction::Unlock => machine.send_line("$X"),
         MachineAction::SetOrigin { z: false } => machine.send_line("G10 L20 P1 X0 Y0"),
@@ -166,18 +201,9 @@ pub fn machine_action(
             if feed <= 0.0 {
                 return Err("The framing speed must be greater than zero.".into());
             }
-            // Jog moves only: they cannot turn on a spindle or laser.
-            let corners = [
-                (min_x, min_y),
-                (max_x, min_y),
-                (max_x, max_y),
-                (min_x, max_y),
-                (min_x, min_y),
-            ];
-            for (x, y) in corners {
-                machine.send_line(&format!("$J=G90 G21 X{x:.3} Y{y:.3} F{feed:.0}"))?;
-            }
-            Ok(())
+            // Jog moves only: they cannot turn on a spindle or laser, and are
+            // refused while one is already on.
+            machine.frame(min_x, min_y, max_x, max_y, feed)
         }
         MachineAction::Hold => machine.hold(),
         MachineAction::Resume => machine.resume(),
@@ -193,4 +219,23 @@ pub fn machine_action(
         }
         MachineAction::StopJob => machine.stop_job(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_jog_rejects_two_axes() {
+        assert_eq!(hold_direction([0.0, -1.0, 0.0]), Ok([0, -1, 0]));
+        assert_eq!(hold_direction([0.0, 0.0, 1.0]), Ok([0, 0, 1]));
+        for axes in [
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+        ] {
+            assert!(hold_direction(axes).is_err(), "{axes:?}");
+        }
+    }
 }

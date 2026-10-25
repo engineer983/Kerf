@@ -211,6 +211,8 @@ export type MachineEvent =
       type: "status";
       state: MachineState;
       position: [number, number, number] | null;
+      /** From the machine's home; only meaningful once it has homed. */
+      machinePosition: [number, number, number] | null;
       feed: number | null;
       spindle: number | null;
     }
@@ -226,6 +228,10 @@ export type MachineAction =
   | { type: "line"; text: string }
   | { type: "jog"; x: number; y: number; z: number; feed: number }
   | { type: "cancelJog" }
+  | { type: "holdJogStart"; x: number; y: number; z: number; feed: number }
+  | { type: "holdJogAlive" }
+  | { type: "holdJogStop" }
+  | { type: "goToXyZero"; feed: number }
   | { type: "home" }
   | { type: "unlock" }
   | { type: "setOrigin"; z: boolean }

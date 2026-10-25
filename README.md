@@ -42,7 +42,7 @@ The work goes through six numbered steps: Device, Material, Design, Trace, Opera
 - **Without tracing.** A box maker draws finger-jointed panels from a box's size and the material's thickness, allowing for a laser's kerf or a router bit's width. Stacked layers slice a picture into pieces to cut from thin sheet and glue into a relief.
 - **See the bed.** Take a picture with a camera over the bed, line it up once on four known places, and see the design on top of it. The browser asks before letting the page use the camera, and the picture never leaves your computer. On a Mac the camera needs macOS 12 or later.
 - **Preview.** Watch the job play back, see roughly what the finished piece will look like, and turn it over in 3D.
-- **Run it.** Export the G-code as a file, or connect to a GRBL or grblHAL machine to jog, home, set zero, frame, start, pause and stop.
+- **Run it.** Export the G-code as a file, or connect to a GRBL or grblHAL machine to jog (in steps, or while you hold a button or arrow key), home, set zero, go back to zero, frame, start, pause and stop.
 - **Assistant.** An optional chat panel that can set a job up from a wish such as "make this as realistic as possible", using Claude, OpenAI, OpenRouter, or a model on your own computer through Ollama. It can also draw a picture, ask an image model for one, or search for pictures that are free to reuse. It can never move or start a machine.
 - **Help.** A built-in guide to good practice at the laser and the router, with step-by-step instructions for common jobs.
 

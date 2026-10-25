@@ -21,6 +21,10 @@ interface MachineStore {
   state: MachineState | null;
   /** Work position in millimetres. */
   position: [number, number, number] | null;
+  /** Position from the machine's home in millimetres, when reported. */
+  machinePosition: [number, number, number] | null;
+  /** Laser or spindle speed in the last status report, if it gave one. */
+  spindle: number | null;
   /** GRBL `$` settings reported by the machine, by number. */
   settings: Record<number, string>;
   job: JobProgress | null;
@@ -49,6 +53,8 @@ const DISCONNECTED = {
   version: null,
   state: null,
   position: null,
+  machinePosition: null,
+  spindle: null,
   settings: {},
   job: null,
 };
@@ -61,7 +67,12 @@ export const useMachine = create<MachineStore>((set, get) => {
     void ipc.onMachineEvent((event) => {
       switch (event.type) {
         case "status":
-          set({ state: event.state, position: event.position });
+          set({
+            state: event.state,
+            position: event.position,
+            machinePosition: event.machinePosition,
+            spindle: event.spindle,
+          });
           break;
         case "welcome":
           set({ version: event.version, settings: {} });
@@ -75,6 +86,11 @@ export const useMachine = create<MachineStore>((set, get) => {
           break;
         case "commandError":
           log(`${event.line} → error ${event.code}: ${event.description}`);
+          // A refused move, such as one past the edge with soft limits on,
+          // is said plainly; it also ends a held jog.
+          if (event.line.startsWith("$J=")) {
+            set({ error: `The machine refused the move (error ${event.code}): ${event.description}` });
+          }
           break;
         case "alarm":
           log(`ALARM ${event.code}: ${event.description}`);

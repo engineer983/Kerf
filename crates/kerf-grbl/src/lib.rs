@@ -7,6 +7,7 @@
 //! the tool the job uses.
 
 pub mod connection;
+pub mod jog;
 pub mod response;
 pub mod serial;
 pub mod stream;
