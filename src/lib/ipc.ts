@@ -60,6 +60,36 @@ export interface Machine {
   /** The S value that means full power (GRBL `$30`). */
   maxPowerS: number;
   travelFeed: number;
+  /** How a router's bits are changed within a job. */
+  toolChange?: ToolChange;
+}
+
+/** How bits are changed when a router job uses more than one. */
+export interface ToolChange {
+  /** By hand (the job stops and waits), or by a grblHAL automatic tool changer. */
+  mode: "byHand" | "atc";
+  /** Over the work zero, or a fixed place in machine coordinates (needs homing). */
+  place: { type: "overWorkZero" } | { type: "machine"; position: [number, number, number] };
+  /** How far above the work zero the bit is raised to change it, in mm. */
+  lift: number;
+  /** Seconds to wait after M5 for the spindle to stop. */
+  spinDown: number;
+}
+
+/** Which bit an operation cuts with, as the generator is told it. */
+export interface ToolRef {
+  number: number;
+  name: string;
+  diameter: number;
+  shape: string;
+}
+
+/** One part of a program: the operations cut with one bit. */
+export interface ProgramPart {
+  tool: ToolRef | null;
+  operations: { start: number; end: number };
+  firstLine: number;
+  lineCount: number;
 }
 
 export type OperationKind =
@@ -128,6 +158,8 @@ export interface Operation {
   feed: number;
   power: number;
   passes: number;
+  /** The router bit, for jobs that change bits. */
+  tool?: ToolRef;
 }
 
 export interface Job {
@@ -152,6 +184,14 @@ export interface Generated {
   moves: number[];
   /** Index in `moves` of the first move of each operation. */
   operationStarts: number[];
+  /** One per bit for a job whose bits are changed by hand; otherwise one. */
+  parts: ProgramPart[];
+  /** The job goes to a fixed place on the machine (G53), which needs homing. */
+  needsHoming: boolean;
+  /** Bits are changed by an automatic tool changer at each M6. */
+  atc: boolean;
+  /** How high above the work zero the bit rises at each change, if it does. */
+  changeLift: number | null;
   head: string;
   /**
    * Identifies this program in the desktop app, so that exporting or running
@@ -182,9 +222,18 @@ export function generateGcode(
   });
 }
 
-/** Resolves to the saved path, or null if the user cancelled. */
-export function exportGcode(suggestedName: string, programId: number | undefined): Promise<string | null> {
-  return invoke("export_gcode", { suggestedName, programId });
+/**
+ * Saves the program: the whole of it, the file for one `part` (one bit), or
+ * one file with M6 at each bit change. Resolves to the saved path, or null
+ * if the user cancelled.
+ */
+export function exportGcode(
+  suggestedName: string,
+  programId: number | undefined,
+  part?: number,
+  withToolChanges?: boolean,
+): Promise<string | null> {
+  return invoke("export_gcode", { suggestedName, programId, part: part ?? null, withToolChanges: withToolChanges ?? false });
 }
 
 export interface PortInfo {
@@ -202,9 +251,25 @@ export type MachineState =
   | "check"
   | "home"
   | "sleep"
+  /** grblHAL waiting at a tool change. */
+  | "tool"
   | "other";
 
-export type JobState = "running" | "finished" | "stopped" | "failed";
+/** "waitingForBit": a part has finished and the job waits for the bit to be changed. */
+export type JobState = "running" | "finished" | "stopped" | "failed" | "waitingForBit";
+
+export type Firmware = "grbl" | "grblHal";
+
+/** Where a job with bit changes has got to. */
+export interface PartsProgress {
+  part: number;
+  of: number;
+  waiting: boolean;
+  /** The machine has said the spindle is switched off (M5) and reports a speed of 0. */
+  spindleOff: boolean;
+  zSet: boolean;
+  plateUsed: boolean;
+}
 
 export type MachineEvent =
   | {
@@ -215,8 +280,14 @@ export type MachineEvent =
       machinePosition: [number, number, number] | null;
       feed: number | null;
       spindle: number | null;
+      /** Input pins reported as on; "P" is the probe. */
+      pins: string;
     }
-  | { type: "welcome"; version: string }
+  | { type: "welcome"; version: string; firmware: Firmware }
+  | { type: "firmware"; firmware: Firmware }
+  | { type: "parts"; progress: PartsProgress | null }
+  | { type: "probe"; state: "running" | "done" | "failed"; message: string | null }
+  | { type: "probeTested" }
   | { type: "setting"; number: number; value: string }
   | { type: "line"; text: string }
   | { type: "commandError"; line: string; code: number; description: string }
@@ -240,7 +311,10 @@ export type MachineAction =
   | { type: "resume" }
   | { type: "reset" }
   | { type: "startJob"; programId: number }
-  | { type: "stopJob" };
+  | { type: "stopJob" }
+  | { type: "continueJob"; plateCleared: boolean }
+  | { type: "probeZ"; plate: number; travel: number }
+  | { type: "probeTest" };
 
 export function listPorts(): Promise<PortInfo[]> {
   return invoke("list_ports");

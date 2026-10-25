@@ -9,9 +9,14 @@ pub mod geometry;
 mod image_engrave;
 pub mod job;
 pub mod relief;
+pub mod tool_change;
 
 pub use cutout::{Outline, Side};
 pub use generate::{generate, generate_composed, generate_with, Additions, Bounds, Program};
 pub use geometry::{add_font, font_families, Artwork, Polyline, Shape};
-pub use job::{Job, Machine, MachineKind, Operation, OperationKind, Origin};
+pub use job::{
+    ChangeMode, ChangePlace, Job, Machine, MachineKind, Operation, OperationKind, Origin,
+    ToolChange, ToolRef,
+};
 pub use relief::Heightmap;
+pub use tool_change::ProgramPart;

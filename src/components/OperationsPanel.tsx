@@ -4,12 +4,11 @@ import { isTauri, type OperationKind } from "../lib/ipc";
 import { findMaterial } from "../lib/materials";
 import { TOOL_KIND_LABELS } from "../lib/tools";
 import {
+  bitsForJob,
   everythingRect,
-  MIXED_BITS_MESSAGE,
   stockRect,
   traceColors,
   useProject,
-  usesMixedBits,
   type OperationItem,
 } from "../state/project";
 import { useToolbox } from "../state/tools";
@@ -48,6 +47,9 @@ export function OperationsPanel() {
   const stockLeft = useProject((s) => s.stockLeft);
   const stockFront = useProject((s) => s.stockFront);
   const operations = useProject((s) => s.operations);
+  const toolChange = useProject((s) => s.toolChange);
+  // The bit list follows the toolbox too: a bit's name or number may change.
+  useToolbox((s) => s.tools);
   const mode = useProject((s) => s.mode);
   const shaping = useProject((s) => s.depth.status === "working");
   const traced = useProject((s) => s.trace.result);
@@ -63,7 +65,11 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
-  const mixedBits = usesMixedBits({ machineKind, operations, items });
+  const bits = bitsForJob({ machineKind, operations, items, toolChange });
+  const titleOf = (index: number) => {
+    const op = operations[index];
+    return op.forItems ? "Added text and drawings" : (fixed && op.color && LINE_NAMES[op.color]) || `Operation ${index + 1}`;
+  };
   const art = everythingRect({ image, widthMm, heightMm, left, front, bed, origin, items });
   const stock = stockRect({ stockWidth, stockLength, stockLeft, stockFront, bed, origin });
   const overhangs =
@@ -113,10 +119,32 @@ export function OperationsPanel() {
           />
         ))}
 
-      {mixedBits && (
-        <p role="alert" className="rounded-lg border border-accent/40 px-3 py-2 text-accent">
-          {MIXED_BITS_MESSAGE}
-        </p>
+      {bits.runs.length > 0 && (
+        <section className="flex flex-col gap-2 rounded-xl border border-line p-4">
+          <h3 className="text-[11px] font-semibold uppercase tracking-wider text-muted">Bits for this job</h3>
+          <ol className="flex flex-col gap-1">
+            {bits.runs.map((run, i) => (
+              <li key={i}>
+                {i + 1}. {run.number !== null ? `T${run.number} ` : ""}
+                {run.name}
+                <span className="text-muted"> — {run.operations.map(titleOf).join(", ")}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="text-muted">
+            {bits.runs.length === 1
+              ? "One bit, so the job runs without stopping."
+              : toolChange.mode === "atc"
+                ? `The automatic tool changer changes the bit ${bits.runs.length - 1} time${bits.runs.length === 2 ? "" : "s"}.`
+                : `The job stops ${bits.runs.length - 1} time${bits.runs.length === 2 ? "" : "s"} to change the bit. Each time, the spindle is switched off and the bit raised, and you set Z again before it carries on.`}
+          </p>
+          {bits.reused && (
+            <p className="text-accent">
+              A bit is used again after another one, so you change bits more often than you need to. Where the order
+              allows, put each bit's operations together.
+            </p>
+          )}
+        </section>
       )}
       <div className={mode === "advanced" ? "grid grid-cols-2 gap-2" : "hidden"}>
         <button
@@ -148,7 +176,7 @@ export function OperationsPanel() {
           onClick={() => void actions.generateGcode()}
           // Generating while the picture's shape is still being worked out
           // would quietly carve from brightness instead.
-          disabled={busy || !traced || shaping || mixedBits}
+          disabled={busy || !traced || shaping}
           className="rounded-lg bg-accent px-3 py-2 font-medium text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-40"
         >
           {busy ? "Generating…" : shaping ? "Working out the shape…" : "Generate G-code"}
@@ -178,12 +206,40 @@ export function OperationsPanel() {
             <pre className="max-h-40 overflow-auto rounded-lg border border-line bg-raised p-3 font-mono text-[11px] leading-relaxed select-text">
               {program.head}
             </pre>
-            <button
-              onClick={() => void actions.exportGcode()}
-              className="rounded-lg border border-accent px-3 py-2 font-medium text-accent transition-opacity hover:opacity-80"
-            >
-              Export G-code…
-            </button>
+            {program.parts.length > 1 ? (
+              <>
+                <p className="text-muted">
+                  One file for each bit works with any sender. Fit that file's bit and set Z before running each one.
+                </p>
+                {program.parts.map((part, i) => (
+                  <button
+                    key={i}
+                    onClick={() => void actions.exportGcode(i)}
+                    title={i === 0 ? "Save the first bit's operations as a file of their own" : "Save this bit's operations as a file of their own; fit the bit and set Z before running it"}
+                    className="rounded-lg border border-accent px-3 py-2 font-medium text-accent transition-opacity hover:opacity-80"
+                  >
+                    Save part {i + 1} ({part.tool?.name ?? "bit"})…
+                  </button>
+                ))}
+                <button
+                  onClick={() => void actions.exportGcode(undefined, true)}
+                  className="rounded-lg border border-line px-3 py-2 text-muted transition-colors hover:text-fg"
+                >
+                  Save as one file with tool changes (M6)…
+                </button>
+                <p className="text-muted">
+                  Plain GRBL refuses M6. Use this only with a sender that stops for the bit change and lets you set Z
+                  again, such as bCNC, UGS, gSender or ioSender.
+                </p>
+              </>
+            ) : (
+              <button
+                onClick={() => void actions.exportGcode()}
+                className="rounded-lg border border-accent px-3 py-2 font-medium text-accent transition-opacity hover:opacity-80"
+              >
+                Export G-code…
+              </button>
+            )}
             {exportedTo && <p className="break-all text-muted select-text">Saved to {exportedTo}</p>}
           </>
         )}

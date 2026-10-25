@@ -166,6 +166,23 @@ function ToolForm({ tool, update, remove }: ToolFormProps) {
       </div>
 
       <label className="flex flex-col gap-1">
+        Tool number (optional)
+        <input
+          className={field}
+          inputMode="numeric"
+          placeholder="None: numbered in the order a job uses it"
+          value={tool.number ?? ""}
+          onChange={(e) => {
+            const typed = e.target.value.trim();
+            const number = Math.round(Number(typed));
+            set({ number: typed === "" || !Number.isFinite(number) || number < 1 ? null : Math.min(number, 999) });
+          }}
+        />
+        <span className="text-muted">
+          Give a number if the bit has a fixed place, such as a slot in a tool rack or an automatic tool changer.
+        </span>
+      </label>
+      <label className="flex flex-col gap-1">
         Brand
         <input className={field} value={tool.brand} onChange={(e) => set({ brand: e.target.value })} />
       </label>

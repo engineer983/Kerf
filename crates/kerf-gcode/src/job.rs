@@ -42,6 +42,83 @@ pub struct Machine {
     pub max_power_s: f64,
     /// Rapid speed in mm/min, used only to estimate job time.
     pub travel_feed: f64,
+    /// How a router's bits are changed within a job. Ignored by lasers.
+    #[serde(default)]
+    pub tool_change: ToolChange,
+}
+
+/// Which bit an operation cuts with, so that a job can stop to change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolRef {
+    /// The bit's fixed tool number, or 1, 2, 3… in order of first use.
+    pub number: u32,
+    /// As the person knows it, such as "1 mm tapered ball nose".
+    pub name: String,
+    pub diameter: f64,
+    /// Its kind, such as "Flat end mill", for the change card.
+    pub shape: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeMode {
+    /// The job stops; the person changes the bit and sets Z again.
+    #[default]
+    ByHand,
+    /// A grblHAL automatic tool changer does it at each `T<n> M6`.
+    Atc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ChangePlace {
+    /// Raised over X0 Y0 of the work. Works without homing.
+    #[default]
+    OverWorkZero,
+    /// A fixed place in machine coordinates (`G53`): X, Y and Z from home.
+    /// Only meaningful on a machine that has homed.
+    Machine { position: [f64; 3] },
+}
+
+/// How bits are changed when a router job uses more than one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolChange {
+    #[serde(default)]
+    pub mode: ChangeMode,
+    #[serde(default)]
+    pub place: ChangePlace,
+    /// How far above the work zero the bit is raised to change it, in mm.
+    /// The job's highest safe height is used if that is more.
+    #[serde(default = "default_lift")]
+    pub lift: f64,
+    /// Seconds to wait after `M5` for the spindle to stop turning.
+    #[serde(default = "default_spin_down")]
+    pub spin_down: f64,
+}
+
+fn default_lift() -> f64 {
+    20.0
+}
+
+fn default_spin_down() -> f64 {
+    5.0
+}
+
+impl Default for ToolChange {
+    fn default() -> Self {
+        Self {
+            mode: ChangeMode::ByHand,
+            place: ChangePlace::OverWorkZero,
+            lift: default_lift(),
+            spin_down: default_spin_down(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -143,6 +220,10 @@ pub struct Operation {
     /// How many times to repeat the operation. Ignored for CNC profiles,
     /// where depth sets the number of passes.
     pub passes: u32,
+    /// The router bit, for jobs that change bits. Without it, every router
+    /// operation in a job must use bits of the same diameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +249,63 @@ impl Job {
     pub(crate) fn check(&self, added: &[Operation]) -> Result<(), String> {
         let operations: Vec<&Operation> = self.operations.iter().chain(added).collect();
 
+        if self.machine.kind == MachineKind::Cnc {
+            let routed: Vec<(usize, &ToolRef)> = operations
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.kind.is_router())
+                .filter_map(|(i, o)| o.tool.as_ref().map(|t| (i, t)))
+                .collect();
+            let router_count = operations.iter().filter(|o| o.kind.is_router()).count();
+            let all_named = router_count > 0 && routed.len() == router_count;
+            if self.machine.tool_change.mode == ChangeMode::Atc && !all_named {
+                return Err("An automatic tool changer needs a tool number for every bit. Give each bit this job uses a tool number in the toolbox.".into());
+            }
+            if all_named {
+                for (at, (i, a)) in routed.iter().enumerate() {
+                    if a.number == 0 {
+                        return Err("Tool numbers start at 1.".into());
+                    }
+                    if !(a.diameter.is_finite() && a.diameter > 0.0) {
+                        return Err(format!("Bit T{} must have a diameter.", a.number));
+                    }
+                    for (j, b) in &routed[at + 1..] {
+                        let same_bit = a.name == b.name
+                            && a.shape == b.shape
+                            && (a.diameter - b.diameter).abs() < 1e-6;
+                        if a.number == b.number && !same_bit {
+                            return Err(format!(
+                                "Operations {} and {} both say bit T{} but describe different bits. Give each bit its own tool number in the toolbox.",
+                                i + 1,
+                                j + 1,
+                                a.number
+                            ));
+                        }
+                    }
+                }
+                let ToolChange {
+                    lift, spin_down, ..
+                } = self.machine.tool_change;
+                if !(lift.is_finite() && lift > 0.0 && lift <= 200.0) {
+                    return Err("\"Raise for changing bits\" must be between 0 and 200 mm.".into());
+                }
+                if !(spin_down.is_finite() && (1.0..=120.0).contains(&spin_down)) {
+                    return Err(
+                        "\"Time for the spindle to stop\" must be between 1 and 120 seconds."
+                            .into(),
+                    );
+                }
+                if let ChangePlace::Machine { position } = self.machine.tool_change.place {
+                    if position.iter().any(|v| !v.is_finite()) {
+                        return Err("The place to change bits must be numbers.".into());
+                    }
+                }
+                // Each bit is known by its number, so different bits may
+                // share a job: it stops to change them.
+                return self.check_depths(&operations);
+            }
+        }
+
         // One job is cut with one bit: changing it means stopping and zeroing
         // Z again, which a single program cannot do.
         let mut bits: Vec<f64> = operations
@@ -183,7 +321,11 @@ impl Job {
                 sizes.join(", ")
             ));
         }
+        self.check_depths(&operations)
+    }
 
+    /// Router depths against the material's thickness.
+    fn check_depths(&self, operations: &[&Operation]) -> Result<(), String> {
         if let Some(thickness) = self.material_thickness {
             if !(thickness.is_finite() && thickness > 0.0) {
                 return Err("The material's thickness must be greater than zero.".into());
@@ -205,6 +347,24 @@ impl Job {
 }
 
 impl OperationKind {
+    /// Whether a router bit makes this operation.
+    pub fn is_router(&self) -> bool {
+        matches!(
+            self,
+            Self::CncProfile { .. } | Self::CncRelief { .. } | Self::CncCutout { .. }
+        )
+    }
+
+    /// The height a router operation moves at between cuts.
+    pub fn safe_z(&self) -> Option<f64> {
+        match *self {
+            Self::CncProfile { safe_z, .. }
+            | Self::CncRelief { safe_z, .. }
+            | Self::CncCutout { safe_z, .. } => Some(safe_z),
+            _ => None,
+        }
+    }
+
     /// How deep a router operation cuts; `None` for a laser.
     pub fn depth(&self) -> Option<f64> {
         match *self {

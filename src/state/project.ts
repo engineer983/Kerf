@@ -9,7 +9,7 @@ import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { cutSettings } from "../lib/feeds";
 import { DEFAULT_MATERIAL, findMaterial, type Material } from "../lib/materials";
 import { makeThumbnail } from "../lib/thumbnail";
-import { suggestTool, type Tool } from "../lib/tools";
+import { suggestTool, TOOL_KIND_LABELS, type Tool } from "../lib/tools";
 import { useToolbox } from "./tools";
 import { usePlayback } from "./playback";
 import type {
@@ -18,6 +18,8 @@ import type {
   Operation,
   OperationKind,
   Origin,
+  ToolChange,
+  ToolRef,
   Traced,
   TraceSettings,
 } from "../lib/ipc";
@@ -99,14 +101,115 @@ export function jobOrder(operations: OperationItem[], hasItems: boolean) {
   return { main, items, cutouts, all: [...main, ...items, ...cutouts] };
 }
 
+const isRouter = (op: OperationItem) =>
+  op.kind.type === "cncProfile" || op.kind.type === "cncRelief" || op.kind.type === "cncCutout";
+
 /**
- * Whether the router operations in the job use more than one bit. They cannot
- * run as one job: the bit has to be changed, and Z zeroed again, in between.
+ * The tool number each toolbox bit in `ops` is known by in this job: its own
+ * fixed number, or else the lowest number no other bit has, in the order the
+ * job first uses them. With an automatic changer only fixed numbers count.
  */
-export function usesMixedBits(s: { machineKind: MachineKind; operations: OperationItem[]; items: unknown[] }): boolean {
-  if (s.machineKind !== "cnc") return false;
-  const bits = new Set(jobOrder(s.operations, s.items.length > 0).all.map((o) => o.toolId).filter(Boolean));
-  return bits.size > 1;
+export function toolNumbers(ops: OperationItem[], tools: Tool[], atc: boolean): Map<string, number> {
+  const used = ops.map((op) => tools.find((t) => t.id === op.toolId)).filter((t): t is Tool => t !== undefined);
+  const numbers = new Map<string, number>();
+  const taken = new Set<number>();
+  for (const tool of used) {
+    if (tool.number && !numbers.has(tool.id)) {
+      numbers.set(tool.id, tool.number);
+      taken.add(tool.number);
+    }
+  }
+  if (atc) return numbers;
+  let next = 1;
+  for (const tool of used) {
+    if (numbers.has(tool.id)) continue;
+    while (taken.has(next)) next++;
+    numbers.set(tool.id, next);
+    taken.add(next);
+  }
+  return numbers;
+}
+
+/** What the generator is told of an operation's bit, if it has one. */
+function toolRef(op: OperationItem, tools: Tool[], numbers: Map<string, number>): ToolRef | undefined {
+  const tool = tools.find((t) => t.id === op.toolId);
+  const number = tool && numbers.get(tool.id);
+  if (!isRouter(op) || !tool || number === undefined) return undefined;
+  return { number, name: tool.name, diameter: tool.diameter, shape: TOOL_KIND_LABELS[tool.kind] };
+}
+
+/** One run of operations with the same bit, in the order the job runs. */
+export interface BitRun {
+  number: number | null;
+  name: string;
+  shape: string;
+  diameter: number;
+  /** Indexes into the project's operations list. */
+  operations: number[];
+}
+
+/**
+ * The bits a router job uses, in the order it runs them: one entry per run of
+ * operations with the same bit, so the job stops `runs.length - 1` times to
+ * change bits. `reused` is set when a bit comes back after another, which
+ * makes more changes than the job needs.
+ */
+export function bitsForJob(s: {
+  machineKind: MachineKind;
+  operations: OperationItem[];
+  items: unknown[];
+  toolChange: ToolChange;
+}): { runs: BitRun[]; reused: boolean } {
+  if (s.machineKind !== "cnc") return { runs: [], reused: false };
+  const { tools } = useToolbox.getState();
+  const order = jobOrder(s.operations, s.items.length > 0).all.filter(isRouter);
+  const numbers = toolNumbers(order, tools, s.toolChange.mode === "atc");
+  const runs: BitRun[] = [];
+  for (const op of order) {
+    const tool = tools.find((t) => t.id === op.toolId);
+    const index = s.operations.indexOf(op);
+    const number = tool ? (numbers.get(tool.id) ?? null) : null;
+    const last = runs[runs.length - 1];
+    if (last && tool && last.name === tool.name && last.number === number) {
+      last.operations.push(index);
+      continue;
+    }
+    runs.push({
+      number,
+      name: tool?.name ?? "No bit chosen",
+      shape: tool ? TOOL_KIND_LABELS[tool.kind] : "",
+      diameter: tool?.diameter ?? 0,
+      operations: [index],
+    });
+  }
+  const seen = new Set<string>();
+  let reused = false;
+  for (const run of runs) {
+    const key = `${run.number}:${run.name}`;
+    if (seen.has(key)) reused = true;
+    seen.add(key);
+  }
+  return { runs, reused };
+}
+
+export const DEFAULT_TOOL_CHANGE: ToolChange = {
+  mode: "byHand",
+  place: { type: "overWorkZero" },
+  lift: 20,
+  spinDown: 5,
+};
+
+/**
+ * A file name made safe for every file system: letters, digits, dots,
+ * hyphens and underscores only, others turned into hyphens, with repeats
+ * collapsed, the ends trimmed, and at most 100 characters.
+ */
+export function safeFileName(name: string): string {
+  const cleaned = name
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return (cleaned || "kerf").slice(0, 100).replace(/[-.]+$/, "");
 }
 
 /**
@@ -122,8 +225,6 @@ function followThickness(operations: OperationItem[], from: number, to: number):
   );
 }
 
-export const MIXED_BITS_MESSAGE =
-  'These operations use different bits. Untick "Include in the job" on all but one, run it, change the bit, zero Z again, then do the next.';
 
 /** A cut right through the material, a little outside the artwork, with tabs. */
 export function defaultCutout(thickness: number): OperationKind {
@@ -337,6 +438,15 @@ interface ProjectState {
   /** Vendor commands emitted around every job; set by presets. */
   startGcode: string;
   endGcode: string;
+  /** How a router's bits are changed within a job. */
+  toolChange: ToolChange;
+  /**
+   * The touch plate's thickness in mm, or null for none. Blank until the
+   * person enters it, since a wrong thickness is a wrong Z. Desktop only.
+   */
+  touchPlate: number | null;
+  /** The router is switched on and off at its own switch, not by M3 and M5. */
+  routerByHand: boolean;
   /** Physical size of the artwork in millimetres. */
   widthMm: number;
   heightMm: number;
@@ -515,6 +625,9 @@ interface ProjectState {
    */
   fitEverythingOnMaterial: () => void;
   setSpindleRpm: (spindleRpm: number) => void;
+  setToolChange: (patch: Partial<ToolChange>) => void;
+  setTouchPlate: (thickness: number | null) => void;
+  setRouterByHand: (byHand: boolean) => void;
   /** Changes what an operation does, giving it a suitable bit and speeds. */
   setOperationType: (id: number, type: OperationKind["type"]) => void;
   /** Changes an operation's bit and recalculates its speeds. */
@@ -528,7 +641,8 @@ interface ProjectState {
   addCutout: () => void;
   removeOperation: (id: number) => void;
   generateGcode: () => Promise<void>;
-  exportGcode: () => Promise<void>;
+  /** Saves the program, one part of it (one bit), or one file with M6 at each change. */
+  exportGcode: (part?: number, withToolChanges?: boolean) => Promise<void>;
 }
 
 const EMPTY_TRACE: TraceState = {
@@ -747,13 +861,13 @@ const DEVICE_KEYS = [
   "spindleRpm",
   "startGcode",
   "endGcode",
+  "toolChange",
+  "touchPlate",
+  "routerByHand",
 ] as const;
 
 /** The machine settings that are remembered between sessions. */
-type Device = Pick<
-  ProjectState,
-  "machinePreset" | "machineKind" | "bed" | "origin" | "maxPowerS" | "spindleRpm" | "startGcode" | "endGcode"
->;
+type Device = Pick<ProjectState, (typeof DEVICE_KEYS)[number]>;
 
 function storedDevice(): Device | null {
   try {
@@ -1135,6 +1249,9 @@ export const useProject = create<ProjectState>((set, get) => {
     startGcode: "",
     endGcode: "",
     spindleRpm: 16000,
+    toolChange: DEFAULT_TOOL_CHANGE,
+    touchPlate: null,
+    routerByHand: false,
     ...remembered,
     widthMm: 100,
     heightMm: 100,
@@ -1887,6 +2004,10 @@ export const useProject = create<ProjectState>((set, get) => {
         operations: s.operations.map((op) => equip(op, { ...s, spindleRpm })),
         ...staleGcode(),
       })),
+    setToolChange: (patch) => set((s) => ({ toolChange: { ...s.toolChange, ...patch }, ...staleGcode() })),
+    // Neither changes the G-code: they are used when Kerf runs the machine.
+    setTouchPlate: (touchPlate) => set({ touchPlate }),
+    setRouterByHand: (routerByHand) => set({ routerByHand }),
     setOperationType: (id, type) =>
       set((s) => ({
         operations: s.operations.map((op) => {
@@ -1977,8 +2098,14 @@ export const useProject = create<ProjectState>((set, get) => {
       const order = jobOrder(s.operations, s.items.length > 0);
       const around = everythingRect(s);
       const generation = ++gcodeGeneration;
-      if (usesMixedBits(s)) {
-        set({ gcode: { ...EMPTY_GCODE, error: MIXED_BITS_MESSAGE } });
+      // Each router operation says which bit it uses, so a job with more
+      // than one bit stops to change them.
+      const { tools } = useToolbox.getState();
+      const atc = s.machineKind === "cnc" && s.toolChange.mode === "atc";
+      const numbers = toolNumbers(order.all.filter(isRouter), tools, atc);
+      const named = (ops: OperationItem[]) => ops.map((op) => ({ ...op, tool: toolRef(op, tools, numbers) }));
+      if (s.machineKind === "cnc" && bitsForJob(s).runs.length > 1 && order.all.some((op) => isRouter(op) && !op.toolId)) {
+        set({ gcode: { ...EMPTY_GCODE, error: "Choose a bit for every router operation, so Kerf knows when to stop and change it." } });
         return;
       }
       set({ gcode: { ...EMPTY_GCODE, busy: true } });
@@ -1993,17 +2120,18 @@ export const useProject = create<ProjectState>((set, get) => {
             bedHeight: s.bed.height,
             maxPowerS: s.maxPowerS,
             travelFeed: TRAVEL_FEED,
+            toolChange: s.toolChange,
           },
           offset: [rect.x, rect.y],
           // Cutouts are run last by the generator, wherever they are listed.
-          operations: [...order.main, ...order.cutouts],
+          operations: named([...order.main, ...order.cutouts]),
           materialThickness: s.thickness,
         }, {
           enabled: s.heightSource === "depth" && s.depth.status === "ready",
           detail: s.detail,
           floor: s.depthFloor,
         },
-        s.items.length > 0 && order.items.length > 0 ? { svg: itemsSvg(s), operations: order.items } : null,
+        s.items.length > 0 && order.items.length > 0 ? { svg: itemsSvg(s), operations: named(order.items) } : null,
         // A cutout goes round everything on the material, not just the artwork.
         around && s.items.length > 0 ? [around.x, around.y, around.width, around.height] : null);
         if (generation !== gcodeGeneration) return;
@@ -2018,13 +2146,22 @@ export const useProject = create<ProjectState>((set, get) => {
       }
     },
 
-    exportGcode: async () => {
+    exportGcode: async (part, withToolChanges) => {
       const { image, gcode } = get();
       if (!image || !gcode.program) return;
       const generation = gcodeGeneration;
-      const suggestedName = `${image.name.replace(/\.[^.]+$/, "")}.gcode`;
+      const base = image.name.replace(/\.[^.]+$/, "");
+      // A part's file is named after its bit, as the part was generated.
+      const tool = part === undefined ? null : gcode.program.parts[part]?.tool;
+      const name =
+        part !== undefined && gcode.program.parts.length > 1
+          ? `${base}-${part + 1}-${tool?.name ?? "bit"}`
+          : withToolChanges
+            ? `${base}-with-tool-changes`
+            : base;
+      const suggestedName = `${safeFileName(name)}.gcode`;
       try {
-        const path = await ipc.exportGcode(suggestedName, gcode.program.programId);
+        const path = await ipc.exportGcode(suggestedName, gcode.program.programId, part, withToolChanges);
         if (path && generation === gcodeGeneration) {
           set((s) => ({ gcode: { ...s.gcode, exportedTo: path, error: null } }));
         }
@@ -2044,7 +2181,7 @@ useProject.subscribe((s, previous) => {
 
 // Remember the machine between sessions.
 useProject.subscribe((s, previous) => {
-  const keys = ["machinePreset", "machineKind", "bed", "origin", "maxPowerS", "spindleRpm", "startGcode", "endGcode"] as const;
+  const keys = DEVICE_KEYS;
   if (keys.every((key) => s[key] === previous[key])) return;
   try {
     localStorage.setItem(DEVICE_KEY, JSON.stringify(Object.fromEntries(keys.map((key) => [key, s[key]]))));
