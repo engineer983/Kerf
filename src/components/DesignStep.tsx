@@ -3,7 +3,7 @@ import { Image as ImageIcon, PenLine, Trash2, Type } from "lucide-react";
 import { isFixed } from "../lib/design";
 import { ACCEPTED_FILE_TYPES } from "../lib/image";
 import { inBrowser, inkscapeFound, isTauri } from "../lib/ipc";
-import { artworkRect, everythingRect, itemRect, stockRect, useProject } from "../state/project";
+import { artworkRect, everythingRect, itemRect, placeOf, stockRect, useProject } from "../state/project";
 import { useUi } from "../state/ui";
 import { Checkbox, NumberField, Section } from "./controls";
 import { Gallery } from "./Gallery";
@@ -210,11 +210,13 @@ function Selected({ onReplace }: { onReplace: () => void }) {
     else if (patch.heightMm !== undefined) s.setHeightMm(patch.heightMm);
   };
   const setPlace = (patch: { left?: number; front?: number }) => (item ? s.updateItem(item.id, patch) : s.setPosition(patch));
-  const centre = () =>
-    setPlace({
-      left: Math.round(((s.stockWidth - size.width) / 2) * 10) / 10,
-      front: Math.round(((s.stockLength - size.height) / 2) * 10) / 10,
-    });
+  const centre = () => {
+    const at = placeOf(
+      { x: stock.x + (stock.width - size.width) / 2, y: stock.y + (stock.height - size.height) / 2, height: size.height },
+      s,
+    );
+    setPlace({ left: Math.round(at.left * 10) / 10, front: Math.round(at.front * 10) / 10 });
+  };
   const name = item ? item.name : (s.image?.name.replace(/\.[^.]+$/, "") ?? "");
   const picture = !item && !s.design;
 
@@ -298,13 +300,33 @@ function Selected({ onReplace }: { onReplace: () => void }) {
       <NumberField label="From left" unit="mm" min={-5000} max={5000} value={place.left} onChange={(left) => setPlace({ left })} />
       <NumberField label={edge} unit="mm" min={-5000} max={5000} value={place.front} onChange={(front) => setPlace({ front })} />
       {overhangs && (
-        <p role="alert" className="text-accent">
-          Something reaches past the edge of the material.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-accent">
+            Something reaches past the edge of the material.
+          </p>
+          <button
+            className={quiet}
+            onClick={s.fitEverythingOnMaterial}
+            title={
+              s.design && isFixed(s.design)
+                ? "Put everything in the middle of the material. A box or layers stay the size they were drawn."
+                : "Make everything smaller together, if needed, to fit the material less a 10 mm margin, and centre it there"
+            }
+          >
+            Make it fit
+          </button>
+        </div>
       )}
       <div className="flex flex-wrap gap-2">
         <button className={quiet} onClick={centre} title="Put it in the middle of the material">
           Centre it
+        </button>
+        <button
+          className={quiet}
+          onClick={s.centreOnMaterial}
+          title="Move the artwork and everything added to it together, so the whole design sits in the middle of the material"
+        >
+          Centre everything on the material
         </button>
         {item?.text && (
           <button className={quiet} onClick={() => useUi.getState().setMaker("text", item.id)}>

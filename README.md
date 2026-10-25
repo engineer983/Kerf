@@ -15,7 +15,7 @@ The current builds are **release candidates for testing**.
 
 It is the same interface and the same engine, so pictures, drawings, text, boxes, layers, the previews, G-code and the assistant all work. A web page is not allowed to do some things a program can:
 
-- **It does not connect to a machine.** Export the G-code and send it with your machine's own software, or use the desktop app.
+- **It does not connect to a machine.** Export the G-code and send it with your machine's own software, or use the desktop app. You can plan a job with more than one bit and see where it stops to change them, and save it as one file per bit (or one file with M6). Running it, waiting at the changes and probing need the desktop app.
 - **Fonts.** Chrome and Edge ask before letting the page use the fonts installed on your computer. If you say no, or use another browser, text is set in the Lato family that comes with Kerf.
 - **Saved projects** are kept in the browser's own storage for the site. They are not shared with the desktop app, and clearing the browser's site data removes them.
 - **API keys** for the assistant are kept in the browser's storage, which is less protected than the desktop app's use of the system's credential store.
@@ -38,10 +38,11 @@ The work goes through six numbered steps: Device, Material, Design, Trace, Opera
 - **Design on the material.** Start from a picture (PNG, JPEG, WebP, BMP, GIF), an SVG drawing, text in any installed font, or a box; then add more text and drawings around it. Text can run straight, along a curve, or round the artwork. Everything is moved and sized on a canvas that shows the bed and the material in millimetres.
 - **Remove a background.** A photograph's subject is found on your own computer and what is behind it taken away; correct it by drawing round what to keep or remove.
 - **Lasers.** Engrave a photograph with its shading, fill shapes solidly, follow outlines, and cut the piece out in the same job.
-- **CNC routers.** Follow outlines, carve a picture as a 3D relief, and cut the piece out with holding tabs. A photograph's shape is estimated with a depth model that runs on your own computer. Speeds are worked out from the bit, the material and the router's speed, from a toolbox of bits you can edit.
+- **CNC routers.** Follow outlines, carve a picture as a 3D relief, and cut the piece out with holding tabs. One job can use several bits: it stops at each change with the spindle off and the bit raised, and only carries on once Z has been set again, by hand or with a touch plate. It can also be saved as one file per bit, or as one file with M6 for senders that handle tool changes. A photograph's shape is estimated with a depth model that runs on your own computer. Speeds are worked out from the bit, the material and the router's speed, from a toolbox of bits you can edit.
 - **Without tracing.** A box maker draws finger-jointed panels from a box's size and the material's thickness, allowing for a laser's kerf or a router bit's width. Stacked layers slice a picture into pieces to cut from thin sheet and glue into a relief.
+- **See the bed.** Take a picture with a camera over the bed, line it up once on four known places, and see the design on top of it, and find the material, so the design can be centred on it. Without a camera, type where the material sits on the bed. The browser asks before letting the page use the camera, and the picture never leaves your computer. On a Mac the camera needs macOS 12 or later.
 - **Preview.** Watch the job play back, see roughly what the finished piece will look like, and turn it over in 3D.
-- **Run it.** Export the G-code as a file, or connect to a GRBL or grblHAL machine to jog, home, set zero, frame, start, pause and stop.
+- **Run it.** Export the G-code as a file, or connect to a GRBL or grblHAL machine to jog (in steps, or while you hold a button or arrow key), home, set zero, go back to zero, frame, start, pause and stop.
 - **Assistant.** An optional chat panel that can set a job up from a wish such as "make this as realistic as possible", using Claude, OpenAI, OpenRouter, or a model on your own computer through Ollama. It can also draw a picture, ask an image model for one, or search for pictures that are free to reuse. It can never move or start a machine.
 - **Help.** A built-in guide to good practice at the laser and the router, with step-by-step instructions for common jobs.
 
@@ -55,11 +56,13 @@ Not yet tested:
 
 - Any G-code on a real laser or router.
 - The GRBL sender against a real controller; it has only met a simulated one.
+- Changing bits part way through a job, and setting Z with a touch plate, on real hardware. The automatic tool changer mode (grblHAL) has never met a real changer.
 - Picture generation against a real image service.
 - The macOS and Linux installers. They are built automatically and have not been run.
+- The camera on macOS and Linux, how closely a lined-up picture matches the bed on a real machine, and how well finding the material works on a real bed. On Linux the deb needs the `gstreamer1.0-plugins-good` package for the camera; the AppImage brings its own.
 - The browser version in anything but Chrome on Windows, and its assistant against anything but a local Ollama model.
 
-Not built yet: centerline tracing, calculated laser power and speed, an allowance for the bit's width when following outlines, a separate roughing pass for reliefs, and automatic tool changes.
+Not built yet: centerline tracing, calculated laser power and speed, an allowance for the bit's width when following outlines, a separate roughing pass for reliefs, grblHAL's own tool-change handshake (Kerf stops between parts instead), and a fixed tool-length setter.
 
 ## Layout
 

@@ -68,7 +68,14 @@ const BY_TEXT: Record<string, string> = {
   Connect: "Open the serial connection to the machine",
   Disconnect: "Close the connection to the machine",
   Home: "Send the machine to its home switches to find its position",
-  Unlock: "Clear an alarm lock so the machine will move again",
+  Unlock:
+    "Clear an alarm lock so the machine will move again. Only if you know where the head is: the machine will not stop at the edges until it is homed",
+  Hold: "Move only while you hold a jog button or an arrow key down; let go to stop",
+  Slow: "Move slowly, for lining up on a mark",
+  Normal: "Move at an everyday speed",
+  Fast: "Move quickly, for crossing the bed",
+  "Go to XY zero":
+    "Move the head back to the work zero (X0 Y0) at its current height, to check where the job will start. On a router, raise the bit clear of the material and clamps first",
   "Zero XY here": "Make the bit's current position X0 Y0 for the job",
   "Zero Z here": "Make the bit's current height Z0: touch it to the top of the material first",
   "Frame the job outline": "Move around the edge of the job without cutting, to check it fits",
@@ -77,6 +84,15 @@ const BY_TEXT: Record<string, string> = {
   Resume: "Carry on from where the job was paused",
   Stop: "Halt the machine and abandon the job",
   "Stop machine": "Halt the machine and abandon the job",
+  "Stop the job here": "End the job now, at the bit change; Start then needs the job again from the beginning",
+  "Test the probe": "Watch for the touch plate: touch it to the bit and the light should turn on",
+  "Probe Z with the touch plate":
+    "Lower the bit slowly onto the plate and set Z from it; click again to confirm. The tip must be within 10 mm of the plate",
+  "Use the current position": "Take the machine's position from home as the place to change bits",
+
+  // Saving
+  "Save as one file with tool changes (M6)…":
+    "Save the whole job as one file with M6 at each bit change, for senders that stop and let you set Z again",
 
   // Toolbox
   "Add a bit": "Add a new bit to the toolbox",

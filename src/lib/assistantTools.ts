@@ -90,7 +90,8 @@ export const TOOLS: ToolSpec[] = [
   },
   {
     name: "set_material",
-    description: "Change the material and the size of the piece. Changing the material recalculates router speeds.",
+    description:
+      "Change the material, the size of the piece, and where it sits on the bed. Changing the material recalculates router speeds. Moving the piece carries the design with it, so it stays where it was on the piece. This only changes the layout on screen.",
     schema: {
       type: "object",
       properties: {
@@ -98,6 +99,8 @@ export const TOOLS: ToolSpec[] = [
         thickness: number("Millimetres."),
         width: number("Left to right, millimetres."),
         length: number("Front to back, millimetres."),
+        leftMm: number("Distance of the piece's left edge from the bed's left edge, millimetres. 0 is the origin corner."),
+        frontMm: number("Distance of the piece from the bed edge on the origin side (front for a front-left origin, back for a back-left one), millimetres."),
       },
     },
   },
@@ -414,7 +417,7 @@ function describeProject() {
     // A box or a set of layers, which is cut in place of the traced picture
     // and cannot be resized.
     design: s.design && { summary: describeDesign(s.design), sheets: s.design.sheets.length, sheetShown: s.design.sheet + 1, partsOnThisSheet: s.design.sheets[s.design.sheet].parts },
-    material: { id: s.materialId, name: findMaterial(s.materialId).label, thicknessMm: s.thickness, widthMm: s.stockWidth, lengthMm: s.stockLength },
+    material: { id: s.materialId, name: findMaterial(s.materialId).label, thicknessMm: s.thickness, widthMm: s.stockWidth, lengthMm: s.stockLength, leftMm: s.stockLeft, frontMm: s.stockFront },
     // Text and drawings placed on the material beside the main artwork, each
     // movable and resizable on its own. One operation, marked forAddedItems,
     // makes them all.
@@ -539,14 +542,20 @@ const HANDLERS: Record<string, (input: Input) => Promise<Omit<ToolOutcome, "isEr
     const thickness = num(input, "thickness", 0.1, 200);
     const width = num(input, "width", 1, 5000);
     const length = num(input, "length", 1, 5000);
+    const leftMm = num(input, "leftMm", -5000, 5000);
+    const frontMm = num(input, "frontMm", -5000, 5000);
     if (material) s.setMaterial(material);
     if (thickness !== undefined) s.setThickness(thickness);
     if (width !== undefined || length !== undefined) {
       s.setStock({ ...(width !== undefined && { stockWidth: width }), ...(length !== undefined && { stockLength: length }) });
     }
+    const moved = leftMm !== undefined || frontMm !== undefined;
+    if (moved) {
+      s.setStockPlace({ ...(leftMm !== undefined && { stockLeft: leftMm }), ...(frontMm !== undefined && { stockFront: frontMm }) });
+    }
     return {
-      content: "Material updated. Router speeds were recalculated if the material changed.",
-      summary: material ? `Set the material to ${findMaterial(material).label}` : "Changed the material's size",
+      content: `Material updated. Router speeds were recalculated if the material changed.${moved ? " The design moved with the piece." : ""}`,
+      summary: material ? `Set the material to ${findMaterial(material).label}` : moved ? "Moved the material" : "Changed the material's size",
     };
   },
 
@@ -979,7 +988,7 @@ export async function runTool(name: string, input: unknown): Promise<ToolOutcome
 /** Standing instructions for the assistant. Kept unchanging so providers can cache it. */
 export const SYSTEM_PROMPT = `You are the assistant inside Kerf, a desktop app that turns a picture into a job for a laser engraver or a CNC router. The person you are helping makes things in a home workshop. They may be new to this, so explain in plain language and define a term the first time you use it.
 
-How the app works, in numbered steps: 1 Device, the machine; 2 Material, what it is and how big the piece is; 3 Design, what goes on the material; 4 Trace, how a picture is turned into outlines; 5 Operations, what the machine does; 6 Machine, running it. The design starts with one main thing (a picture, a drawing, words or a box) and can have more words and drawings added around it, each placed and sized on its own, which is how a sign is laid out. Everything is fitted to the material, so the material's size should be right before the design is arranged. One operation makes all the added items, after the main artwork and before any cutout, and a cutout goes round everything together. A laser can engrave the picture with its shading (image), fill traced shapes, or follow their outlines. A router can follow traced outlines (profile), carve the picture as a 3D relief, or cut the piece out with holding tabs. A relief takes its heights either from the picture's brightness or from an estimate of depth, which suits photographs and drawings of objects. Generating produces G-code and a preview; nothing reaches a machine until the person sends it themselves.
+How the app works, in numbered steps: 1 Device, the machine; 2 Material, what it is and how big the piece is; 3 Design, what goes on the material; 4 Trace, how a picture is turned into outlines; 5 Operations, what the machine does; 6 Machine, running it. The design starts with one main thing (a picture, a drawing, words or a box) and can have more words and drawings added around it, each placed and sized on its own, which is how a sign is laid out. Everything is fitted to the material, so the material's size should be right before the design is arranged. One operation makes all the added items. Whatever order operations are listed in, the job marks and engraves first, the added items next, then anything that cuts right through (the main artwork's laser lines, router lines as deep as the material, and a box's or layers' parts), and any cutout last, so nothing is cut free before it has been marked. A cutout goes round everything together. A laser can engrave the picture with its shading (image), fill traced shapes, or follow their outlines. A router can follow traced outlines (profile), carve the picture as a 3D relief, or cut the piece out with holding tabs. A relief takes its heights either from the picture's brightness or from an estimate of depth, which suits photographs and drawings of objects. Generating produces G-code and a preview; nothing reaches a machine until the person sends it themselves.
 
 You can read the project and change its settings with your tools. Look at the project before advising or changing anything, since it may have changed since you last looked. When the person asks for a result ("make it deeper", "it's taking too long"), make the change rather than describing how they could, then say in a sentence or two what you changed and why. Your changes can be undone with Ctrl+Z, so prefer acting to asking, but do ask when the request could reasonably mean quite different things. After changing something that affects the job, generate the G-code again if they will want to see the result, and report the new time.
 

@@ -4,6 +4,7 @@ import { useProject, type Step } from "../state/project";
 import { useUi } from "../state/ui";
 import { DevicePanel } from "./DevicePanel";
 import { DesignStep } from "./DesignStep";
+import { FrameFirstNote } from "./FoundMaterial";
 import { MachinePanel } from "./MachinePanel";
 import { MaterialPanel } from "./MaterialPanel";
 import { OperationsPanel } from "./OperationsPanel";
@@ -51,7 +52,10 @@ export function Inspector() {
         ) : step === "operations" ? (
           <OperationsPanel />
         ) : (
-          <MachinePanel />
+          <>
+            <FrameFirstNote />
+            <MachinePanel />
+          </>
         )}
       </div>
     </aside>

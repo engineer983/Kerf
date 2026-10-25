@@ -26,3 +26,7 @@ kerf-make = { path = "../crates/kerf-make" }
 kerf-core = { path = "../crates/kerf-core" }
 ureq = "2"
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+# Turning the camera on in Linux's webview. Must be the same version wry uses.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_8"] }

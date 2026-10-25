@@ -7,7 +7,7 @@
  * web requests) are done with what a browser provides.
  */
 import * as assistant from "./assistant";
-import { engine } from "./engine";
+import { cameraBedPicture, engine } from "./engine";
 import * as files from "./files";
 import * as fonts from "./fonts";
 import * as projects from "./projects";
@@ -34,6 +34,10 @@ const handlers: Record<string, (args: any) => Promise<unknown>> = {
   open_project: projects.openProject,
   project_picture: projects.projectPicture,
   delete_project: projects.deleteProject,
+
+  // The camera itself is opened by the page in both versions; only the
+  // redrawn picture needs its own path, because it comes back as bytes.
+  camera_bed_picture: cameraBedPicture,
 
   list_fonts: fonts.listFonts,
   make_text: fonts.makeText,

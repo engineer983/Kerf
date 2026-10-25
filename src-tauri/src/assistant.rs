@@ -86,3 +86,62 @@ pub async fn assistant_models(
     })
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    /// The assistant's tools, as both versions send them with `assistant_send`.
+    const TOOLS: &str = include_str!("../../src/lib/assistantTools.ts");
+
+    /// Every tool name the assistant is given.
+    fn tool_names() -> Vec<&'static str> {
+        TOOLS
+            .split("name: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect()
+    }
+
+    #[test]
+    fn the_assistant_has_no_tool_that_reaches_the_machine() {
+        let names = tool_names();
+        assert!(names.contains(&"generate_gcode"), "{names:?}");
+        let forbidden = [
+            "machine",
+            "connect",
+            "jog",
+            "home",
+            "probe",
+            "continue",
+            "start",
+            "stop",
+            "spindle",
+            "export",
+            "save_file",
+            "send",
+            "zero",
+            "frame",
+            "camera",
+        ];
+        for name in &names {
+            let lower = name.to_ascii_lowercase();
+            for word in forbidden {
+                assert!(
+                    !lower.contains(word),
+                    "assistant tool {name} looks like a machine, probe, continue or export action"
+                );
+            }
+        }
+        // Nor does any tool call the backend for one directly.
+        for call in [
+            "machineAction",
+            "connectMachine",
+            "disconnectMachine",
+            "exportGcode",
+            "exportSvg",
+            "useMachine",
+            "invoke(",
+        ] {
+            assert!(!TOOLS.contains(call), "assistantTools.ts uses {call}");
+        }
+    }
+}

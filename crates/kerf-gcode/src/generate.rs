@@ -1,19 +1,21 @@
 //! Turning artwork and a job into a GRBL G-code program.
 
 use std::fmt::Write as _;
+use std::ops::Range;
 
 use serde::Serialize;
 
 use crate::geometry::{distance, Artwork, Polyline, Shape};
-use crate::job::{Job, Machine, Operation, OperationKind, Origin};
+use crate::job::{ChangePlace, Job, Machine, Operation, OperationKind, Origin};
 use crate::relief::Heightmap;
+use crate::tool_change::{self, Layout, Plan, ProgramPart, PART_HEADER};
 
 /// Seconds to wait for the spindle to reach speed before cutting.
 pub(crate) const SPINDLE_DWELL_S: f64 = 2.0;
 /// Slack when checking the job against the bed, for rounding in the artwork.
 const BED_SLACK_MM: f64 = 0.01;
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Bounds {
     pub min_x: f64,
@@ -22,9 +24,10 @@ pub struct Bounds {
     pub max_y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Program {
+    /// The whole program. Every part's stream, joined in order.
     pub text: String,
     pub line_count: usize,
     /// Extent of all cutting moves, in machine coordinates.
@@ -44,6 +47,25 @@ pub struct Program {
     /// The index in `moves` of the first move of each operation, in order, so
     /// that a preview can tell which bit made which cut.
     pub operation_starts: Vec<usize>,
+    /// One per bit, in order, for a job whose bits are changed by hand;
+    /// otherwise one for the whole job.
+    pub parts: Vec<ProgramPart>,
+    /// The job moves in machine coordinates (`G53`) to change bits, which
+    /// needs a machine that has homed.
+    pub needs_homing: bool,
+    /// The bits are changed by an automatic tool changer at each `M6`.
+    pub atc: bool,
+    /// How high above the work zero the bit is raised at each change, when
+    /// it is raised over the work zero.
+    pub change_lift: Option<f64>,
+    /// Where the job goes in machine coordinates, for the sender to check.
+    pub machine_moves: Vec<[f64; 3]>,
+    /// For a change at a fixed place: how far above the work zero the bit
+    /// must be when it goes there (the larger of the lift and the job's
+    /// highest safe height), for the sender to check against the work.
+    pub change_clearance: Option<f64>,
+    #[serde(skip)]
+    pub(crate) layout: Layout,
 }
 
 pub fn generate(artwork: &Artwork, job: &Job) -> Result<Program, String> {
@@ -64,7 +86,8 @@ pub fn generate_with(
 pub struct Additions<'a> {
     /// Drawn where it sits on the bed, so it needs no offset.
     pub artwork: &'a Artwork,
-    /// Run after the job's own operations and before its cutouts.
+    /// Run after the job's own marking operations and before anything of
+    /// the job's that cuts pieces free (see [`Job::cuts_free`]).
     pub operations: &'a [Operation],
 }
 
@@ -76,8 +99,9 @@ fn is_cutout(operation: &Operation) -> bool {
 }
 
 /// Like [`generate_with`], for a job with things added beside its main
-/// artwork. Whatever order the operations are given in, cutouts run last, so
-/// that nothing is engraved on a piece that has already been cut free.
+/// artwork. Whatever order the operations are given in, those that cut
+/// pieces free run after the rest, and cutouts last of all, so that nothing
+/// is engraved on a piece that has already been cut free.
 /// `cutout_around` is the rectangle, in bed coordinates as x, y, width and
 /// height, that cutouts go round in place of the main artwork's own: the
 /// space taken up by everything on the material.
@@ -95,24 +119,37 @@ pub fn generate_composed(
     for operation in job.operations.iter().chain(added) {
         operation.validate(&job.machine)?;
     }
-    // Each operation, with whether it works on the additions.
-    let order: Vec<(&Operation, bool)> = job
-        .operations
-        .iter()
-        .filter(|o| !is_cutout(o))
-        .map(|o| (o, false))
+    job.check(added)?;
+    // Each operation, with whether it works on the additions. Whatever cuts
+    // pieces free runs after everything that marks them, or a piece could
+    // drop or shift before it is marked: the main artwork's marks, then the
+    // additions, then its cuts right through, then cutouts.
+    let main = |cuts: bool, cutouts: bool| {
+        job.operations
+            .iter()
+            .filter(move |o| job.cuts_free(o) == cuts && is_cutout(o) == cutouts)
+            .map(|o| (o, false))
+    };
+    let mut through: Vec<(&Operation, bool)> = main(true, false).collect();
+    if job.cuts_parts && job.machine.kind == crate::job::MachineKind::Laser {
+        // A design's lines burn weakest first, so its marks are made before
+        // the parts are cut free however they are listed. Equal powers keep
+        // their listed order.
+        through.sort_by(|a, b| a.0.power.total_cmp(&b.0.power));
+    }
+    let order: Vec<(&Operation, bool)> = main(false, false)
         .chain(added.iter().map(|o| (o, true)))
-        .chain(
-            job.operations
-                .iter()
-                .filter(|o| is_cutout(o))
-                .map(|o| (o, false)),
-        )
+        .chain(through)
+        .chain(main(true, true))
         .collect();
     let (cut_size, cut_at) = match cutout_around {
         Some([x, y, width, height]) => ([width, height], [x, y]),
         None => ([artwork.width, artwork.height], job.offset),
     };
+
+    let running: Vec<&Operation> = order.iter().map(|(o, _)| *o).collect();
+    let plan = Plan::new(job, &running);
+    let tool_at = |i: usize| running.get(i).and_then(|o| o.tool.as_ref());
 
     let mut w = Writer::new(&job.machine);
     w.line(&format!(
@@ -120,11 +157,73 @@ pub fn generate_composed(
         env!("CARGO_PKG_VERSION")
     ));
     w.lines(&job.machine.start_gcode);
-    w.line("G21");
-    w.line("G90");
+    let header = w.out.clone();
+    if plan.plain() {
+        // A job with one bit is written exactly as it always was.
+        w.line("G21");
+        w.line("G90");
+    } else {
+        w.line(PART_HEADER);
+    }
+    if let (true, Some(first)) = (plan.atc, tool_at(0)) {
+        // An automatic changer loads the first bit before anything else,
+        // with the spindle raised clear first.
+        w.z_move(plan.lift, None);
+        w.line(&format!("T{} M6", first.number));
+        // The changer may leave the head anywhere: travel before plunging.
+        w.force_travel = true;
+    }
+
+    // Where each part starts in the text, where its operations start and
+    // end, and its first operation.
+    struct Mark {
+        start: usize,
+        body: Range<usize>,
+        first_operation: usize,
+    }
+    let mut marks = vec![Mark {
+        start: 0,
+        body: w.out.len()..0,
+        first_operation: 0,
+    }];
+    let mut change_moves = Vec::new();
+    let changes = plan.starts.len();
 
     let mut operation_starts = Vec::with_capacity(order.len());
-    for (operation, on_additions) in order {
+    for (index, (operation, on_additions)) in order.into_iter().enumerate() {
+        if let Some(change) = plan.starts.iter().position(|&s| s == index) {
+            let next = tool_at(index);
+            if plan.atc {
+                tool_change::write_atc_change(&mut w, &plan, next);
+            } else {
+                if let Some(last) = marks.last_mut() {
+                    last.body.end = w.out.len();
+                }
+                change_moves.push(tool_change::write_change(
+                    &mut w,
+                    &plan,
+                    change + 1,
+                    changes,
+                    next,
+                ));
+                let start = w.out.len();
+                w.line(&format!(
+                    "; Part {} of {}: {}",
+                    change + 2,
+                    changes + 1,
+                    tool_change::fit(next)
+                ));
+                w.line(PART_HEADER);
+                // A part always says where it starts in X and Y before it
+                // plunges: the change place may be anywhere.
+                w.force_travel = true;
+                marks.push(Mark {
+                    start,
+                    body: w.out.len()..0,
+                    first_operation: index,
+                });
+            }
+        }
         operation_starts.push(w.moves.len() / 4);
         let (artwork, offset) = match additions {
             Some(additions) if on_additions => (additions.artwork, [0.0, 0.0]),
@@ -207,9 +306,42 @@ pub fn generate_composed(
         ));
     }
 
+    if let Some(last) = marks.last_mut() {
+        last.body.end = w.out.len();
+    }
     w.line("M5");
     w.travel(w.origin(), "");
+    let end_start = w.out.len();
     w.lines(&job.machine.end_gcode);
+    let end = w.out[end_start..].to_owned();
+
+    let operation_count = operation_starts.len();
+    let text_len = w.out.len();
+    let lines_before = |at: usize| w.out[..at].matches('\n').count();
+    let parts: Vec<ProgramPart> = marks
+        .iter()
+        .enumerate()
+        .map(|(i, mark)| {
+            let stream_end = marks.get(i + 1).map_or(text_len, |m| m.start);
+            let last_operation = marks
+                .get(i + 1)
+                .map_or(operation_count, |m| m.first_operation);
+            ProgramPart {
+                tool: tool_at(mark.first_operation).cloned(),
+                operations: mark.first_operation..last_operation,
+                first_line: lines_before(mark.start),
+                line_count: w.out[mark.start..stream_end].matches('\n').count(),
+                stream: mark.start..stream_end,
+                body: mark.body.clone(),
+            }
+        })
+        .collect();
+    let split = plan.split();
+    let over_work_zero = plan.place == ChangePlace::OverWorkZero;
+    let machine_moves = match plan.place {
+        ChangePlace::Machine { position } if split => vec![position],
+        _ => Vec::new(),
+    };
 
     Ok(Program {
         line_count: w.out.lines().count(),
@@ -222,6 +354,19 @@ pub fn generate_composed(
         travel_path: w.travel_path,
         moves: w.moves,
         operation_starts,
+        parts,
+        needs_homing: !machine_moves.is_empty(),
+        atc: plan.atc,
+        change_lift: ((split && over_work_zero) || plan.atc).then_some(plan.lift),
+        change_clearance: (split && !over_work_zero).then_some(plan.lift),
+        machine_moves,
+        layout: Layout {
+            header,
+            end,
+            spin_down: plan.spin_down,
+            lift: plan.lift,
+            change_moves,
+        },
     })
 }
 
@@ -364,24 +509,100 @@ fn cnc_profile(w: &mut Writer, operation: &Operation, polylines: &[&Polyline]) {
     }
 }
 
-/// Greedy nearest-neighbour ordering by start point, to shorten travel moves.
+/// Orders paths to shorten travel moves, nearest start point first, except
+/// that anything inside a closed path is cut before it. Cutting an outline
+/// first can free the piece, which a router bit may then throw, or which can
+/// shift or tip up before the cuts inside it are made.
 fn order_by_travel<'a>(polylines: &[&'a Polyline], from: [f64; 2]) -> Vec<&'a Polyline> {
-    let mut remaining = polylines.to_vec();
+    let boxes: Vec<[f64; 4]> = polylines.iter().map(|p| bounding_box(&p.points)).collect();
+    // For each path, the closed paths it lies inside, and for each closed
+    // path, how many paths inside it are still to be cut.
+    let mut containers: Vec<Vec<usize>> = vec![Vec::new(); polylines.len()];
+    let mut uncut_inside = vec![0usize; polylines.len()];
+    for (outer, outline) in polylines.iter().enumerate() {
+        if !outline.closed || outline.points.len() < 3 {
+            continue;
+        }
+        for (inner, path) in polylines.iter().enumerate() {
+            // A strictly smaller box rules out cycles, so some path is always
+            // ready to cut.
+            if inner != outer
+                && box_within(boxes[inner], boxes[outer])
+                && box_area(boxes[inner]) < box_area(boxes[outer]) - 1e-9
+                && inside(path.points[0], &outline.points)
+            {
+                containers[inner].push(outer);
+                uncut_inside[outer] += 1;
+            }
+        }
+    }
+
+    let mut remaining: Vec<usize> = (0..polylines.len()).collect();
     let mut ordered = Vec::with_capacity(remaining.len());
     let mut position = from;
     while !remaining.is_empty() {
-        let (nearest, _) = remaining
+        let (slot, _) = remaining
             .iter()
             .enumerate()
-            .map(|(i, p)| (i, distance(position, p.points[0])))
+            .filter(|(_, &i)| uncut_inside[i] == 0)
+            .map(|(slot, &i)| (slot, distance(position, polylines[i].points[0])))
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .expect("remaining is not empty");
-        let polyline = remaining.swap_remove(nearest);
+            .expect("a path with nothing left inside it");
+        let index = remaining.swap_remove(slot);
+        for &outer in &containers[index] {
+            uncut_inside[outer] -= 1;
+        }
+        let polyline = polylines[index];
         // A closed path, or an open one cut an even number of times, ends where it starts.
         position = polyline.points[0];
         ordered.push(polyline);
     }
     ordered
+}
+
+/// `[min_x, min_y, max_x, max_y]`.
+fn bounding_box(points: &[[f64; 2]]) -> [f64; 4] {
+    points.iter().fold(
+        [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ],
+        |b, p| {
+            [
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[0]),
+                b[3].max(p[1]),
+            ]
+        },
+    )
+}
+
+fn box_within(inner: [f64; 4], outer: [f64; 4]) -> bool {
+    inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+fn box_area(b: [f64; 4]) -> f64 {
+    (b[2] - b[0]) * (b[3] - b[1])
+}
+
+/// Whether `point` is inside the polygon `outline`, by the even-odd rule.
+fn inside(point: [f64; 2], outline: &[[f64; 2]]) -> bool {
+    let mut result = false;
+    let mut previous = outline[outline.len() - 1];
+    for &current in outline {
+        if (current[1] > point[1]) != (previous[1] > point[1]) {
+            let x = current[0]
+                + (point[1] - current[1]) / (previous[1] - current[1]) * (previous[0] - current[0]);
+            if point[0] < x {
+                result = !result;
+            }
+        }
+        previous = current;
+    }
+    result
 }
 
 /// Formats a number with up to three decimals and no trailing zeros.
@@ -415,6 +636,10 @@ pub(crate) struct Writer<'a> {
     /// turns this off: its hundreds of thousands of short moves would make
     /// the path too large to draw.
     pub(crate) sketch: bool,
+    /// The next travel is written even if it goes nowhere: after a move
+    /// the writer does not follow (such as one in machine coordinates), the
+    /// head may not be where it thinks.
+    pub(crate) force_travel: bool,
     moves: Vec<f32>,
 }
 
@@ -433,6 +658,7 @@ impl<'a> Writer<'a> {
             z: 0.0,
             power: 1.0,
             sketch: true,
+            force_travel: false,
             moves: Vec::new(),
         };
         // Jobs are assumed to start with the head at the machine origin.
@@ -484,9 +710,10 @@ impl<'a> Writer<'a> {
 
     pub(crate) fn travel(&mut self, to: [f64; 2], suffix: &str) {
         let length = distance(self.position, to);
-        if length < 1e-9 {
+        if length < 1e-9 && !self.force_travel {
             return;
         }
+        self.force_travel = false;
         let [x, y] = self.machine_xy(to);
         self.line(&format!("G0 X{} Y{}{suffix}", num(x), num(y)));
         segment(&mut self.travel_path, self.position, to);
@@ -494,6 +721,28 @@ impl<'a> Writer<'a> {
         self.seconds += length / self.machine.travel_feed * 60.0;
         self.position = to;
         self.record(-1.0);
+    }
+
+    /// A rapid back over the origin, written even when already there, so a
+    /// bit change always says where it happens.
+    pub(crate) fn travel_to_origin(&mut self) {
+        let origin = self.origin();
+        if distance(self.position, origin) < 1e-9 {
+            let [x, y] = self.machine_xy(origin);
+            self.line(&format!("G0 X{} Y{}", num(x), num(y)));
+        } else {
+            self.travel(origin, "");
+        }
+    }
+
+    /// How much text has been written so far.
+    pub(crate) fn written(&self) -> usize {
+        self.out.len()
+    }
+
+    /// The text written since `start`.
+    pub(crate) fn written_since(&self, start: usize) -> &str {
+        &self.out[start..]
     }
 
     pub(crate) fn cut(&mut self, to: [f64; 2], feed: f64, suffix: &str) {
@@ -560,6 +809,7 @@ mod tests {
             origin: Origin::FrontLeft,
             start_gcode: String::new(),
             end_gcode: String::new(),
+            tool_change: Default::default(),
         }
     }
 
@@ -607,14 +857,103 @@ mod tests {
         Job {
             machine: machine(MachineKind::Laser),
             offset: [20.0, 30.0],
+            material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind,
                 feed: 600.0,
                 power: 50.0,
                 passes,
+                tool: None,
             }],
         }
+    }
+
+    /// The order in which each loop of a ring is cut, by its first cutting
+    /// move's X: the outer square starts at X20, the inner one at X30.
+    fn first_cuts(program: &Program) -> Vec<&str> {
+        code(program)
+            .into_iter()
+            .filter(|l| l.starts_with("G0 X"))
+            .collect()
+    }
+
+    fn ring() -> Artwork {
+        // An outer square starting at the corner nearest the origin, and a hole.
+        artwork(
+            40,
+            r##"<path d="M0 0H40V40H0Z M10 10H30V30H10Z" fill="#000000"/>"##,
+        )
+    }
+
+    #[test]
+    fn holes_are_cut_before_the_outline_round_them() {
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.offset = [10.0, 10.0];
+        let program = generate(&ring(), &job).unwrap();
+        let rapids = first_cuts(&program);
+        // The inner loop's corner (bed 20, 20) is reached before the outer one's (10, 10).
+        let inner = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X20 Y80"))
+            .expect("inner loop");
+        let outer = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X10 Y90"))
+            .expect("outer loop");
+        assert!(inner < outer, "{rapids:?}");
+    }
+
+    #[test]
+    fn a_router_cuts_holes_before_the_outline_too() {
+        let job = Job {
+            machine: machine(MachineKind::Cnc),
+            offset: [10.0, 10.0],
+            material_thickness: Some(3.0),
+            cuts_parts: false,
+            operations: vec![Operation {
+                color: None,
+                kind: OperationKind::CncProfile {
+                    depth: 3.0,
+                    depth_per_pass: 1.5,
+                    plunge_feed: 200.0,
+                    safe_z: 5.0,
+                    spindle_rpm: 16000.0,
+                },
+                feed: 800.0,
+                power: 0.0,
+                passes: 1,
+                tool: None,
+            }],
+        };
+        let program = generate(&ring(), &job).unwrap();
+        let rapids = first_cuts(&program);
+        let inner = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X20 Y80"))
+            .expect("inner loop");
+        let outer = rapids
+            .iter()
+            .position(|l| l.starts_with("G0 X10 Y90"))
+            .expect("outer loop");
+        assert!(inner < outer, "{rapids:?}");
+    }
+
+    #[test]
+    fn separate_shapes_are_still_ordered_by_distance() {
+        let squares = artwork(
+            40,
+            r##"<path d="M30 30H40V40H30Z" fill="#000000"/><path d="M0 0H10V10H0Z" fill="#000000"/>"##,
+        );
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.offset = [0.0, 0.0];
+        let program = generate(&squares, &job).unwrap();
+        let rapids = first_cuts(&program);
+        // From X0 Y0 the square at machine X30 Y70 (76 mm away) comes before
+        // the one at X0 Y100, even though it is listed first in neither.
+        assert_eq!(rapids.len(), 3, "{rapids:?}");
+        assert!(rapids[0].starts_with("G0 X30 Y70"), "{rapids:?}");
     }
 
     /// Program lines without the leading comment.
@@ -808,6 +1147,8 @@ mod tests {
         let job = Job {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
+            material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -820,6 +1161,7 @@ mod tests {
                 feed: 800.0,
                 power: 0.0,
                 passes: 1,
+                tool: None,
             }],
         };
         let program = generate(&square(), &job).unwrap();
@@ -890,6 +1232,8 @@ mod tests {
         let job = Job {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
+            material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -902,6 +1246,7 @@ mod tests {
                 feed: 800.0,
                 power: 0.0,
                 passes: 1,
+                tool: None,
             }],
         };
         let program = generate(&square(), &job).unwrap();
@@ -912,5 +1257,142 @@ mod tests {
         assert_eq!(moves[3][2..], [-1.0, 1.0]);
         assert!(moves[4..8].iter().all(|m| m[2..] == [-1.0, 1.0]));
         assert_eq!(moves[moves.len() - 1][2..], [5.0, -1.0]);
+    }
+
+    /// Lettering on the panel: a 6 mm line across the middle of the square,
+    /// drawn where it sits on the bed.
+    fn lettering() -> Artwork {
+        artwork(100, r##"<path d="M22 35H28" stroke="#000" fill="none"/>"##)
+    }
+
+    fn router(depth: f64) -> Operation {
+        Operation {
+            color: None,
+            kind: OperationKind::CncProfile {
+                depth,
+                depth_per_pass: depth,
+                plunge_feed: 200.0,
+                safe_z: 5.0,
+                spindle_rpm: 12000.0,
+            },
+            feed: 800.0,
+            power: 0.0,
+            passes: 1,
+            tool: None,
+        }
+    }
+
+    #[test]
+    fn a_laser_marks_a_panel_before_cutting_it_free() {
+        // A box's panel outline, cut at full power, with lettering added on it.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.cuts_parts = true;
+        job.operations[0].power = 100.0;
+        job.operations[0].feed = 300.0;
+        let text = lettering();
+        let added = [Operation {
+            power: 20.0,
+            feed: 3000.0,
+            ..job.operations[0].clone()
+        }];
+        let additions = Additions {
+            artwork: &text,
+            operations: &added,
+        };
+        let program = generate_composed(&square(), None, &job, Some(&additions), None).unwrap();
+        assert_eq!(
+            code(&program),
+            [
+                "G21",
+                "G90",
+                "M4 S0",
+                "G0 X22 Y65 S0",
+                "G1 X28 Y65 S200 F3000",
+                "M4 S0",
+                "G0 X20 Y70 S0",
+                "G1 X30 Y70 S1000 F300",
+                "G1 X30 Y60",
+                "G1 X20 Y60",
+                "G1 X20 Y70",
+                "M5",
+                "G0 X0 Y0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_router_marks_a_panel_before_cutting_it_free() {
+        // 3 mm material: a shallow line on the main artwork, a cut right
+        // through it, and lettering added, listed with the cut first.
+        let job = Job {
+            machine: machine(MachineKind::Cnc),
+            offset: [20.0, 30.0],
+            material_thickness: Some(3.0),
+            cuts_parts: false,
+            operations: vec![router(3.0), router(0.5)],
+        };
+        let text = lettering();
+        let added = [router(0.25)];
+        let additions = Additions {
+            artwork: &text,
+            operations: &added,
+        };
+        let program = generate_composed(&square(), None, &job, Some(&additions), None).unwrap();
+        let lines = code(&program);
+        let at = |line: &str| lines.iter().position(|l| *l == line).unwrap();
+        // The shallow line, then the lettering, then the cut through.
+        assert!(at("G1 Z-0.5 F200") < at("G1 Z-0.25 F200"));
+        assert!(at("G1 Z-0.25 F200") < at("G1 Z-3 F200"));
+        assert_eq!(program.operation_starts.len(), 3);
+        assert_eq!(lines[lines.len() - 3..], ["G0 Z5", "M5", "G0 X0 Y0"]);
+
+        // A design's parts are cut free last even if the cut stops short.
+        let mut parts = job.clone();
+        parts.cuts_parts = true;
+        parts.operations = vec![router(2.0)];
+        let program = generate_composed(&square(), None, &parts, Some(&additions), None).unwrap();
+        let lines = code(&program);
+        let at = |line: &str| lines.iter().position(|l| *l == line).unwrap();
+        assert!(at("G1 Z-0.25 F200") < at("G1 Z-2 F200"));
+    }
+
+    #[test]
+    fn a_layers_design_burns_its_marks_before_its_cut() {
+        // Listed with the full-power cut above the 15% registration marks.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.cuts_parts = true;
+        job.operations[0].power = 100.0;
+        job.operations.push(Operation {
+            power: 15.0,
+            ..job.operations[0].clone()
+        });
+        let program = generate(&square(), &job).unwrap();
+        let lines = code(&program);
+        let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+        assert!(at("S150 F600") < at("S1000 F600"), "{lines:?}");
+        // Not a design: the listed order stands.
+        job.cuts_parts = false;
+        let program = generate(&square(), &job).unwrap();
+        let lines = code(&program);
+        let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+        assert!(at("S1000 F600") < at("S150 F600"), "{lines:?}");
+    }
+
+    #[test]
+    fn without_additions_marks_still_come_before_a_cut_through() {
+        // Listed cut first; the fill still runs before the line.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.operations.push(Operation {
+            kind: OperationKind::LaserFill { interval: 5.0 },
+            power: 20.0,
+            ..job.operations[0].clone()
+        });
+        let program = generate(&square(), &job).unwrap();
+        let fill = program.text.find("S200").unwrap();
+        let cut = program.text.find("S500").unwrap();
+        assert!(fill < cut);
+        // The fill first and the line second is left exactly as listed.
+        job.operations.reverse();
+        assert_eq!(generate(&square(), &job).unwrap().text, program.text);
     }
 }

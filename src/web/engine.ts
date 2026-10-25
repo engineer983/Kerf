@@ -41,6 +41,13 @@ export async function engine<T>(command: string, args: unknown = {}, file?: Uint
   return JSON.parse((reply as { result: string }).result) as T;
 }
 
+/** The latest camera still, redrawn as the bed seen from above, as a PNG file. */
+export async function cameraBedPicture(args: unknown): Promise<ArrayBuffer> {
+  const reply = await ask({ command: "camera_bed_picture", input: JSON.stringify(args ?? {}) });
+  const bytes = (reply as { bytes: Uint8Array }).bytes;
+  return bytes.slice().buffer as ArrayBuffer;
+}
+
 /** The picture being worked on, or its depth map, as a PNG file. Empty when there is none. */
 export async function enginePicture(which: "image" | "depth"): Promise<Uint8Array> {
   const reply = await ask({ command: "picture", input: which });

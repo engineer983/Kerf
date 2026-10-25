@@ -57,6 +57,8 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Hover over any setting's name for an explanation, often with a small animation.",
           "The panels on the right can be made wider or narrower: drag a panel's left edge. Double-click the edge to go back to its usual width.",
           "Ctrl+Z undoes a change to the settings; the arrows in the title bar do the same.",
+          "Click the canvas, then the arrow keys move whatever is selected 1 mm at a time, or 10 mm with Shift. They only move the design on screen, never the machine.",
+          "Centre everything on the material, in step 3, moves the artwork and its words and drawings together into the middle of the material.",
           "The Result view shows roughly what the finished piece will look like, and 3D lets you turn it. Press play to watch the job run.",
           "A project is saved to Your projects each time you generate, and when you press Save.",
           "The assistant can set a job up from a wish such as \"make this as realistic as possible\". It cannot move or start a machine.",
@@ -72,11 +74,96 @@ export const HELP_TOPICS: HelpTopic[] = [
       { text: "Step 2 asks for the piece's width, length and thickness. They matter more than they seem to." },
       {
         points: [
-          "Width and length decide how big the design can be and where it sits. The piece is assumed to be in the machine's origin corner: front-left on the X-Carve, back-left on the WeCreat.",
+          "Width and length decide how big the design can be and where it sits. The piece starts in the machine's origin corner: front-left on the X-Carve, back-left on the WeCreat.",
+          "If the piece is somewhere else on the bed, type where it sits under Where it sits: how far its left edge is from the bed's left edge, and how far its front (or back) edge is from the bed's. The design moves with it, so it stays where it was on the piece. Put it back in the corner undoes that. With a camera, Find the material does it for you.",
+          "Kerf measures every job from the bed's origin corner, not from the material. If you set the work zero on the material's own corner (Zero XY here), leave the material in the corner in step 2; otherwise the job lands that far off the material. Frame the job first to check.",
           "Thickness decides how deep a cut-out goes and how deep a box's joints are cut. Sheet sold as 3 mm is often 2.7 to 3.2 mm, so measure it with calipers, or use the thickness the WeCreat reports when it auto-focuses.",
           "On a router, the material type sets the cutting speeds. On a laser it only changes how the preview looks.",
           "Leave a margin. Clamps, tape and the machine's own reach all need room at the edges.",
         ],
+      },
+    ],
+  },
+  {
+    id: "camera",
+    title: "A camera over the bed",
+    group: "Getting started",
+    blocks: [
+      {
+        text: "A camera pointed down at the bed (a USB webcam is fine) lets you see the design on top of what's really on the bed. Kerf opens the camera only when you take a picture, closes it straight after, and never saves or sends the picture anywhere.",
+      },
+      {
+        heading: "Setting it up",
+        steps: [
+          "Fix the camera so it can't move. Every time it moves, it needs lining up again.",
+          "In step 1, Device, find the Camera section, press Find cameras, and choose yours. The first time, the computer asks whether Kerf may use the camera.",
+          "Take a picture with the bed clear, then press Line up the camera.",
+          "Drag each numbered marker onto the corner it names. If a corner can't be seen, put the marker on another place you can measure and type where it is.",
+          "Leave Check ticked: the blue grid should sit on the real bed, the red arrow should point along X and the green one along Y. If Kerf says the picture looks mirrored, a marker is on the wrong corner.",
+          "Press Use this lining up. From then on, the button in the canvas's bottom-right corner takes a new picture whenever you like.",
+        ],
+      },
+      {
+        heading: "How close it is",
+        points: [
+          "The picture is lined up at the bed's surface. The top of thick material sits nearer the camera, so it looks larger and shifted outwards. The shift is roughly the distance from the spot under the camera, times the thickness, divided by the camera's height. With the camera 400 mm up, a point 200 mm out on 18 mm stock is about 9 mm off.",
+          "Wide-angle lenses curve straight lines near the edges of the picture. Kerf doesn't straighten that yet, so the corners you lined up on are the most accurate places.",
+          "If the bed size changes, or you use another camera, Kerf asks for lining up again. Changing the X0 Y0 corner doesn't move the picture.",
+          "If the camera gets knocked or moved, line it up again. Kerf can't tell. The canvas shows when it was last lined up.",
+          "The orange outline is where Kerf thinks the material is. If the real sheet in the picture is somewhere else, press Find the material, type where it sits in step 2, or move the sheet, before cutting.",
+          "After a job runs, or the material is moved or resized by hand, the picture is marked as maybe out of date. Take a new one.",
+        ],
+      },
+      {
+        heading: "Before cutting",
+        warning:
+          "The picture shows the bed's corner as X0 Y0, but a job runs from the machine's work zero. If you've moved the zero (Zero XY here, or G10 or G92), the job won't go where the picture shows it, and Kerf says so on the canvas. Kerf can't see a zero moved by other software, or on a machine without homing switches, where 0,0 is wherever the head was when it was switched on. Either way, trace the job with Frame first, with the laser off, and check it stays on the material and clear of clamps.",
+      },
+      {
+        heading: "If the camera doesn't work",
+        points: [
+          "Windows: check Settings > Privacy & security > Camera, including \"Let desktop apps access your camera\". Close any other program using the camera.",
+          "Mac: the camera needs macOS 12 or later. Check System Settings > Privacy & Security > Camera, and allow Kerf.",
+          "Linux: your user must be in the video group. The deb needs the gstreamer1.0-plugins-good package; the AppImage brings its own.",
+          "In a browser, the page must be https or localhost, and the browser asks before letting it use the camera.",
+        ],
+      },
+    ],
+  },
+
+  {
+    id: "find-material",
+    title: "Finding the material with the camera",
+    group: "Getting started",
+    blocks: [
+      {
+        text: "Once the camera is lined up, Kerf can look for your piece of material in the picture and put the design in the middle of it. It looks for something plain, such as plywood, MDF, card or masked acrylic, sitting on something busy, such as honeycomb, slats or clamps.",
+      },
+      {
+        steps: [
+          "Put the material on the bed and press Find the material, in the canvas's bottom-right corner or in step 2. If the picture may be out of date, Kerf takes a new one first.",
+          "Kerf draws the outline it found over the picture, with what it found and anything it isn't sure of. Nothing has changed yet.",
+          "If the outline is wrong, drag its corners onto the real corners. If Kerf found the wrong thing, or nothing, press Click on the material to try again and click on a plain part of the piece.",
+          "If the size is within 10 mm of what you typed, Kerf keeps your size, because a ruler beats a camera. Untick Keep my size to use the camera's.",
+          "Press Use this outline. The material moves there and the design is centred on it. One Ctrl+Z puts it all back.",
+          "Then adjust by dragging, typing, or with the arrow keys, and frame the job before cutting.",
+        ],
+      },
+      {
+        heading: "What to know",
+        points: [
+          "Kerf can't turn a design. If the material is at an angle, Kerf uses the straight part in the middle of it and says how big that is. Straighten the material for the full size.",
+          "It looks for a rectangle. A round piece is found by the square around it, so its middle is right. For an L-shaped or ragged offcut, check the outline and the design's place yourself.",
+          "Thick material looks shifted in the picture, more so towards the edges, because its top is nearer the camera. Check the far edges.",
+          "Clear and mirrored acrylic show the bed or the room, so they are usually not found. Click on them, or drag the corners into place.",
+          "The design's size isn't changed. If it doesn't fit, Make it fit shrinks everything together to fit, leaving 10 mm round it.",
+          "The place found is measured from the bed's origin corner, so the job's work zero must be that corner too. Don't set the zero on the material's corner when the material has been found or moved.",
+        ],
+      },
+      {
+        heading: "Before cutting",
+        warning:
+          "The outline is a guess. A wrong one puts a correct job in the wrong place: on a laser, onto the honeycomb or slats, which is a fire risk; on a router, into a clamp. Check the outline doesn't include a clamp, keep the design at least 10 mm from any clamp, and frame the job with the laser off before you start.",
       },
     ],
   },
@@ -230,13 +317,27 @@ export const HELP_TOPICS: HelpTopic[] = [
         steps: [
           "Home the machine if it has homing switches, so it knows where it is.",
           "Jog the bit to the front-left corner of the material and press Zero XY here. Kerf measures everything from that corner on the X-Carve.",
+          "Choose Hold to move the bit while you hold the button or an arrow key; let go to stop. Click the jog pad first for the keys to work.",
           "Lower the bit until it just touches the top of the material. A slip of paper under the bit should drag but still slide. Press Zero Z here.",
           "Raise the bit clear before starting.",
         ],
       },
       {
         heading: "Changing the bit",
-        text: "Kerf has no automatic tool change. When operations use different bits it tells you, and you run them one at a time: untick Include in the job on all but one, run it, change the bit, set Zero Z again on the top of the material, then run the next. Leave X and Y alone.",
+        text: "A job can use more than one bit, such as a flat bit to rough out a relief, a tapered ball nose to finish it and a flat bit to cut it out. Step 5 lists the bits in order and how many times the job stops. When Kerf runs the job, it stops at each change with the spindle off and the bit raised over the work zero. Fit the next bit, set Z again (with the touch plate, or lower the bit onto the material and press Zero Z here), then press Continue twice. Kerf won't carry on until Z has been set again, and it won't let you move the X/Y zero while it waits. If you use another sender, save one file per bit and set Z before running each one.",
+      },
+      {
+        heading: "Setting Z with a touch plate",
+        steps: [
+          "Measure the plate's thickness with calipers and enter it in step 1, under Changing bits. Kerf leaves it blank until you do.",
+          "Clip the plate's wire to the bit, press Test the probe in step 6, then touch the plate to the bit. The light should turn on. Kerf won't probe until it has seen this once.",
+          "Lay the plate on the material under the bit, and jog the tip to within about 10 mm of it.",
+          "Press Probe Z with the touch plate, then again to confirm. The bit comes down slowly, touches twice, sets Z and lifts 5 mm.",
+          "Take the clip off the bit and move the plate away before carrying on. At a bit change Kerf asks you to tick that you have.",
+        ],
+      },
+      {
+        warning: "If the plate isn't under the bit, nothing stops it except the 10 mm limit: it goes down into whatever is below. Check the plate is there before you probe.",
       },
       {
         heading: "Router speed",
@@ -282,6 +383,7 @@ export const HELP_TOPICS: HelpTopic[] = [
         heading: "Cutting a piece out",
         points: [
           "Run the cut-out last, after any carving, so the piece is held while it is worked on.",
+          "Kerf keeps to this order however the operations are listed: engraving and carving first, then added text and drawings, then anything that cuts right through (such as a box's outlines), then the cut-out.",
           "Keep the tabs. They stop the piece coming loose and being thrown or gouged on the last pass. Cut them with a chisel or flush saw afterwards and sand them off.",
           "Set the depth to the material's real thickness, with scrap board underneath.",
         ],
@@ -302,10 +404,12 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Generate the G-code in step 5 and look it over in the Result and 3D views.",
           "In step 6, choose the machine's port and press Connect.",
           "Home the machine, or Unlock it if it starts in an alarm.",
-          "Jog to the front-left corner of the material and set Zero XY, then touch the bit to the top and set Zero Z.",
+          "Jog to the front-left corner of the material and set Zero XY, then touch the bit to the top and set Zero Z, or set Z with the touch plate (test it first, and take the clip off afterwards).",
+          "Raise the bit clear, then press Go to XY zero to check where the origin is.",
           "Press Frame the job outline and check it clears the clamps and stays on the material.",
           "Put on glasses and ear protection, switch the router on, and press Start job, then again to confirm.",
           "Pause holds the machine where it is; Resume carries on. Stop halts it and abandons the job.",
+          "If the job uses more than one bit, it stops at each change and waits. Change the bit, set Z again, take any touch plate clip off, and press Continue twice.",
         ],
       },
       {
@@ -470,6 +574,7 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Step 3: press Box maker… and give the outside width, depth and height. Tick With a lid for a closed box.",
           "On a laser, enter the Kerf, the width of the line the beam burns away. On a router, choose the flat bit you will cut with.",
           "Press Make the box. The panels are laid out to fit your material. If they need more than one piece, choose which sheet to cut in step 5.",
+          "To put words on a panel, press Add text… in step 3 and move them onto it. They are engraved before the panels are cut free, so they land where you put them.",
           "Generate and cut each sheet.",
         ],
       },

@@ -55,9 +55,22 @@ async function save(suggestedName: string, type: FileType, text: () => Promise<s
   return `${suggestedName}, in this browser's downloads folder`;
 }
 
-export function exportGcode({ suggestedName }: { suggestedName: string }) {
+/**
+ * Saves the generated program, one part of it (one bit), or the whole job as
+ * one file with M6 at each change. The engine builds every one of these
+ * texts, as the desktop app's does. `programId` is not needed here.
+ */
+export function exportGcode({
+  suggestedName,
+  part,
+  withToolChanges,
+}: {
+  suggestedName: string;
+  part?: number | null;
+  withToolChanges?: boolean;
+}) {
   return save(suggestedName, { description: "G-code", accept: { "text/plain": [".gcode", ".nc"] } }, () =>
-    engine<string>("gcode_text"),
+    engine<string>("gcode_text", { part: part ?? null, withToolChanges: withToolChanges ?? false }),
   );
 }
 

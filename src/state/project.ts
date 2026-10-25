@@ -9,7 +9,7 @@ import { CUSTOM_PRESET, MACHINE_PRESETS } from "../lib/machines";
 import { cutSettings } from "../lib/feeds";
 import { DEFAULT_MATERIAL, findMaterial, type Material } from "../lib/materials";
 import { makeThumbnail } from "../lib/thumbnail";
-import { suggestTool, type Tool } from "../lib/tools";
+import { suggestTool, TOOL_KIND_LABELS, type Tool } from "../lib/tools";
 import { useToolbox } from "./tools";
 import { usePlayback } from "./playback";
 import type {
@@ -18,6 +18,8 @@ import type {
   Operation,
   OperationKind,
   Origin,
+  ToolChange,
+  ToolRef,
   Traced,
   TraceSettings,
 } from "../lib/ipc";
@@ -85,19 +87,171 @@ export interface Item {
 
 const isCutout = (op: OperationItem) => op.kind.type === "cncCutout" || op.kind.type === "laserCutout";
 
+/** The main artwork is the outlines of parts, such as a box's panels, which its operations cut free. */
+export const cutsParts = (design: Design | null) => design !== null && isFixed(design);
+
+/**
+ * Whether one of the main artwork's operations cuts pieces free: a cutout, a
+ * design's parts, a laser line, or a router line that goes right through.
+ * The same rule as `Job::cuts_free` in kerf-gcode, which orders the job.
+ */
+function cutsFree(op: OperationItem, thickness: number, parts: boolean): boolean {
+  if (isCutout(op) || parts || op.kind.type === "laserCut") return true;
+  // An unknown thickness says nothing goes through, as in the generator.
+  return op.kind.type === "cncProfile" && Number.isFinite(thickness) && op.kind.depth >= thickness - 1e-6;
+}
+
 /**
  * The included operations in the order the job runs them: the main
- * artwork's, then the added items', then any cutouts, so that nothing is
- * made on a piece already cut free. Items' operations only count while there
- * are items.
+ * artwork's marks, then the added items', then the main artwork's cuts right
+ * through, then any cutouts, so that nothing is made on a piece already cut
+ * free. Items' operations only count while there are items. The generator
+ * runs them in this order too.
  */
-export function jobOrder(operations: OperationItem[], hasItems: boolean) {
+export function jobOrder(
+  operations: OperationItem[],
+  hasItems: boolean,
+  material: { thickness: number; design: Design | null },
+) {
+  const parts = cutsParts(material.design);
   const included = operations.filter((op) => op.enabled !== false && (hasItems || !op.forItems));
   const main = included.filter((op) => !op.forItems && !isCutout(op));
   const items = included.filter((op) => op.forItems);
   const cutouts = included.filter((op) => !op.forItems && isCutout(op));
-  return { main, items, cutouts, all: [...main, ...items, ...cutouts] };
+  const marks = main.filter((op) => !cutsFree(op, material.thickness, parts));
+  const through = main.filter((op) => cutsFree(op, material.thickness, parts));
+  // A design's laser lines burn weakest first, so its marks come before the
+  // cut however they are listed (a stable sort, as in the generator).
+  if (parts && through.every((op) => op.kind.type.startsWith("laser"))) through.sort((a, b) => a.power - b.power);
+  return { main, items, cutouts, all: [...marks, ...items, ...through, ...cutouts] };
 }
+
+const isRouter = (op: OperationItem) =>
+  op.kind.type === "cncProfile" || op.kind.type === "cncRelief" || op.kind.type === "cncCutout";
+
+/**
+ * The tool number each toolbox bit in `ops` is known by in this job: its own
+ * fixed number, or else the lowest number no other bit has, in the order the
+ * job first uses them. With an automatic changer only fixed numbers count.
+ */
+export function toolNumbers(ops: OperationItem[], tools: Tool[], atc: boolean): Map<string, number> {
+  const used = ops.map((op) => tools.find((t) => t.id === op.toolId)).filter((t): t is Tool => t !== undefined);
+  const numbers = new Map<string, number>();
+  const taken = new Set<number>();
+  for (const tool of used) {
+    if (tool.number && !numbers.has(tool.id)) {
+      numbers.set(tool.id, tool.number);
+      taken.add(tool.number);
+    }
+  }
+  if (atc) return numbers;
+  let next = 1;
+  for (const tool of used) {
+    if (numbers.has(tool.id)) continue;
+    while (taken.has(next)) next++;
+    numbers.set(tool.id, next);
+    taken.add(next);
+  }
+  return numbers;
+}
+
+/** What the generator is told of an operation's bit, if it has one. */
+function toolRef(op: OperationItem, tools: Tool[], numbers: Map<string, number>): ToolRef | undefined {
+  const tool = tools.find((t) => t.id === op.toolId);
+  const number = tool && numbers.get(tool.id);
+  if (!isRouter(op) || !tool || number === undefined) return undefined;
+  return { number, name: tool.name, diameter: tool.diameter, shape: TOOL_KIND_LABELS[tool.kind] };
+}
+
+/** One run of operations with the same bit, in the order the job runs. */
+export interface BitRun {
+  number: number | null;
+  name: string;
+  shape: string;
+  diameter: number;
+  /** Indexes into the project's operations list. */
+  operations: number[];
+}
+
+/**
+ * The bits a router job uses, in the order it runs them: one entry per run of
+ * operations with the same bit, so the job stops `runs.length - 1` times to
+ * change bits. `reused` is set when a bit comes back after another, which
+ * makes more changes than the job needs.
+ */
+export function bitsForJob(s: {
+  machineKind: MachineKind;
+  operations: OperationItem[];
+  items: unknown[];
+  toolChange: ToolChange;
+  thickness: number;
+  design: Design | null;
+}): { runs: BitRun[]; reused: boolean } {
+  if (s.machineKind !== "cnc") return { runs: [], reused: false };
+  const { tools } = useToolbox.getState();
+  const order = jobOrder(s.operations, s.items.length > 0, s).all.filter(isRouter);
+  const numbers = toolNumbers(order, tools, s.toolChange.mode === "atc");
+  const runs: BitRun[] = [];
+  for (const op of order) {
+    const tool = tools.find((t) => t.id === op.toolId);
+    const index = s.operations.indexOf(op);
+    const number = tool ? (numbers.get(tool.id) ?? null) : null;
+    const last = runs[runs.length - 1];
+    if (last && tool && last.name === tool.name && last.number === number) {
+      last.operations.push(index);
+      continue;
+    }
+    runs.push({
+      number,
+      name: tool?.name ?? "No bit chosen",
+      shape: tool ? TOOL_KIND_LABELS[tool.kind] : "",
+      diameter: tool?.diameter ?? 0,
+      operations: [index],
+    });
+  }
+  const seen = new Set<string>();
+  let reused = false;
+  for (const run of runs) {
+    const key = `${run.number}:${run.name}`;
+    if (seen.has(key)) reused = true;
+    seen.add(key);
+  }
+  return { runs, reused };
+}
+
+export const DEFAULT_TOOL_CHANGE: ToolChange = {
+  mode: "byHand",
+  place: { type: "overWorkZero" },
+  lift: 20,
+  spinDown: 5,
+};
+
+/**
+ * A file name made safe for every file system: letters, digits, dots,
+ * hyphens and underscores only, others turned into hyphens, with repeats
+ * collapsed, the ends trimmed, and at most 100 characters.
+ */
+export function safeFileName(name: string): string {
+  const cleaned = name
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return (cleaned || "kerf").slice(0, 100).replace(/[-.]+$/, "");
+}
+
+/**
+ * Router cuts that went exactly through the old thickness go through the new
+ * one too, rather than stopping short or cutting deep into what is beneath.
+ */
+function followThickness(operations: OperationItem[], from: number, to: number): OperationItem[] {
+  if (from === to) return operations;
+  return operations.map((op) =>
+    (op.kind.type === "cncCutout" || op.kind.type === "cncProfile") && Math.abs(op.kind.depth - from) < 0.001
+      ? { ...op, kind: { ...op.kind, depth: to } }
+      : op,
+  );
+}
+
 
 /** A cut right through the material, a little outside the artwork, with tabs. */
 export function defaultCutout(thickness: number): OperationKind {
@@ -311,6 +465,15 @@ interface ProjectState {
   /** Vendor commands emitted around every job; set by presets. */
   startGcode: string;
   endGcode: string;
+  /** How a router's bits are changed within a job. */
+  toolChange: ToolChange;
+  /**
+   * The touch plate's thickness in mm, or null for none. Blank until the
+   * person enters it, since a wrong thickness is a wrong Z. Desktop only.
+   */
+  touchPlate: number | null;
+  /** The router is switched on and off at its own switch, not by M3 and M5. */
+  routerByHand: boolean;
   /** Physical size of the artwork in millimetres. */
   widthMm: number;
   heightMm: number;
@@ -339,9 +502,15 @@ interface ProjectState {
    * from the front for a front-left origin, from the back for a back-left one.
    */
   front: number;
-  /** Size of the piece of material, which sits in the bed's origin corner. */
+  /** Size of the piece of material. */
   stockWidth: number;
   stockLength: number;
+  /**
+   * Where the material sits, as for the artwork: from the bed's left edge,
+   * and from the edge on the machine's origin side. 0, 0 is the origin corner.
+   */
+  stockLeft: number;
+  stockFront: number;
   /** Router speed in rpm, used to work out feeds. */
   spindleRpm: number;
   showSource: boolean;
@@ -467,7 +636,25 @@ interface ProjectState {
   setMaterial: (id: string) => void;
   setThickness: (thickness: number) => void;
   setStock: (patch: { stockWidth?: number; stockLength?: number }) => void;
+  /** Moves the material, carrying the design with it so it stays where it was on the material. */
+  setStockPlace: (patch: { stockLeft?: number; stockFront?: number }) => void;
+  /**
+   * Puts the material at a place and size, and the design in its middle, as
+   * one undo step. Used when a found outline is applied.
+   */
+  placeMaterial: (place: { stockLeft: number; stockFront: number; stockWidth: number; stockLength: number }) => void;
+  /** Moves the artwork and every added item together so their middle is the material's middle. */
+  centreOnMaterial: () => void;
+  /**
+   * Shrinks everything together, if needed, to fit the material less a
+   * margin, and centres it there. A box or a set of layers can't be resized,
+   * so then it is only centred.
+   */
+  fitEverythingOnMaterial: () => void;
   setSpindleRpm: (spindleRpm: number) => void;
+  setToolChange: (patch: Partial<ToolChange>) => void;
+  setTouchPlate: (thickness: number | null) => void;
+  setRouterByHand: (byHand: boolean) => void;
   /** Changes what an operation does, giving it a suitable bit and speeds. */
   setOperationType: (id: number, type: OperationKind["type"]) => void;
   /** Changes an operation's bit and recalculates its speeds. */
@@ -481,7 +668,8 @@ interface ProjectState {
   addCutout: () => void;
   removeOperation: (id: number) => void;
   generateGcode: () => Promise<void>;
-  exportGcode: () => Promise<void>;
+  /** Saves the program, one part of it (one bit), or one file with M6 at each change. */
+  exportGcode: (part?: number, withToolChanges?: boolean) => Promise<void>;
 }
 
 const EMPTY_TRACE: TraceState = {
@@ -559,10 +747,30 @@ function sheetBody(svg: string): string {
   return svg.slice(start, svg.lastIndexOf("</svg>")).trim();
 }
 
-/** Where the piece of material sits: in the bed's origin corner. */
-export function stockRect(s: Pick<ProjectState, "stockWidth" | "stockLength" | "bed" | "origin">) {
-  const y = s.origin === "backLeft" ? 0 : s.bed.height - s.stockLength;
-  return { x: 0, y, width: s.stockWidth, height: s.stockLength };
+/** Where the piece of material sits, in bed coordinates (mm, Y down from the back). */
+export function stockRect(
+  s: Pick<ProjectState, "stockWidth" | "stockLength" | "stockLeft" | "stockFront" | "bed" | "origin">,
+) {
+  const y = s.origin === "backLeft" ? s.stockFront : s.bed.height - s.stockFront - s.stockLength;
+  return { x: s.stockLeft, y, width: s.stockWidth, height: s.stockLength };
+}
+
+/** The left and origin-side distances of a rectangle given in bed coordinates. */
+export function placeOf(rect: { x: number; y: number; height: number }, s: Pick<ProjectState, "bed" | "origin">) {
+  return { left: rect.x, front: s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height };
+}
+
+/** Whether the material reaches past the edge of the bed. */
+export function stockOffBed(
+  s: Pick<ProjectState, "stockWidth" | "stockLength" | "stockLeft" | "stockFront" | "bed">,
+): boolean {
+  const slack = 0.01;
+  return (
+    s.stockLeft < -slack ||
+    s.stockFront < -slack ||
+    s.stockLeft + s.stockWidth > s.bed.width + slack ||
+    s.stockFront + s.stockLength > s.bed.height + slack
+  );
 }
 
 /** Clear material left around new artwork when it is sized to fit, in mm. */
@@ -590,6 +798,8 @@ const UNDOABLE = [
   "front",
   "stockWidth",
   "stockLength",
+  "stockLeft",
+  "stockFront",
   "materialId",
   "thickness",
   "operations",
@@ -678,13 +888,13 @@ const DEVICE_KEYS = [
   "spindleRpm",
   "startGcode",
   "endGcode",
+  "toolChange",
+  "touchPlate",
+  "routerByHand",
 ] as const;
 
 /** The machine settings that are remembered between sessions. */
-type Device = Pick<
-  ProjectState,
-  "machinePreset" | "machineKind" | "bed" | "origin" | "maxPowerS" | "spindleRpm" | "startGcode" | "endGcode"
->;
+type Device = Pick<ProjectState, (typeof DEVICE_KEYS)[number]>;
 
 function storedDevice(): Device | null {
   try {
@@ -941,10 +1151,41 @@ export const useProject = create<ProjectState>((set, get) => {
     return [tenth(width * used), tenth(height * used)];
   }
 
-  /** The position that puts something of this size in the middle of the material. */
+  /**
+   * The position that puts something of this size in the middle of the
+   * material. Something larger than the material starts at its origin-side
+   * corner, as it always has.
+   */
   function centred(width: number, height: number) {
-    const { stockWidth, stockLength } = get();
-    return { left: tenth(Math.max(0, (stockWidth - width) / 2)), front: tenth(Math.max(0, (stockLength - height) / 2)) };
+    const s = get();
+    const stock = stockRect(s);
+    const x = stock.x + Math.max(0, (stock.width - width) / 2);
+    const inset = Math.max(0, (stock.height - height) / 2);
+    const y = s.origin === "backLeft" ? stock.y + inset : stock.y + stock.height - inset - height;
+    const place = placeOf({ x, y, height }, s);
+    return { left: tenth(place.left), front: tenth(place.front) };
+  }
+
+  /**
+   * The artwork and items moved by (dx, dy) in bed coordinates, as a patch.
+   * A move towards the back is a smaller "front" for a front-left origin and
+   * a larger one for a back-left origin.
+   */
+  function shifted(s: ProjectState, dx: number, dy: number) {
+    const dFront = s.origin === "backLeft" ? dy : -dy;
+    return {
+      left: tenth(s.left + dx),
+      front: tenth(s.front + dFront),
+      items: s.items.map((item) => ({ ...item, left: tenth(item.left + dx), front: tenth(item.front + dFront) })),
+    };
+  }
+
+  /** The move, in bed coordinates, that puts the middle of everything on the middle of the material. */
+  function towardsMiddle(s: ProjectState): [number, number] {
+    const all = everythingRect(s);
+    if (!all) return [0, 0];
+    const stock = stockRect(s);
+    return [stock.x + stock.width / 2 - (all.x + all.width / 2), stock.y + stock.height / 2 - (all.y + all.height / 2)];
   }
 
   /** Keeps exactly one operation for the added items while there are any, and none when there are not. */
@@ -1035,6 +1276,9 @@ export const useProject = create<ProjectState>((set, get) => {
     startGcode: "",
     endGcode: "",
     spindleRpm: 16000,
+    toolChange: DEFAULT_TOOL_CHANGE,
+    touchPlate: null,
+    routerByHand: false,
     ...remembered,
     widthMm: 100,
     heightMm: 100,
@@ -1066,6 +1310,8 @@ export const useProject = create<ProjectState>((set, get) => {
     front: STOCK_MARGIN_MM,
     stockWidth: 300,
     stockLength: 200,
+    stockLeft: 0,
+    stockFront: 0,
     showSource: true,
     materialId: DEFAULT_MATERIAL.id,
     thickness: DEFAULT_MATERIAL.thickness,
@@ -1674,7 +1920,13 @@ export const useProject = create<ProjectState>((set, get) => {
           design: null,
           optimizeNote: null,
         });
-        get().restore({ ...saved.settings, items: saved.settings.items ?? [] });
+        // Projects saved before the material had a place had it in the origin corner.
+        get().restore({
+          ...saved.settings,
+          items: saved.settings.items ?? [],
+          stockLeft: saved.settings.stockLeft ?? 0,
+          stockFront: saved.settings.stockFront ?? 0,
+        });
         set({ selected: null });
         nextItemId = Math.max(nextItemId, ...get().items.map((item) => item.id + 1));
         // A saved design is put back as the thing being cut.
@@ -1710,22 +1962,79 @@ export const useProject = create<ProjectState>((set, get) => {
     setMaterial: (materialId) =>
       set((s) => {
         const next = { ...s, materialId };
+        const thickness = findMaterial(materialId).thickness;
         // Speeds depend on the material, so router operations are recalculated.
         return {
           materialId,
-          thickness: findMaterial(materialId).thickness,
-          operations: s.operations.map((op) => equip(op, next)),
+          thickness,
+          operations: followThickness(s.operations, s.thickness, thickness).map((op) => equip(op, next)),
           ...staleGcode(),
         };
       }),
-    setThickness: (thickness) => set({ thickness }),
+    setThickness: (thickness) =>
+      set((s) => ({ thickness, operations: followThickness(s.operations, s.thickness, thickness), ...staleGcode() })),
     setStock: (patch) => set(patch),
+    setStockPlace: (patch) =>
+      set((s) => {
+        const dLeft = (patch.stockLeft ?? s.stockLeft) - s.stockLeft;
+        const dFront = (patch.stockFront ?? s.stockFront) - s.stockFront;
+        if (dLeft === 0 && dFront === 0) return {};
+        // The material and the design are measured the same way, so the
+        // design moves by the same amounts and stays where it was on it.
+        return {
+          ...patch,
+          left: tenth(s.left + dLeft),
+          front: tenth(s.front + dFront),
+          items: s.items.map((item) => ({ ...item, left: tenth(item.left + dLeft), front: tenth(item.front + dFront) })),
+          ...staleGcode(),
+        };
+      }),
+    placeMaterial: (place) =>
+      set((s) => {
+        const next = { ...s, ...place };
+        const [dx, dy] = towardsMiddle(next);
+        // All in one change, so a single undo puts everything back.
+        return { ...place, ...(everythingRect(next) ? shifted(next, dx, dy) : {}), ...staleGcode() };
+      }),
+    centreOnMaterial: () =>
+      set((s) => {
+        if (!everythingRect(s)) return {};
+        const [dx, dy] = towardsMiddle(s);
+        return { ...shifted(s, dx, dy), ...staleGcode() };
+      }),
+    fitEverythingOnMaterial: () =>
+      set((s) => {
+        const all = everythingRect(s);
+        if (!all) return {};
+        const fixed = s.design !== null && isFixed(s.design);
+        const room = [Math.max(1, s.stockWidth - STOCK_MARGIN_MM * 2), Math.max(1, s.stockLength - STOCK_MARGIN_MM * 2)];
+        // Only ever smaller: this is for work that doesn't fit, not for filling.
+        const k = fixed ? 1 : Math.min(1, room[0] / all.width, room[1] / all.height);
+        const stock = stockRect(s);
+        const [cx, cy] = [all.x + all.width / 2, all.y + all.height / 2];
+        const [tx, ty] = [stock.x + stock.width / 2, stock.y + stock.height / 2];
+        const scaled = (r: { x: number; y: number; width: number; height: number }) => {
+          const rect = { x: tx + (r.x - cx) * k, y: ty + (r.y - cy) * k, width: r.width * k, height: r.height * k };
+          const place = placeOf(rect, s);
+          return { widthMm: tenth(rect.width), heightMm: tenth(rect.height), left: tenth(place.left), front: tenth(place.front) };
+        };
+        const art = artworkRect(s);
+        return {
+          ...(art ? scaled(art) : {}),
+          items: s.items.map((item) => ({ ...item, ...scaled(itemRect(item, s)) })),
+          ...staleGcode(),
+        };
+      }),
     setSpindleRpm: (spindleRpm) =>
       set((s) => ({
         spindleRpm,
         operations: s.operations.map((op) => equip(op, { ...s, spindleRpm })),
         ...staleGcode(),
       })),
+    setToolChange: (patch) => set((s) => ({ toolChange: { ...s.toolChange, ...patch }, ...staleGcode() })),
+    // Neither changes the G-code: they are used when Kerf runs the machine.
+    setTouchPlate: (touchPlate) => set({ touchPlate }),
+    setRouterByHand: (routerByHand) => set({ routerByHand }),
     setOperationType: (id, type) =>
       set((s) => ({
         operations: s.operations.map((op) => {
@@ -1813,9 +2122,19 @@ export const useProject = create<ProjectState>((set, get) => {
       const s = get();
       const rect = artworkRect(s);
       if (!rect) return;
-      const order = jobOrder(s.operations, s.items.length > 0);
+      const order = jobOrder(s.operations, s.items.length > 0, s);
       const around = everythingRect(s);
       const generation = ++gcodeGeneration;
+      // Each router operation says which bit it uses, so a job with more
+      // than one bit stops to change them.
+      const { tools } = useToolbox.getState();
+      const atc = s.machineKind === "cnc" && s.toolChange.mode === "atc";
+      const numbers = toolNumbers(order.all.filter(isRouter), tools, atc);
+      const named = (ops: OperationItem[]) => ops.map((op) => ({ ...op, tool: toolRef(op, tools, numbers) }));
+      if (s.machineKind === "cnc" && bitsForJob(s).runs.length > 1 && order.all.some((op) => isRouter(op) && !op.toolId)) {
+        set({ gcode: { ...EMPTY_GCODE, error: "Choose a bit for every router operation, so Kerf knows when to stop and change it." } });
+        return;
+      }
       set({ gcode: { ...EMPTY_GCODE, busy: true } });
       try {
         const program = await ipc.generateGcode(s.trace.settings, s, {
@@ -1828,16 +2147,20 @@ export const useProject = create<ProjectState>((set, get) => {
             bedHeight: s.bed.height,
             maxPowerS: s.maxPowerS,
             travelFeed: TRAVEL_FEED,
+            toolChange: s.toolChange,
           },
           offset: [rect.x, rect.y],
-          // Cutouts are run last by the generator, wherever they are listed.
-          operations: [...order.main, ...order.cutouts],
+          // The generator runs whatever cuts pieces free after the items,
+          // and cutouts last, wherever they are listed (as jobOrder does).
+          operations: named([...order.main, ...order.cutouts]),
+          materialThickness: s.thickness,
+          cutsParts: cutsParts(s.design),
         }, {
           enabled: s.heightSource === "depth" && s.depth.status === "ready",
           detail: s.detail,
           floor: s.depthFloor,
         },
-        s.items.length > 0 && order.items.length > 0 ? { svg: itemsSvg(s), operations: order.items } : null,
+        s.items.length > 0 && order.items.length > 0 ? { svg: itemsSvg(s), operations: named(order.items) } : null,
         // A cutout goes round everything on the material, not just the artwork.
         around && s.items.length > 0 ? [around.x, around.y, around.width, around.height] : null);
         if (generation !== gcodeGeneration) return;
@@ -1852,13 +2175,22 @@ export const useProject = create<ProjectState>((set, get) => {
       }
     },
 
-    exportGcode: async () => {
+    exportGcode: async (part, withToolChanges) => {
       const { image, gcode } = get();
       if (!image || !gcode.program) return;
       const generation = gcodeGeneration;
-      const suggestedName = `${image.name.replace(/\.[^.]+$/, "")}.gcode`;
+      const base = image.name.replace(/\.[^.]+$/, "");
+      // A part's file is named after its bit, as the part was generated.
+      const tool = part === undefined ? null : gcode.program.parts[part]?.tool;
+      const name =
+        part !== undefined && gcode.program.parts.length > 1
+          ? `${base}-${part + 1}-${tool?.name ?? "bit"}`
+          : withToolChanges
+            ? `${base}-with-tool-changes`
+            : base;
+      const suggestedName = `${safeFileName(name)}.gcode`;
       try {
-        const path = await ipc.exportGcode(suggestedName);
+        const path = await ipc.exportGcode(suggestedName, gcode.program.programId, part, withToolChanges);
         if (path && generation === gcodeGeneration) {
           set((s) => ({ gcode: { ...s.gcode, exportedTo: path, error: null } }));
         }
@@ -1878,7 +2210,7 @@ useProject.subscribe((s, previous) => {
 
 // Remember the machine between sessions.
 useProject.subscribe((s, previous) => {
-  const keys = ["machinePreset", "machineKind", "bed", "origin", "maxPowerS", "spindleRpm", "startGcode", "endGcode"] as const;
+  const keys = DEVICE_KEYS;
   if (keys.every((key) => s[key] === previous[key])) return;
   try {
     localStorage.setItem(DEVICE_KEY, JSON.stringify(Object.fromEntries(keys.map((key) => [key, s[key]]))));

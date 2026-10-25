@@ -22,6 +22,11 @@ export interface Tool {
   /** Where the details came from, if anywhere. */
   url: string;
   notes: string;
+  /**
+   * Its fixed tool number, as on a tool rack or an automatic changer. Bits
+   * without one are numbered 1, 2, 3… in the order a job first uses them.
+   */
+  number?: number | null;
 }
 
 export const TOOL_KIND_LABELS: Record<ToolKind, string> = {

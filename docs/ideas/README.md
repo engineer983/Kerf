@@ -1,0 +1,32 @@
+# Ideas
+
+Rough ideas for Kerf, waiting to be planned. To plan one, ask Claude to use the **dreamer** agent on it; the dreamer writes a plan into this folder (one file per idea) that a developer can build from.
+
+| # | Idea | Status | Plan |
+|---|------|--------|------|
+| 1 | Camera view of the bed | built | [camera-view.md](camera-view.md) |
+| 2 | Auto-centre the design on the material | built, untested on hardware | [auto-centre.md](auto-centre.md) |
+| 3 | Control the connected machine (X, Y, Z, homing) | built (simulated controller only; hardware checks to do) | [machine-control.md](machine-control.md) |
+| 4 | Changing bits within one job (manual and automatic tool changes) | built through step 7 except the fixed tool-length setter (simulated controller only; hardware checks to do) | [tool-changer.md](tool-changer.md) |
+
+## 1. Camera view of the bed
+
+Show what a camera pointed at the bed can see. A still picture is enough to start with, with a button to take a new one of whatever is on the bed right now.
+
+## 2. Auto-centre the design on the material
+
+Find the piece of material on the bed and centre the design on it automatically, then let the person nudge it into place by hand.
+
+Probably needs idea 1 first, since the camera is how Kerf would see where the material is.
+
+## 3. Control the connected machine
+
+Move the connected machine in X, Y and Z and home it.
+
+Note: the machine panel (`src/components/MachinePanel.tsx`, `src-tauri/src/machine.rs`) already has X/Y/Z jog buttons and a Home button. The plan should start by working out what's still missing (for example, continuous jogging, go to a position, setting the work origin, or a keyboard shortcut).
+
+## 4. Changing bits within one job
+
+A tool changer idea and design for CNC routers. Let one job use several bits: a roughing and a finishing bit for a relief, then a cut-out bit. Kerf stops at each change with the spindle off, says which bit to fit, helps set Z again, and carries on only when the person says so. On grblHAL machines with an automatic tool changer, let the controller do the change.
+
+Note: today a job with different bits is refused (`usesMixedBits` in `src/state/project.ts`, `Job::check` in `crates/kerf-gcode/src/job.rs`), and the README lists "automatic tool changes" under "Not built yet".

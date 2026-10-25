@@ -33,6 +33,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev libdbus-1-dev
+          # The AppImage bundles GStreamer, which the camera needs.
+          sudo apt-get install -y gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
 
       - uses: pnpm/action-setup@v4
         with:
@@ -62,6 +64,8 @@ jobs:
             - macOS: right-click the app and choose Open the first time.
 
             Start with a small job on scrap, at low power or as an air cut, with a hand near the stop.
+
+            The camera view of the bed has not been tried on macOS or Linux yet.
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}

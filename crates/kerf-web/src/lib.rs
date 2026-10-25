@@ -11,12 +11,14 @@ use std::sync::Arc;
 
 use base64::Engine;
 use kerf_ai::{Endpoint, ImageEndpoint, Shape, ToolSpec};
+use kerf_core::camera::{self, BedPictureRequest, CameraFit, CameraStill};
 use kerf_core::design::Design;
 use kerf_core::drawing::TextSpec;
+use kerf_core::material::{self, FindMaterialRequest};
 use kerf_core::{Added, DepthOptions, JobInput, LoadedImage};
-use kerf_gcode::Job;
+use kerf_gcode::{Job, Program};
 use kerf_make::{BoxSpec, LayerSpec};
-use kerf_trace::image::DynamicImage;
+use kerf_trace::image::{DynamicImage, RgbaImage};
 use kerf_trace::TraceSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -29,8 +31,12 @@ struct State {
     image: Option<LoadedImage>,
     /// A box or layered design, which takes the place of the traced picture.
     design: Option<Design>,
-    /// Text of the most recently generated program, kept for saving.
-    gcode: Option<String>,
+    /// The most recently generated program, kept whole for saving: its
+    /// text, and what each part's file and the file with M6 are made from.
+    gcode: Option<Program>,
+    /// The latest picture from the camera over the bed. Kept apart from the
+    /// work above: loading or clearing a picture doesn't throw it away.
+    camera_still: Option<Arc<RgbaImage>>,
 }
 
 thread_local! {
@@ -97,6 +103,16 @@ struct Sized {
     settings: TraceSettings,
     width_mm: f64,
     height_mm: f64,
+}
+
+/// Which file to save: the whole program, one part of it, or the whole job
+/// with M6 at each bit change.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct GcodeText {
+    part: Option<usize>,
+    #[serde(default)]
+    with_tool_changes: bool,
 }
 
 #[derive(Deserialize)]
@@ -206,14 +222,36 @@ struct Unreached {
 /// of the file it was given, for those that take one. The answer is JSON.
 pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
     match command {
+        "set_camera_still" => {
+            let still = CameraStill::load(file)?;
+            let (width, height) = (still.image.width(), still.image.height());
+            with(|state| state.camera_still = Some(still.image));
+            reply(json!({ "width": width, "height": height }))
+        }
+        "check_camera_fit" => {
+            #[derive(Deserialize)]
+            struct Input {
+                fit: CameraFit,
+            }
+            reply(camera::check_fit(&args::<Input>(input)?.fit)?)
+        }
+        "find_material" => {
+            let request: FindMaterialRequest = args(input)?;
+            let still = with(|state| state.camera_still.clone())
+                .ok_or("Take a picture with the camera first.")?;
+            reply(material::find_material_request(&still, &request)?)
+        }
+
         "app_info" => reply(json!({ "name": "Kerf", "version": env!("CARGO_PKG_VERSION") })),
 
         "load_image" => {
             let loaded = LoadedImage::load(file)?;
             with(|state| {
-                // A new picture starts a new piece of work.
+                // A new picture starts a new piece of work, but the bed hasn't
+                // changed, so the camera's picture stays.
                 *state = State {
                     image: Some(loaded),
+                    camera_still: state.camera_still.take(),
                     ..State::default()
                 }
             });
@@ -305,7 +343,7 @@ pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
                 cutout_around,
             } = args(input)?;
             with(|state| state.gcode = None);
-            let (generated, text) = kerf_core::generate(JobInput {
+            let (generated, program) = kerf_core::generate(JobInput {
                 image: image(false)?,
                 design_svg: design_svg(width_mm, height_mm),
                 depth_map: depth_map(),
@@ -317,13 +355,29 @@ pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
                 added,
                 cutout_around,
             })?;
-            with(|state| state.gcode = Some(text));
+            with(|state| state.gcode = Some(program));
             reply(generated)
         }
-        // The last generated program, to save.
-        "gcode_text" => reply(
-            with(|state| state.gcode.clone()).ok_or("Generate the G-code before exporting it.")?,
-        ),
+        // The last generated program, or one part of it, to save. Every
+        // file is built by kerf-gcode, as it is in the desktop app.
+        "gcode_text" => {
+            let GcodeText {
+                part,
+                with_tool_changes,
+            } = args(input)?;
+            let text = with(|state| {
+                let program = state
+                    .gcode
+                    .as_ref()
+                    .ok_or("Generate the G-code before exporting it.")?;
+                match (part, with_tool_changes) {
+                    (_, true) => program.with_m6(),
+                    (Some(part), false) => program.part_file(part),
+                    (None, false) => Ok(program.text.clone()),
+                }
+            })?;
+            reply(text)
+        }
 
         "set_design" => {
             let SetDesign { svg } = args(input)?;
@@ -476,6 +530,15 @@ pub fn picture_png(which: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// The latest camera still redrawn to the bed, as a PNG file. `input` is a
+/// [`BedPictureRequest`] as JSON.
+pub fn camera_picture_png(input: &str) -> Result<Vec<u8>, String> {
+    let request: BedPictureRequest = args(input)?;
+    let still =
+        with(|state| state.camera_still.clone()).ok_or("Take a picture with the camera first.")?;
+    camera::camera_bed_picture_png(&still, &request)
+}
+
 /// Makes failures inside the engine show in the browser's console.
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -486,6 +549,12 @@ pub fn start() {
 #[wasm_bindgen]
 pub fn call(command: &str, input: &str, file: &[u8]) -> Result<String, JsError> {
     run(command, input, file).map_err(|e| JsError::new(&e))
+}
+
+/// [`camera_picture_png`], for the page to call.
+#[wasm_bindgen]
+pub fn camera_picture(input: &str) -> Result<Vec<u8>, JsError> {
+    camera_picture_png(input).map_err(|e| JsError::new(&e))
 }
 
 /// [`picture_png`], for the page to call.
@@ -620,5 +689,97 @@ mod tests {
         assert!(run("connect_machine", "{}", &[])
             .unwrap_err()
             .contains("not available in the browser"));
+    }
+
+    #[test]
+    fn the_camera_still_survives_loading_a_new_picture() {
+        let size = run("set_camera_still", "{}", &square()).unwrap();
+        assert_eq!(size, r#"{"height":120,"width":120}"#);
+        run("load_image", "{}", &square()).unwrap();
+        run("clear_image", "{}", &[]).unwrap();
+
+        let request = r#"{"fit":{"points":[{"px":0,"py":0,"x":0,"y":0},{"px":120,"py":0,"x":60,"y":0},{"px":120,"py":120,"x":60,"y":60},{"px":0,"py":120,"x":0,"y":60}],"bedWidth":60,"bedHeight":60,"pictureWidth":120,"pictureHeight":120},"bed":{"width":60,"height":60}}"#;
+        let png = camera_picture_png(request).unwrap();
+        let picture = kerf_trace::image::load_from_memory(&png).unwrap();
+        assert_eq!((picture.width(), picture.height()), (120, 120));
+    }
+
+    #[test]
+    fn the_material_is_found_in_the_camera_still() {
+        let request = r#"{"fit":{"points":[{"px":0,"py":0,"x":0,"y":0},{"px":120,"py":0,"x":60,"y":0},{"px":120,"py":120,"x":60,"y":60},{"px":0,"py":120,"x":0,"y":60}],"bedWidth":60,"bedHeight":60,"pictureWidth":120,"pictureHeight":120},"bed":{"width":60,"height":60},"seed":null,"stock":null,"thickness":3}"#;
+        assert!(run("find_material", request, &[])
+            .unwrap_err()
+            .contains("Take a picture"));
+
+        // The dark square, 30 mm across in the middle of a 60 mm bed, is the material.
+        run("set_camera_still", "{}", &square()).unwrap();
+        let found: Value =
+            serde_json::from_str(&run("find_material", request, &[]).unwrap()).unwrap();
+        assert!(
+            (found["width"].as_f64().unwrap() - 30.0).abs() < 1.0,
+            "{found}"
+        );
+        assert!(
+            (found["centre"][0].as_f64().unwrap() - 30.0).abs() < 1.0,
+            "{found}"
+        );
+        assert_eq!(found["corners"].as_array().unwrap().len(), 4);
+        assert!(found["warnings"].as_array().unwrap().is_empty(), "{found}");
+    }
+
+    /// A router job that changes bits once: a profile with T1, then T2.
+    fn two_bit_job() -> String {
+        let router = r#"{"kind":"cnc","origin":"frontLeft","startGcode":"","endGcode":"","bedWidth":400,"bedHeight":400,"maxPowerS":1000,"travelFeed":6000}"#;
+        let op = |number: u32, name: &str| {
+            format!(
+                r#"{{"color":null,"kind":{{"type":"cncProfile","depth":1,"depthPerPass":1,"plungeFeed":200,"safeZ":5,"spindleRpm":12000}},"feed":800,"power":0,"passes":1,"tool":{{"number":{number},"name":"{name}","diameter":3,"shape":"Flat end mill"}}}}"#
+            )
+        };
+        format!(
+            r#"{{"settings":{SETTINGS},"widthMm":60,"heightMm":60,"job":{{"machine":{router},"offset":[10,10],"operations":[{},{}]}},"depth":{{"enabled":false,"detail":0.15,"floor":0.1}},"added":null,"cutoutAround":null}}"#,
+            op(1, "3 mm flat"),
+            op(2, "3 mm other flat")
+        )
+    }
+
+    fn saved(input: &str) -> String {
+        serde_json::from_str(&run("gcode_text", input, &[]).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn gcode_text_with_part_returns_that_part_file() {
+        run("load_image", "", &square()).unwrap();
+        let generated: Value =
+            serde_json::from_str(&run("generate_gcode", &two_bit_job(), &[]).unwrap()).unwrap();
+        // The interface is told of the parts, without their text.
+        let parts = generated["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[1]["tool"]["number"], 2);
+        assert!(parts[1].get("stream").is_none());
+        assert!(generated.get("text").is_none() || generated["text"] == "");
+
+        let whole = saved("{}");
+        let first = saved(r#"{"part":0}"#);
+        let second = saved(r#"{"part":1}"#);
+        assert!(whole.contains("G4 P0.1"));
+        for file in [&first, &second] {
+            assert!(file.starts_with("; Generated by Kerf"));
+            assert!(file.contains("\nG17 G21 G90 G94 G54\n"));
+            assert!(file.contains("\nM5\n"));
+            assert!(!file.contains("G4 P0.1"));
+        }
+        assert!(second.contains("; Fit T2 (3 mm other flat) and set Z before running this file."));
+        assert!(run("gcode_text", r#"{"part":2}"#, &[]).is_err());
+        assert!(!saved(r#"{"withToolChanges":false}"#).contains("M6"));
+    }
+
+    #[test]
+    fn gcode_text_with_tool_changes_returns_the_m6_file() {
+        run("load_image", "", &square()).unwrap();
+        run("generate_gcode", &two_bit_job(), &[]).unwrap();
+        let file = saved(r#"{"withToolChanges":true}"#);
+        assert!(file.contains("; This job changes bits 1 time: T1 3 mm flat, T2 3 mm other flat."));
+        assert!(file.contains("(Set Z again for T2 before resuming)\nT2 M6\n"));
+        assert_eq!(file.lines().filter(|l| l.ends_with(" M6")).count(), 1);
     }
 }

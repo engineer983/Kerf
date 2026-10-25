@@ -10,3 +10,4 @@ src-tauri/gen/schemas/
 !.vscode/extensions.json
 target-test/
 target-release/
+.claude/worktrees/
