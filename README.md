@@ -40,7 +40,7 @@ The work goes through six numbered steps: Device, Material, Design, Trace, Opera
 - **Lasers.** Engrave a photograph with its shading, fill shapes solidly, follow outlines, and cut the piece out in the same job.
 - **CNC routers.** Follow outlines, carve a picture as a 3D relief, and cut the piece out with holding tabs. A photograph's shape is estimated with a depth model that runs on your own computer. Speeds are worked out from the bit, the material and the router's speed, from a toolbox of bits you can edit.
 - **Without tracing.** A box maker draws finger-jointed panels from a box's size and the material's thickness, allowing for a laser's kerf or a router bit's width. Stacked layers slice a picture into pieces to cut from thin sheet and glue into a relief.
-- **See the bed.** Take a picture with a camera over the bed, line it up once on four known places, and see the design on top of it. The browser asks before letting the page use the camera, and the picture never leaves your computer. On a Mac the camera needs macOS 12 or later.
+- **See the bed.** Take a picture with a camera over the bed, line it up once on four known places, and see the design on top of it, and find the material, so the design can be centred on it. Without a camera, type where the material sits on the bed. The browser asks before letting the page use the camera, and the picture never leaves your computer. On a Mac the camera needs macOS 12 or later.
 - **Preview.** Watch the job play back, see roughly what the finished piece will look like, and turn it over in 3D.
 - **Run it.** Export the G-code as a file, or connect to a GRBL or grblHAL machine to jog (in steps, or while you hold a button or arrow key), home, set zero, go back to zero, frame, start, pause and stop.
 - **Assistant.** An optional chat panel that can set a job up from a wish such as "make this as realistic as possible", using Claude, OpenAI, OpenRouter, or a model on your own computer through Ollama. It can also draw a picture, ask an image model for one, or search for pictures that are free to reuse. It can never move or start a machine.
@@ -58,7 +58,7 @@ Not yet tested:
 - The GRBL sender against a real controller; it has only met a simulated one.
 - Picture generation against a real image service.
 - The macOS and Linux installers. They are built automatically and have not been run.
-- The camera on macOS and Linux, and how closely a lined-up picture matches the bed on a real machine. On Linux the deb needs the `gstreamer1.0-plugins-good` package for the camera; the AppImage brings its own.
+- The camera on macOS and Linux, how closely a lined-up picture matches the bed on a real machine, and how well finding the material works on a real bed. On Linux the deb needs the `gstreamer1.0-plugins-good` package for the camera; the AppImage brings its own.
 - The browser version in anything but Chrome on Windows, and its assistant against anything but a local Ollama model.
 
 Not built yet: centerline tracing, calculated laser power and speed, an allowance for the bit's width when following outlines, a separate roughing pass for reliefs, and automatic tool changes.

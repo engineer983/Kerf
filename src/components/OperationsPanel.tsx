@@ -45,6 +45,8 @@ export function OperationsPanel() {
   const items = useProject((s) => s.items);
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
+  const stockLeft = useProject((s) => s.stockLeft);
+  const stockFront = useProject((s) => s.stockFront);
   const operations = useProject((s) => s.operations);
   const mode = useProject((s) => s.mode);
   const shaping = useProject((s) => s.depth.status === "working");
@@ -63,7 +65,7 @@ export function OperationsPanel() {
   const colors = traceColors(traced);
   const mixedBits = usesMixedBits({ machineKind, operations, items });
   const art = everythingRect({ image, widthMm, heightMm, left, front, bed, origin, items });
-  const stock = stockRect({ stockWidth, stockLength, bed, origin });
+  const stock = stockRect({ stockWidth, stockLength, stockLeft, stockFront, bed, origin });
   const overhangs =
     art !== null &&
     (art.x < stock.x - 0.01 ||

@@ -256,7 +256,7 @@ pub fn bed_picture_scale(bed: BedSize) -> f64 {
 
 /// Bilinear sample at a position already known to be inside the picture
 /// (to within half a pixel).
-fn sample(image: &RgbaImage, x: f64, y: f64) -> Rgba<u8> {
+pub(crate) fn sample(image: &RgbaImage, x: f64, y: f64) -> Rgba<u8> {
     let max_x = image.width().saturating_sub(1);
     let max_y = image.height().saturating_sub(1);
     let x = x.clamp(0.0, max_x as f64);

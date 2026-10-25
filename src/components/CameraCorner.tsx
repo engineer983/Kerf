@@ -3,6 +3,7 @@ import { NOT_LINED_UP_MESSAGE, notLinedUp, useCamera } from "../state/camera";
 import { useMachine } from "../state/machine";
 import { useProject } from "../state/project";
 import { useUi } from "../state/ui";
+import { FindMaterialButton } from "./FoundMaterial";
 
 /** Above this thickness the top of the material looks noticeably shifted in the picture. */
 const THICK_MM = 3;
@@ -66,6 +67,7 @@ export function CameraCorner() {
           Line up
         </button>
       )}
+      {(lined || deviceId) && <FindMaterialButton className="rounded-lg border border-line px-2.5 py-1 text-fg hover:border-muted disabled:opacity-50" />}
       <button
         className="flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1 font-medium text-accent-fg transition-opacity hover:opacity-90 disabled:opacity-50"
         disabled={busy}

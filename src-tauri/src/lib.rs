@@ -330,6 +330,7 @@ pub fn run() {
             camera::set_camera_still,
             camera::check_camera_fit,
             camera::camera_bed_picture,
+            camera::find_material,
             machine::list_ports,
             machine::connect_machine,
             machine::disconnect_machine,

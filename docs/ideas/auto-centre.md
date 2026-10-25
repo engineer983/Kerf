@@ -1,6 +1,6 @@
 # Auto-centre the design on the material
 
-Status: planned
+Status: built (steps 1–6, except the scrap test). Untested: on a real camera and bed, and by hand in the desktop app and Chrome. Step 7 (camera height, thick-material correction, empty-bed comparison) is not built.
 
 ## The idea
 
@@ -178,6 +178,7 @@ Only a real camera over a real bed can settle these:
 5. Measure the gap from the square to each edge of the sheet. Left minus right and front minus back give the centring error.
 6. Repeat with 18 mm stock, and on a router with the sheet clamped (frame only, no cutting, until the numbers are known).
 7. Record the numbers in the help text and in this plan.
+8. **Zero on the sheet's corner** (added after the safety review): set the work zero ("Zero XY here") on a sheet's corner, set the material's "From left" to 100 mm, and frame (laser off). The frame should land 100 mm off the sheet, showing why the material must stay in the corner when the zero is set on it.
 
 ## Decisions
 
@@ -210,3 +211,26 @@ Decided 2026-10-24, going with the recommendations.
   - With a camera: a sheet at an odd spot is found. The outline can be dragged. "Use this outline" centres the design and one Ctrl+Z undoes it. A tilted sheet gives the "straight part in the middle" message. A plain bed with nothing on it is refused with the "click on the material" hint.
   - The arrow keys nudge the selected thing by 1 mm, and by 10 mm with Shift. They never send anything to the machine.
 - The scrap test above has been run once, and its numbers recorded.
+
+## As built
+
+- **Detection request.** `find_material` also takes the current material rectangle (`stock`) and `thickness`, because choosing the seed and the size and thickness checks need them. The core entry point is `find_material_request`, which checks the bed and picture size as idea 1 does, around `find_material(still, &Homography, bed, seed, &Hints)`. `FoundMaterial` also carries `straightWidth`/`straightLength`.
+- **Warping at 1 px/mm** is done in `material.rs` with idea 1's bilinear `sample` (now `pub(crate)`), not through `bed_picture`, whose scale is fixed at 2 px/mm. Large beds are capped at 1600 px on the longest side. Transparent pixels in the still count as unseen.
+- **Edge recovery.** The 5 mm texture window stops the growth a few mm short of the edge. A second pass therefore takes in up to about 5 mm more by colour alone, using the colours before blurring. Without it the 1 mm corner test failed.
+- **Round pieces** get the square-to-the-bed box round them (angle 0), because the smallest rectangle round a pixelated circle comes out at a random angle. "Round" means it fills 72–84% of its rectangle and over 95% of its convex hull. The hull test stops an L-shape or a same-colour clamp being called round. Rectangles within 0.5% of the smallest count as a tie, and the least-turned one wins.
+- **The limits are guesses, not measurements:** a seed counts as plain up to 15 brightness levels of spread, growth stops above 25, and the colour tolerance is at least 28 (RGB distance). Only the scrap test can settle these (Hardware unknowns 1–3).
+- **Corner markers** are simple draggable circles in a new `FoundMaterial.tsx` overlay, not `Handles.tsx`, which only drags square-to-the-bed rectangles. Idea 1's lining-up screen did the same. Working the rectangle out again from dragged corners, and the straight part, are copied in `src/lib/camera.ts` (`outlineRect`, `straightInside`). The Rust `straight_inside` is the tested one.
+- **One undo step** is `placeMaterial()` in `project.ts`: size, place and centring in a single `set`. Like every change, it merges with another change made less than 600 ms before.
+- **Make it fit** only ever shrinks (keeping the 10 mm margin) and centres, because it is only shown when something overhangs. A box or layers can't be resized, so they are only centred. It sits next to the overhang warning in the Design step, and in the canvas note after applying.
+- **Frame first.** `MachinePanel.tsx` is not touched. After an outline is used, a note on the canvas and a note at the top of the Machine step (added in `Inspector.tsx`) say "Frame the job to check it sits on the material before you start." So `gcode-safety-reviewer` isn't required by this build.
+- **Arrow keys** act only while the canvas element itself has focus (`tabIndex=0`). Clicking or dragging on the canvas gives it focus. Keys pressed in any other control, the machine panel's included, never reach the handler. Idea 3's plan already keeps its jog keys on its own focus group and never listens globally, so it needed no change.
+- **Out-of-date picture.** The picture is now also marked "may be out of date" when the material is moved by hand, but not when it is moved to an outline found in that picture.
+- **"Centre everything on the material"** is always shown next to "Centre it", even when there is only the artwork.
+- **Assistant:** `set_material` takes `leftMm`/`frontMm`, through `setStockPlace`, so the design moves too. `describeProject` reports them. There is no camera or detection tool, and nothing new in `ipc.ts`.
+- **Checks run:** 12 `kerf-core::material` tests (all those listed, plus the size and thickness warnings and a different-bed refusal), and a `kerf-web` test of `find_material` through `run()`. The TypeScript store checks were run once from a scratch script bundled with esbuild against the real `project.ts`, for both origins: `stockRect` unchanged at 0,0, the design carried along, `centreOnMaterial`, `placeMaterial` and its single undo, and Make it fit. They are not kept in the repo, which has no TypeScript test runner. The "older project" check only covers the `?? 0` default in `openProject`.
+- **Safety review fixes:**
+  - **Work zero on the material's corner.** The job is measured from the work zero, which Kerf assumes is the bed's origin corner. Once the material has been moved away from that corner, someone who zeroes on the sheet's own corner would cut that far off the sheet. Whenever the material isn't in the corner, "Where it sits" (Material step) and the Machine step's frame-first note say: "Kerf measures the job from the bed's front-left (or back-left) corner. If you set the work zero on the material's corner instead, put the material back in the corner." The canvas note after applying an outline says it too, and both help topics explain it. This is text only: `MachinePanel.tsx` is untouched. Scrap test step 8 checks it.
+  - **The frame-first prompt** now also appears in the Machine step when the material is moved by typing or by the assistant, not only after a camera outline. The canvas note stays only for a camera outline, so typing doesn't pop it up. Undoing a move and opening a project with the material away from the corner also count as moves, which is deliberate.
+  - **The zero warning can't be dismissed.** On the Machine step, OK hides only the "frame the job" reminder. The work-zero warning stays for as long as the material is away from the corner.
+  - **Applying an outline re-checks the line-up.** If the camera, bed or picture no longer match (`notLinedUp`), "Use this outline" cancels the outline instead of applying it.
+- **Not yet checked by hand** in the desktop app or a browser, and the scrap test hasn't been run.

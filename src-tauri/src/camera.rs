@@ -5,6 +5,7 @@
 //! Nothing here reaches the machine.
 
 use kerf_core::camera::{self, BedPictureRequest, BedSize, CameraFit, CameraStill, FitCheck};
+use kerf_core::material::{self, BedRect, FindMaterialRequest, FoundMaterial};
 use serde::Serialize;
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::State;
@@ -59,6 +60,34 @@ pub(crate) async fn camera_bed_picture(
     blocking(move || camera::camera_bed_picture_png(&still, &request))
         .await
         .map(Response::new)
+}
+
+/// Looks for the piece of material in the latest still. Only proposes an
+/// outline: the interface shows it, and nothing changes until the person
+/// says to use it.
+#[tauri::command]
+pub(crate) async fn find_material(
+    fit: CameraFit,
+    bed: BedSize,
+    seed: Option<(f64, f64)>,
+    stock: Option<BedRect>,
+    thickness: f64,
+    state: State<'_, AppState>,
+) -> Result<FoundMaterial, String> {
+    let still = state
+        .camera_still
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Take a picture with the camera first.")?;
+    let request = FindMaterialRequest {
+        fit,
+        bed,
+        seed,
+        stock,
+        thickness,
+    };
+    blocking(move || material::find_material_request(&still, &request)).await
 }
 
 /// WebKitGTK refuses the camera unless the app turns media on and answers

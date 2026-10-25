@@ -7,6 +7,7 @@
 pub mod camera;
 pub mod design;
 pub mod drawing;
+pub mod material;
 
 use std::io::Cursor;
 use std::sync::Arc;
