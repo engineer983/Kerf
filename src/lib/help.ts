@@ -276,6 +276,7 @@ export const HELP_TOPICS: HelpTopic[] = [
         steps: [
           "Home the machine if it has homing switches, so it knows where it is.",
           "Jog the bit to the front-left corner of the material and press Zero XY here. Kerf measures everything from that corner on the X-Carve.",
+          "Choose Hold to move the bit while you hold the button or an arrow key; let go to stop. Click the jog pad first for the keys to work.",
           "Lower the bit until it just touches the top of the material. A slip of paper under the bit should drag but still slide. Press Zero Z here.",
           "Raise the bit clear before starting.",
         ],
@@ -349,6 +350,7 @@ export const HELP_TOPICS: HelpTopic[] = [
           "In step 6, choose the machine's port and press Connect.",
           "Home the machine, or Unlock it if it starts in an alarm.",
           "Jog to the front-left corner of the material and set Zero XY, then touch the bit to the top and set Zero Z.",
+          "Raise the bit clear, then press Go to XY zero to check where the origin is.",
           "Press Frame the job outline and check it clears the clamps and stays on the material.",
           "Put on glasses and ear protection, switch the router on, and press Start job, then again to confirm.",
           "Pause holds the machine where it is; Resume carries on. Stop halts it and abandons the job.",

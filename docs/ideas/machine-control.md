@@ -1,6 +1,6 @@
 # Control the connected machine (X, Y, Z, homing)
 
-Status: planned
+Status: built, tested against the simulated controller only. Not yet run on a real machine (hardware checks 1–8 below are all still to do). The findings of two `gcode-safety-reviewer` passes are fixed (see "Fixes after the first safety review" and "...second safety review") and need a final look; `web-parity-checker` has not run yet.
 
 ## The idea
 
@@ -200,7 +200,7 @@ Do each on scrap with the laser off (or the router's spindle off and the bit rai
 1. **How far it coasts after release.** Hold X+ at Fast and let go over a ruler taped to the bed. Note the distance past the release point. Expect under 0.3 s of travel; anything over 10 mm at Fast means the lead budget is too large.
 2. **What happens when the cable is pulled mid-hold.** Hold at Slow, pull the USB cable, and measure how far it carries on. It must stop by itself within about a second.
 3. **Whether purged jog lines get an `ok`.** Watch the console after a cancel. Then type `$$` and check it still answers, which shows the resync works.
-4. **Laser stays off while jogging.** On a laser with `$32=1`: send `M3 S0`, then try to jog. It should go through (S is 0). Then send `M3 S10`. Kerf must refuse to jog and show the message. Never test with the laser actually firing.
+4. **Laser stays off while jogging.** On a laser with `$32=1`: send `M3 S10`, then try to jog, frame and Go to XY zero. Kerf must refuse each one with the M3 message, even though the status shows a speed of 0. Send `M5`, and jogging must work again. Never test with the laser actually firing.
 5. **Soft limits.** On a homed machine with `$20=1`, hold towards an edge. It must stop at the edge with a clear message, not an alarm.
 6. **Stopping homing.** Press Home, then Stop part way. It must halt at once and show the homing alarm, and Unlock or Home must recover it.
 7. **Keyboard on each platform.** In WebView2 (Windows) and WebKitGTK (Linux, never run), check how auto-repeat behaves, and that Alt-Tab during a held arrow key stops the move.
@@ -219,6 +219,59 @@ Decided 2026-10-24, going with the recommendations.
 3. **Keys.** Arrows for X and Y and Page Up / Page Down for Z, only while the pad is focused? *Decided: yes.* LightBurn and UGS use similar keys, and focus-only avoids clashing with the canvas.
 4. **Go to XY zero on a router.** Should it raise Z by a set amount first? *Decided: no for v1.* Kerf can't know a safe height without a homed Z, and the button tip tells the person to raise the bit. Revisit with probing.
 5. **Diagonal held jogs.** Allow them (two keys at once)? *Decided: no for v1.* With one axis at a time, a stuck key can only drive one axis. Diagonal steps by clicking aren't offered today either.
+
+## As built
+
+Built 2026-10-24 in the order below. Where it differs from the plan:
+
+- **The resync after a cancel uses `$G`, not `G4 P0`.** Two problems with `G4 P0` showed up while building it. GRBL refuses any G-code line with `error:9` while it is still in the Jog state, which it is for a moment after a cancel, so the dwell would often be rejected instead of waiting. And its `ok` looks just like the `ok` for a purged jog line, so the worker could not tell which reply was the marker's. `$G` is accepted in every state and answers `[GC:...]` before its `ok`, so the `ok` that follows `[GC:` is known to be the marker's. Then `manual_in_flight` is emptied. The marker is only sent when lines were still unanswered at the cancel. Held segments always leave room for it in the 127-byte buffer.
+- **The spindle check, the line builders and the one-axis rule all live in `Connection`** (`jog`, `go_to_xy_zero`, `frame`, `start_held_jog`). `machine.rs` keeps its `finite` and speed checks, and also rejects two axes (`hold_direction`, with its own test).
+- **A held jog needs the spindle reported as exactly 0.** If the status report gives no spindle value, holding is refused and the message suggests a jog distance instead. A held jog also stops if a later report shows the spindle above 0, or no spindle value at all.
+- **A held jog also needs `$120`–`$122`.** If they haven't been read, holding is refused with a message. (`kerf_grbl::jog` also has `to_xy_line` and `frame_lines`, used by framing.)
+- **Stop (the panel button) during a held jog sends `0x85`**, not the feed hold it sends for a job. The **Cancel jog** byte (`cancelJog`, now used by Escape) also starts a resync if lines were unanswered, which fixes the same stale-count problem for step jogs.
+- **Only the first refused segment is reported.** At a soft limit every queued segment comes back `error:15`, so the rest are dropped quietly during the resync. The panel shows a refused jog line as a message ("The machine refused the move (error 15): …"), which also ends the hold through `useHeldJog`.
+- **Home is enabled in alarm** (it used to need `idle`). The alarm advice tells the person to Home, and GRBL accepts `$H` in alarm, which is how a machine that starts locked is homed. It is still disabled when `$22=0`. When `$22=0` the alarm line reads "The machine is locked. Homing is switched off, so Unlock it once you know where the head is." instead of offering Home.
+- **Extra stop paths in `useHeldJog`:** any `pointerup` or `pointercancel` on the window, as well as the plan's list. While a hold runs the state is `jog`, so the pad's buttons stay enabled during it. A disabled button may never receive its `pointerup`.
+- **Hold and Speed are both remembered:** `kerf.jogStep` as well as `kerf.jogSpeed`, as "Done when" asks.
+- **`stop_while_homing_resets_immediately`**: the Sim reports `Home`, and on reset raises `ALARM:6` as GRBL does. The test checks that the only realtime byte (besides `?`) is `0x18`, and that the alarm arrives well inside `STOP_TIMEOUT`.
+- New Sim tests beyond the plan's list: `jogs_go_to_zero_and_framing_send_exactly_these_lines`, `moves_are_refused_while_the_laser_or_spindle_is_on`, `moves_need_a_real_speed`, `held_jog_refused_until_acceleration_is_known`, `held_jog_stops_when_the_spindle_comes_on` and `disconnecting_mid_hold_cancels_and_resets`.
+
+### Fixes after the first safety review
+
+The `gcode-safety-reviewer` asked for changes. All are made, each pinned by a Sim test:
+
+1. **Laser mode hid an armed laser.** With `$32=1`, an `M3 S1000` typed with no motion shows a speed of 0 in the status report, yet the next jog would fire the laser. The worker now tracks whether M3/M4 or M5 is in force:
+   - set from every typed line as it is queued (comments and `$` lines are ignored)
+   - On while a Kerf job runs
+   - Unknown after a soft reset, the restart banner, a finished job, or a refused line that had a spindle word
+   - set from every `[GC:…]` reply. `$G` is asked on connecting, after a restart and after a job.
+
+   Jog, frame, Go to XY zero and held jogs are refused unless it is known to be M5. (`moves_refused_after_typed_m3_in_laser_mode`, which also covers M5 clearing it; `moves_refused_while_the_machine_reports_m3`; `spindle_words_are_read_from_typed_lines`.) This changes hardware check 4: `M3 S0` is now refused too.
+2. **An unreported spindle speed now refuses every move,** not only held jogs (`moves_refused_until_the_spindle_state_is_known`).
+3. **Moves no longer pile up.** They are refused while a hold, a resync or earlier queued lines are pending. A `$G` marker left unanswered for 1 s while the machine is Idle is given up on, and the console says so (`moves_refused_while_replies_are_out_of_step_then_recover`).
+4. **Lines on their way at a cancel.** GRBL ignores `0x85` outside a jog and keeps its receive buffer, so a segment still on its way could run as a fresh jog. When the marker's `ok` arrives, a second `0x85` goes out before anything else is sent. The Sim has a mode that behaves as GRBL does (`held_jog_stop_cancels_again_when_grbl_keeps_its_receive_buffer`).
+5. **Held-jog speed is capped** at `$110`–`$112` in the backend, and **no more than two segments are ever unanswered** (`held_jog_feed_is_capped_at_the_axis_maximum`; the resync test checks the two).
+6. **One press moves at most 10 s, or the axis's travel** (`$130`–`$132`, when known), then needs a fresh press (`held_jog_ends_after_the_axis_travel`). The 10 s limit is not tested; the test would take too long.
+7. **If the worker thread panics,** it sends a jog cancel and a soft reset, then reports the disconnect (`a_fault_in_the_worker_stops_the_machine_and_is_reported`). Mutex poisoning is tolerated so that the shut-down can still run.
+8. **A typed `$G` already waiting at a cancel** is no longer taken for the marker's reply (`a_typed_modes_query_ahead_of_the_marker_is_not_taken_for_it`).
+9. **The Home tip on a router** now says to raise the bit first.
+
+All the checks for whether a move may go ahead now run on the worker thread, against the worker's own state, through a reply channel: `Connection` sends the request and waits up to 2 s for the answer. Before, some checks ran in the caller's thread.
+
+I checked that the tests for 4 and 8 fail without their fixes.
+
+### Fixes after the second safety review
+
+1. **An old `$G` reply could undo a typed M3.** A `[GC:…M5…]` reply made before GRBL ran a typed `M3` used to set the mode to off, and in laser mode the status still shows a speed of 0. So a jog could be accepted with the laser on. Two changes:
+   - A `[GC:` reply is now ignored if any line after its `$G` (still unanswered, or queued) has an M3, M4 or M5.
+   - Moves are refused while any unanswered or queued line has one.
+
+   Tests: `a_modes_reply_sent_before_a_typed_m3_does_not_clear_it` and `moves_wait_for_a_typed_m5_to_be_answered`. The first one fails without the fix.
+2. **A move that timed out is cancelled.** If the worker doesn't answer within 2 s, `Connection` sends a jog cancel after the move, and tells the person the move was cancelled. A cancel now also drops jog lines that are queued but not yet sent; without that, a jog cancel alone would not stop a move still waiting in the queue. This also applies to Escape and **Cancel jog**. Tests: `a_move_that_times_out_is_cancelled` and `a_jog_cancel_drops_jog_lines_not_yet_sent`. The second one fails without the change.
+
+One Sim change came with this. `moves_refused_until_the_spindle_state_is_known` now uses a Sim that answers `$G` with `ok` but no report. The earlier Sim, which never answered `$G` at all, left a line in flight forever, which real GRBL never does. Moves stay refused safely if replies ever do go permanently out of step: a pending M5 then looks unanswered for good, and Reset clears it.
+
+Hardware unknown 3 matters more now. The Sim can't show whether a jog line still on its way down the cable when `0x85` arrives is purged or run as a fresh jog once GRBL is Idle again. If it is run, at most the few segments in flight (well under 0.3 s of travel) would move after release. Check 1 measures this.
 
 ## Build order
 

@@ -1,14 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, RefreshCw } from "lucide-react";
+import { useHeldJog, type JogDirection } from "../lib/heldJog";
 import { inBrowser, isTauri } from "../lib/ipc";
+import {
+  JOG_SPEEDS,
+  JOG_STEPS,
+  jogFeed,
+  storeJogSpeed,
+  storeJogStep,
+  storedJogSpeed,
+  storedJogStep,
+  type JogSpeed,
+  type JogStep,
+} from "../lib/jog";
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
 import { Section, Segmented } from "./controls";
 
-const JOG_FEED = 1500;
-const JOG_FEED_Z = 300;
 const FRAME_FEED = 3000;
+/** Going back to zero is one long move, so it never goes faster than framing. */
+const GO_TO_ZERO_MAX_FEED = 3000;
+/** Keys that move the machine, only while the jog pad has focus: the canvas
+ * and text fields use the arrow keys too. */
+const JOG_KEYS: Record<string, JogDirection> = {
+  ArrowUp: [0, 1, 0],
+  ArrowDown: [0, -1, 0],
+  ArrowLeft: [-1, 0, 0],
+  ArrowRight: [1, 0, 0],
+  PageUp: [0, 0, 1],
+  PageDown: [0, 0, -1],
+};
 /** How long the start button stays armed, waiting for the confirming click. */
 const ARM_MS = 5000;
 
@@ -21,9 +43,13 @@ export function MachinePanel() {
   const program = useProject((s) => s.gcode.program);
   const machineKind = useProject((s) => s.machineKind);
   const m = useMachine();
-  const [step, setStep] = useState("1");
+  const [step, setStep] = useState<JogStep>(storedJogStep);
+  const [speed, setSpeed] = useState<JogSpeed>(storedJogSpeed);
   const [command, setCommand] = useState("");
   const [armed, setArmed] = useState(false);
+  const held = useHeldJog();
+  const heldKey = useRef<string | null>(null);
+  const [padFocused, setPadFocused] = useState(false);
 
   useEffect(() => {
     if (isTauri() && !inBrowser) void useMachine.getState().refreshPorts();
@@ -59,13 +85,68 @@ export function MachinePanel() {
   const running = jobIsActive(m.job);
   const idle = m.connected && m.state === "idle" && !running;
   // Moving, or perhaps about to: still working through a job's last lines,
-  // jogging, or paused.
-  const moving = running || m.state === "run" || m.state === "jog" || m.state === "hold";
+  // jogging, paused, homing, or stopped by the safety door. Stop shows for all
+  // of them; while homing it resets the machine at once.
+  const moving =
+    running || (m.state !== null && ["run", "jog", "hold", "home", "door"].includes(m.state));
   const canDisconnect = !running && (m.state === null || ["idle", "alarm", "sleep"].includes(m.state));
   const modeProblem = laserModeProblem(machineKind, m.settings[32]);
-  const distance = Number(step);
-  const jog = (x: number, y: number, z: number) =>
-    void m.act({ type: "jog", x: x * distance, y: y * distance, z: z * distance, feed: z ? JOG_FEED_Z : JOG_FEED });
+  const homingOff = m.settings[22] !== undefined && Number(m.settings[22]) === 0;
+  const homingOn = m.settings[22] !== undefined && Number(m.settings[22]) === 1;
+  const holding = step === "hold";
+  const feedFor = ([, y, z]: JogDirection) => jogFeed(speed, z ? 2 : y ? 1 : 0, m.settings);
+  // One step per press. Only offered when idle.
+  const jogStep = (direction: JogDirection) => {
+    if (!idle || holding) return;
+    const [x, y, z] = direction.map((d) => d * Number(step));
+    void m.act({ type: "jog", x, y, z, feed: feedFor(direction) });
+  };
+  const holdStart = (direction: JogDirection) => {
+    if (idle && holding) held.start(direction, feedFor(direction));
+  };
+  // While a hold runs the state is "jog", but the buttons must stay live so
+  // that letting go is seen.
+  const padDisabled = !idle && !held.active;
+
+  const onPadKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (held.active) held.stop();
+      else if (m.state === "jog") void m.act({ type: "cancelJog" });
+      return;
+    }
+    const direction = JOG_KEYS[e.key];
+    if (!direction) return;
+    // The arrow keys would otherwise scroll the panel.
+    e.preventDefault();
+    // Auto-repeat neither steps again nor restarts a hold; the hold's own
+    // keep-alive runs until the key comes up.
+    if (e.repeat) return;
+    if (holding) {
+      if (!held.active) heldKey.current = e.key;
+      holdStart(direction);
+    } else {
+      jogStep(direction);
+    }
+  };
+  const onPadKeyUp = (e: React.KeyboardEvent) => {
+    if (e.key === heldKey.current) {
+      heldKey.current = null;
+      held.stop();
+    }
+  };
+  const jogButton = (label: string, direction: JogDirection) => (
+    <JogButton
+      label={label}
+      direction={direction}
+      disabled={padDisabled}
+      holding={holding}
+      onStep={jogStep}
+      onHoldStart={holdStart}
+      onHoldEnd={held.stop}
+    />
+  );
+  const goToZeroFeed = Math.min(jogFeed(speed, 0, m.settings), jogFeed(speed, 1, m.settings), GO_TO_ZERO_MAX_FEED);
 
   return (
     <div className="flex flex-col gap-5">
@@ -112,10 +193,18 @@ export function MachinePanel() {
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
             <dt className="text-muted">State</dt>
             <dd className="capitalize">{m.state ?? "No reply yet"}</dd>
-            <dt className="text-muted">Position</dt>
-            <dd className="font-mono text-[12px]">
-              {m.position ? m.position.map((v) => v.toFixed(2)).join("  ") : "—"}
-            </dd>
+            <dt className="text-muted">From work zero</dt>
+            <dd className="font-mono text-[12px]">{formatPosition(m.position)}</dd>
+            {/* Without homing ($22=0) the machine's own position means nothing. */}
+            {!homingOff && (
+              <>
+                <dt className="text-muted">From home</dt>
+                <dd className="font-mono text-[12px]">
+                  {formatPosition(m.machinePosition)}
+                  {homingOn && <span className="ml-2 font-sans text-muted">(after homing)</span>}
+                </dd>
+              </>
+            )}
             {m.version && (
               <>
                 <dt className="text-muted">Firmware</dt>
@@ -145,31 +234,89 @@ export function MachinePanel() {
             <Segmented
               label="Jog distance in millimetres"
               value={step}
-              options={["0.1", "1", "10", "100"].map((v) => ({ value: v, label: v }))}
-              onChange={setStep}
+              options={JOG_STEPS}
+              onChange={(value) => {
+                setStep(value);
+                storeJogStep(value);
+              }}
             />
-            <div className="flex items-center justify-between">
-              <div className="grid grid-cols-3 gap-1">
-                <span />
-                <JogButton label="Jog back (Y+)" disabled={!idle} onClick={() => jog(0, 1, 0)}><ArrowUp size={16} /></JogButton>
-                <span />
-                <JogButton label="Jog left (X−)" disabled={!idle} onClick={() => jog(-1, 0, 0)}><ArrowLeft size={16} /></JogButton>
-                <span />
-                <JogButton label="Jog right (X+)" disabled={!idle} onClick={() => jog(1, 0, 0)}><ArrowRight size={16} /></JogButton>
-                <span />
-                <JogButton label="Jog forward (Y−)" disabled={!idle} onClick={() => jog(0, -1, 0)}><ArrowDown size={16} /></JogButton>
-                <span />
+            <Segmented
+              label="Jog speed"
+              value={speed}
+              options={JOG_SPEEDS}
+              onChange={(value) => {
+                setSpeed(value);
+                storeJogSpeed(value);
+              }}
+            />
+            {/* Keys are handled here only, never on the window. */}
+            <div
+              tabIndex={0}
+              role="group"
+              aria-label="Jog pad: arrow keys move X and Y, Page Up and Page Down move Z"
+              title={holding ? "Hold a button or an arrow key to move; let go to stop" : undefined}
+              onKeyDown={onPadKey}
+              onKeyUp={onPadKeyUp}
+              onFocus={() => setPadFocused(true)}
+              onBlur={(e) => {
+                if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                setPadFocused(false);
+                heldKey.current = null;
+                held.stop();
+              }}
+              className="rounded-lg p-1 outline-none focus-within:ring-2 focus-within:ring-accent"
+            >
+              <div className="flex items-center justify-between">
+                <div className="grid grid-cols-3 gap-1">
+                  <span />
+                  {jogButton("Jog back (Y+)", [0, 1, 0])}
+                  <span />
+                  {jogButton("Jog left (X−)", [-1, 0, 0])}
+                  <span />
+                  {jogButton("Jog right (X+)", [1, 0, 0])}
+                  <span />
+                  {jogButton("Jog forward (Y−)", [0, -1, 0])}
+                  <span />
+                </div>
+                <div className="grid gap-1">
+                  {jogButton("Raise (Z+)", [0, 0, 1])}
+                  {jogButton("Lower (Z−)", [0, 0, -1])}
+                </div>
               </div>
-              <div className="grid gap-1">
-                <JogButton label="Raise (Z+)" disabled={!idle} onClick={() => jog(0, 0, 1)}>Z+</JogButton>
-                <JogButton label="Lower (Z−)" disabled={!idle} onClick={() => jog(0, 0, -1)}>Z−</JogButton>
-              </div>
+              <p className={`mt-1 text-[11px] text-accent ${padFocused ? "" : "invisible"}`}>Keys move the machine</p>
             </div>
+            {m.state === "alarm" && (
+              <p className="text-muted">
+                {homingOff
+                  ? "The machine is locked. Homing is switched off, so Unlock it once you know where the head is."
+                  : "The machine is locked. Home it so it knows where it is (or Unlock if it has no homing switches and you know where it is)."}
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-2">
-              <button className={quiet} disabled={!idle} onClick={() => void m.act({ type: "home" })}>Home</button>
+              <button
+                className={quiet}
+                disabled={!(idle || (m.state === "alarm" && !running)) || homingOff}
+                title={
+                  homingOff
+                    ? "Homing is switched off on this machine ($22=0)."
+                    : machineKind === "cnc"
+                      ? "Send the machine to its home switches to find its position. Raise the bit first: homing moves every axis, and after a stopped cut the bit may still be in the material"
+                      : "Send the machine to its home switches to find its position"
+                }
+                onClick={() => void m.act({ type: "home" })}
+              >
+                Home
+              </button>
               <button className={quiet} disabled={m.state !== "alarm"} onClick={() => void m.act({ type: "unlock" })}>Unlock</button>
               <button className={quiet} disabled={!idle} onClick={() => void m.act({ type: "setOrigin", z: false })}>Zero XY here</button>
               <button className={quiet} disabled={!idle} onClick={() => void m.act({ type: "setOrigin", z: true })}>Zero Z here</button>
+              <button
+                className={`${quiet} col-span-2`}
+                disabled={!idle}
+                onClick={() => void m.act({ type: "goToXyZero", feed: goToZeroFeed })}
+              >
+                Go to XY zero
+              </button>
             </div>
           </Section>
 
@@ -266,6 +413,10 @@ export function MachinePanel() {
   );
 }
 
+function formatPosition(position: [number, number, number] | null): string {
+  return position ? position.map((v) => v.toFixed(2)).join("  ") : "—";
+}
+
 /**
  * Why the machine's laser mode (GRBL setting $32) does not suit the job, or
  * null if it does. The desktop app refuses to start the job either way; this
@@ -287,21 +438,43 @@ function laserModeProblem(kind: "laser" | "cnc", value: string | undefined): str
 
 interface JogButtonProps {
   label: string;
+  direction: JogDirection;
   disabled: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
+  /** Move only while pressed, rather than one step per click. */
+  holding: boolean;
+  onStep: (direction: JogDirection) => void;
+  onHoldStart: (direction: JogDirection) => void;
+  onHoldEnd: () => void;
 }
 
-function JogButton({ label, disabled, onClick, children }: JogButtonProps) {
+function JogButton({ label, direction, disabled, holding, onStep, onHoldStart, onHoldEnd }: JogButtonProps) {
+  const [x, y, z] = direction;
+  const icon =
+    z > 0 ? "Z+" : z < 0 ? "Z−" : y > 0 ? <ArrowUp size={16} /> : y < 0 ? <ArrowDown size={16} /> : x < 0 ? <ArrowLeft size={16} /> : <ArrowRight size={16} />;
   return (
     <button
       aria-label={label}
       title={label}
+      // Kept out of the tab order: the pad around the buttons is the one stop.
+      tabIndex={-1}
       disabled={disabled}
-      onClick={onClick}
-      className="flex h-9 w-9 items-center justify-center rounded-lg border border-line font-mono text-[12px] transition-colors hover:text-accent disabled:opacity-40"
+      onClick={() => {
+        if (!holding) onStep(direction);
+      }}
+      onPointerDown={(e) => {
+        if (!holding || e.button !== 0) return;
+        // Keeps the release coming here even if the pointer slides off.
+        e.currentTarget.setPointerCapture(e.pointerId);
+        onHoldStart(direction);
+      }}
+      onPointerUp={onHoldEnd}
+      onPointerCancel={onHoldEnd}
+      onLostPointerCapture={onHoldEnd}
+      // A long touch would otherwise open a menu.
+      onContextMenu={(e) => e.preventDefault()}
+      className="flex h-9 w-9 touch-none items-center justify-center rounded-lg border border-line font-mono text-[12px] transition-colors select-none hover:text-accent disabled:opacity-40"
     >
-      {children}
+      {icon}
     </button>
   );
 }
