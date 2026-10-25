@@ -87,18 +87,43 @@ export interface Item {
 
 const isCutout = (op: OperationItem) => op.kind.type === "cncCutout" || op.kind.type === "laserCutout";
 
+/** The main artwork is the outlines of parts, such as a box's panels, which its operations cut free. */
+export const cutsParts = (design: Design | null) => design !== null && isFixed(design);
+
+/**
+ * Whether one of the main artwork's operations cuts pieces free: a cutout, a
+ * design's parts, a laser line, or a router line that goes right through.
+ * The same rule as `Job::cuts_free` in kerf-gcode, which orders the job.
+ */
+function cutsFree(op: OperationItem, thickness: number, parts: boolean): boolean {
+  if (isCutout(op) || parts || op.kind.type === "laserCut") return true;
+  // An unknown thickness says nothing goes through, as in the generator.
+  return op.kind.type === "cncProfile" && Number.isFinite(thickness) && op.kind.depth >= thickness - 1e-6;
+}
+
 /**
  * The included operations in the order the job runs them: the main
- * artwork's, then the added items', then any cutouts, so that nothing is
- * made on a piece already cut free. Items' operations only count while there
- * are items.
+ * artwork's marks, then the added items', then the main artwork's cuts right
+ * through, then any cutouts, so that nothing is made on a piece already cut
+ * free. Items' operations only count while there are items. The generator
+ * runs them in this order too.
  */
-export function jobOrder(operations: OperationItem[], hasItems: boolean) {
+export function jobOrder(
+  operations: OperationItem[],
+  hasItems: boolean,
+  material: { thickness: number; design: Design | null },
+) {
+  const parts = cutsParts(material.design);
   const included = operations.filter((op) => op.enabled !== false && (hasItems || !op.forItems));
   const main = included.filter((op) => !op.forItems && !isCutout(op));
   const items = included.filter((op) => op.forItems);
   const cutouts = included.filter((op) => !op.forItems && isCutout(op));
-  return { main, items, cutouts, all: [...main, ...items, ...cutouts] };
+  const marks = main.filter((op) => !cutsFree(op, material.thickness, parts));
+  const through = main.filter((op) => cutsFree(op, material.thickness, parts));
+  // A design's laser lines burn weakest first, so its marks come before the
+  // cut however they are listed (a stable sort, as in the generator).
+  if (parts && through.every((op) => op.kind.type.startsWith("laser"))) through.sort((a, b) => a.power - b.power);
+  return { main, items, cutouts, all: [...marks, ...items, ...through, ...cutouts] };
 }
 
 const isRouter = (op: OperationItem) =>
@@ -159,10 +184,12 @@ export function bitsForJob(s: {
   operations: OperationItem[];
   items: unknown[];
   toolChange: ToolChange;
+  thickness: number;
+  design: Design | null;
 }): { runs: BitRun[]; reused: boolean } {
   if (s.machineKind !== "cnc") return { runs: [], reused: false };
   const { tools } = useToolbox.getState();
-  const order = jobOrder(s.operations, s.items.length > 0).all.filter(isRouter);
+  const order = jobOrder(s.operations, s.items.length > 0, s).all.filter(isRouter);
   const numbers = toolNumbers(order, tools, s.toolChange.mode === "atc");
   const runs: BitRun[] = [];
   for (const op of order) {
@@ -2095,7 +2122,7 @@ export const useProject = create<ProjectState>((set, get) => {
       const s = get();
       const rect = artworkRect(s);
       if (!rect) return;
-      const order = jobOrder(s.operations, s.items.length > 0);
+      const order = jobOrder(s.operations, s.items.length > 0, s);
       const around = everythingRect(s);
       const generation = ++gcodeGeneration;
       // Each router operation says which bit it uses, so a job with more
@@ -2123,9 +2150,11 @@ export const useProject = create<ProjectState>((set, get) => {
             toolChange: s.toolChange,
           },
           offset: [rect.x, rect.y],
-          // Cutouts are run last by the generator, wherever they are listed.
+          // The generator runs whatever cuts pieces free after the items,
+          // and cutouts last, wherever they are listed (as jobOrder does).
           operations: named([...order.main, ...order.cutouts]),
           materialThickness: s.thickness,
+          cutsParts: cutsParts(s.design),
         }, {
           enabled: s.heightSource === "depth" && s.depth.status === "ready",
           detail: s.detail,

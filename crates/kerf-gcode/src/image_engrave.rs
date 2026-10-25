@@ -176,6 +176,7 @@ mod tests {
             },
             offset: [10.0, 20.0],
             material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::LaserImage {

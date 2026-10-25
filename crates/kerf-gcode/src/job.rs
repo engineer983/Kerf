@@ -238,6 +238,10 @@ pub struct Job {
     /// beyond it (plus a little, to cut cleanly through) are refused.
     #[serde(default)]
     pub material_thickness: Option<f64>,
+    /// The main artwork is the outlines of parts, such as a box's panels or
+    /// stacked layers, so its operations cut those parts free.
+    #[serde(default)]
+    pub cuts_parts: bool,
 }
 
 /// How far a router may cut below the material, into whatever is under it,
@@ -245,6 +249,22 @@ pub struct Job {
 pub const THROUGH_CUT_ALLOWANCE_MM: f64 = 1.0;
 
 impl Job {
+    /// Whether one of the job's own operations cuts pieces free of the
+    /// material, so that it must run after everything that marks them: a
+    /// cutout, a design's parts, a laser line, or a router line that goes
+    /// right through.
+    pub fn cuts_free(&self, operation: &Operation) -> bool {
+        match operation.kind {
+            OperationKind::CncCutout { .. } | OperationKind::LaserCutout { .. } => true,
+            _ if self.cuts_parts => true,
+            OperationKind::LaserCut => true,
+            OperationKind::CncProfile { depth, .. } => self
+                .material_thickness
+                .is_some_and(|thickness| depth >= thickness - 1e-6),
+            _ => false,
+        }
+    }
+
     /// Checks that hold across all of a job's operations, `added` included.
     pub(crate) fn check(&self, added: &[Operation]) -> Result<(), String> {
         let operations: Vec<&Operation> = self.operations.iter().chain(added).collect();

@@ -325,6 +325,7 @@ mod tests {
             },
             offset: [50.0, 60.0],
             material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind,
@@ -556,10 +557,9 @@ mod tests {
             program.text.find("S400 F1500").unwrap(),
             program.text.find("S800 F800").unwrap(),
         );
-        assert!(
-            main < added_at && added_at < cut,
-            "the cutout must come last"
-        );
+        // The main artwork's laser line may cut right through, so it follows
+        // the lettering; the cutout comes last of all.
+        assert!(added_at < main && main < cut, "the cutout must come last");
         // The lettering is cut where it was drawn, with no offset added.
         assert!(program.text.contains("X110 Y100"));
         // The cut goes 2 mm outside everything, not just the main artwork.

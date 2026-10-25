@@ -54,6 +54,7 @@ export function OperationsPanel() {
   const shaping = useProject((s) => s.depth.status === "working");
   const traced = useProject((s) => s.trace.result);
   const designed = useProject((s) => s.design !== null);
+  const design = useProject((s) => s.design);
   // A box or a stack of layers: cut right through, at the size it was drawn.
   const fixed = useProject((s) => s.design !== null && isFixed(s.design));
   const { program, busy, error, exportedTo } = useProject((s) => s.gcode);
@@ -65,7 +66,7 @@ export function OperationsPanel() {
   }
 
   const colors = traceColors(traced);
-  const bits = bitsForJob({ machineKind, operations, items, toolChange });
+  const bits = bitsForJob({ machineKind, operations, items, toolChange, thickness, design });
   const titleOf = (index: number) => {
     const op = operations[index];
     return op.forItems ? "Added text and drawings" : (fixed && op.color && LINE_NAMES[op.color]) || `Operation ${index + 1}`;
