@@ -67,6 +67,7 @@ export function Canvas() {
   // A box or a set of layers is drawn as the lines to cut, with no picture behind.
   const designed = useProject((s) => s.design !== null);
   const fixedSize = useProject((s) => s.design !== null && isFixed(s.design));
+  const design = useProject((s) => s.design);
   // Text and drawings added beside the main artwork, and which is selected.
   const items = useProject((s) => s.items);
   const selected = useProject((s) => s.selected);
@@ -310,7 +311,7 @@ export function Canvas() {
       },
       imageInterval,
       // Each included router operation carves with its own bit.
-      tools: jobOrder(operations, items.length > 0).all.map((o) => tools.find((t) => t.id === o.toolId) ?? bit),
+      tools: jobOrder(operations, items.length > 0, { thickness, design }).all.map((o) => tools.find((t) => t.id === o.toolId) ?? bit),
       operationStarts: program.operationStarts,
     });
     // The operations' settings are read as they were when the program was made:

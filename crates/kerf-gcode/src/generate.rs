@@ -86,7 +86,8 @@ pub fn generate_with(
 pub struct Additions<'a> {
     /// Drawn where it sits on the bed, so it needs no offset.
     pub artwork: &'a Artwork,
-    /// Run after the job's own operations and before its cutouts.
+    /// Run after the job's own marking operations and before anything of
+    /// the job's that cuts pieces free (see [`Job::cuts_free`]).
     pub operations: &'a [Operation],
 }
 
@@ -98,8 +99,9 @@ fn is_cutout(operation: &Operation) -> bool {
 }
 
 /// Like [`generate_with`], for a job with things added beside its main
-/// artwork. Whatever order the operations are given in, cutouts run last, so
-/// that nothing is engraved on a piece that has already been cut free.
+/// artwork. Whatever order the operations are given in, those that cut
+/// pieces free run after the rest, and cutouts last of all, so that nothing
+/// is engraved on a piece that has already been cut free.
 /// `cutout_around` is the rectangle, in bed coordinates as x, y, width and
 /// height, that cutouts go round in place of the main artwork's own: the
 /// space taken up by everything on the material.
@@ -118,19 +120,27 @@ pub fn generate_composed(
         operation.validate(&job.machine)?;
     }
     job.check(added)?;
-    // Each operation, with whether it works on the additions.
-    let order: Vec<(&Operation, bool)> = job
-        .operations
-        .iter()
-        .filter(|o| !is_cutout(o))
-        .map(|o| (o, false))
+    // Each operation, with whether it works on the additions. Whatever cuts
+    // pieces free runs after everything that marks them, or a piece could
+    // drop or shift before it is marked: the main artwork's marks, then the
+    // additions, then its cuts right through, then cutouts.
+    let main = |cuts: bool, cutouts: bool| {
+        job.operations
+            .iter()
+            .filter(move |o| job.cuts_free(o) == cuts && is_cutout(o) == cutouts)
+            .map(|o| (o, false))
+    };
+    let mut through: Vec<(&Operation, bool)> = main(true, false).collect();
+    if job.cuts_parts && job.machine.kind == crate::job::MachineKind::Laser {
+        // A design's lines burn weakest first, so its marks are made before
+        // the parts are cut free however they are listed. Equal powers keep
+        // their listed order.
+        through.sort_by(|a, b| a.0.power.total_cmp(&b.0.power));
+    }
+    let order: Vec<(&Operation, bool)> = main(false, false)
         .chain(added.iter().map(|o| (o, true)))
-        .chain(
-            job.operations
-                .iter()
-                .filter(|o| is_cutout(o))
-                .map(|o| (o, false)),
-        )
+        .chain(through)
+        .chain(main(true, true))
         .collect();
     let (cut_size, cut_at) = match cutout_around {
         Some([x, y, width, height]) => ([width, height], [x, y]),
@@ -848,6 +858,7 @@ mod tests {
             machine: machine(MachineKind::Laser),
             offset: [20.0, 30.0],
             material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind,
@@ -900,6 +911,7 @@ mod tests {
             machine: machine(MachineKind::Cnc),
             offset: [10.0, 10.0],
             material_thickness: Some(3.0),
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -1136,6 +1148,7 @@ mod tests {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
             material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -1220,6 +1233,7 @@ mod tests {
             machine: machine(MachineKind::Cnc),
             offset: [20.0, 30.0],
             material_thickness: None,
+            cuts_parts: false,
             operations: vec![Operation {
                 color: None,
                 kind: OperationKind::CncProfile {
@@ -1243,5 +1257,142 @@ mod tests {
         assert_eq!(moves[3][2..], [-1.0, 1.0]);
         assert!(moves[4..8].iter().all(|m| m[2..] == [-1.0, 1.0]));
         assert_eq!(moves[moves.len() - 1][2..], [5.0, -1.0]);
+    }
+
+    /// Lettering on the panel: a 6 mm line across the middle of the square,
+    /// drawn where it sits on the bed.
+    fn lettering() -> Artwork {
+        artwork(100, r##"<path d="M22 35H28" stroke="#000" fill="none"/>"##)
+    }
+
+    fn router(depth: f64) -> Operation {
+        Operation {
+            color: None,
+            kind: OperationKind::CncProfile {
+                depth,
+                depth_per_pass: depth,
+                plunge_feed: 200.0,
+                safe_z: 5.0,
+                spindle_rpm: 12000.0,
+            },
+            feed: 800.0,
+            power: 0.0,
+            passes: 1,
+            tool: None,
+        }
+    }
+
+    #[test]
+    fn a_laser_marks_a_panel_before_cutting_it_free() {
+        // A box's panel outline, cut at full power, with lettering added on it.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.cuts_parts = true;
+        job.operations[0].power = 100.0;
+        job.operations[0].feed = 300.0;
+        let text = lettering();
+        let added = [Operation {
+            power: 20.0,
+            feed: 3000.0,
+            ..job.operations[0].clone()
+        }];
+        let additions = Additions {
+            artwork: &text,
+            operations: &added,
+        };
+        let program = generate_composed(&square(), None, &job, Some(&additions), None).unwrap();
+        assert_eq!(
+            code(&program),
+            [
+                "G21",
+                "G90",
+                "M4 S0",
+                "G0 X22 Y65 S0",
+                "G1 X28 Y65 S200 F3000",
+                "M4 S0",
+                "G0 X20 Y70 S0",
+                "G1 X30 Y70 S1000 F300",
+                "G1 X30 Y60",
+                "G1 X20 Y60",
+                "G1 X20 Y70",
+                "M5",
+                "G0 X0 Y0",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_router_marks_a_panel_before_cutting_it_free() {
+        // 3 mm material: a shallow line on the main artwork, a cut right
+        // through it, and lettering added, listed with the cut first.
+        let job = Job {
+            machine: machine(MachineKind::Cnc),
+            offset: [20.0, 30.0],
+            material_thickness: Some(3.0),
+            cuts_parts: false,
+            operations: vec![router(3.0), router(0.5)],
+        };
+        let text = lettering();
+        let added = [router(0.25)];
+        let additions = Additions {
+            artwork: &text,
+            operations: &added,
+        };
+        let program = generate_composed(&square(), None, &job, Some(&additions), None).unwrap();
+        let lines = code(&program);
+        let at = |line: &str| lines.iter().position(|l| *l == line).unwrap();
+        // The shallow line, then the lettering, then the cut through.
+        assert!(at("G1 Z-0.5 F200") < at("G1 Z-0.25 F200"));
+        assert!(at("G1 Z-0.25 F200") < at("G1 Z-3 F200"));
+        assert_eq!(program.operation_starts.len(), 3);
+        assert_eq!(lines[lines.len() - 3..], ["G0 Z5", "M5", "G0 X0 Y0"]);
+
+        // A design's parts are cut free last even if the cut stops short.
+        let mut parts = job.clone();
+        parts.cuts_parts = true;
+        parts.operations = vec![router(2.0)];
+        let program = generate_composed(&square(), None, &parts, Some(&additions), None).unwrap();
+        let lines = code(&program);
+        let at = |line: &str| lines.iter().position(|l| *l == line).unwrap();
+        assert!(at("G1 Z-0.25 F200") < at("G1 Z-2 F200"));
+    }
+
+    #[test]
+    fn a_layers_design_burns_its_marks_before_its_cut() {
+        // Listed with the full-power cut above the 15% registration marks.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.cuts_parts = true;
+        job.operations[0].power = 100.0;
+        job.operations.push(Operation {
+            power: 15.0,
+            ..job.operations[0].clone()
+        });
+        let program = generate(&square(), &job).unwrap();
+        let lines = code(&program);
+        let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+        assert!(at("S150 F600") < at("S1000 F600"), "{lines:?}");
+        // Not a design: the listed order stands.
+        job.cuts_parts = false;
+        let program = generate(&square(), &job).unwrap();
+        let lines = code(&program);
+        let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+        assert!(at("S1000 F600") < at("S150 F600"), "{lines:?}");
+    }
+
+    #[test]
+    fn without_additions_marks_still_come_before_a_cut_through() {
+        // Listed cut first; the fill still runs before the line.
+        let mut job = laser_job(OperationKind::LaserCut, 1);
+        job.operations.push(Operation {
+            kind: OperationKind::LaserFill { interval: 5.0 },
+            power: 20.0,
+            ..job.operations[0].clone()
+        });
+        let program = generate(&square(), &job).unwrap();
+        let fill = program.text.find("S200").unwrap();
+        let cut = program.text.find("S500").unwrap();
+        assert!(fill < cut);
+        // The fill first and the line second is left exactly as listed.
+        job.operations.reverse();
+        assert_eq!(generate(&square(), &job).unwrap().text, program.text);
     }
 }

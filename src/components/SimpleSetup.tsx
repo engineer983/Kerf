@@ -258,7 +258,7 @@ export function SimpleSetup() {
               </p>
             </>
           ) : null}
-          <p className="text-muted">They are made in the same job, after the main artwork and before any cut-out.</p>
+          <p className="text-muted">They are made in the same job, before anything is cut right through, so the piece is still held in place while they are made.</p>
         </Section>
       )}
     </>

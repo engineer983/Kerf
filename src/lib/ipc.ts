@@ -169,6 +169,8 @@ export interface Job {
   operations: Operation[];
   /** The material's thickness in mm; router depths much beyond it are refused. */
   materialThickness?: number;
+  /** The main artwork is parts to cut free, such as a box's panels, so it is cut after anything added on it. */
+  cutsParts?: boolean;
 }
 
 export interface Generated {

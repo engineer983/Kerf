@@ -383,6 +383,7 @@ export const HELP_TOPICS: HelpTopic[] = [
         heading: "Cutting a piece out",
         points: [
           "Run the cut-out last, after any carving, so the piece is held while it is worked on.",
+          "Kerf keeps to this order however the operations are listed: engraving and carving first, then added text and drawings, then anything that cuts right through (such as a box's outlines), then the cut-out.",
           "Keep the tabs. They stop the piece coming loose and being thrown or gouged on the last pass. Cut them with a chisel or flush saw afterwards and sand them off.",
           "Set the depth to the material's real thickness, with scrap board underneath.",
         ],
@@ -573,6 +574,7 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Step 3: press Box maker… and give the outside width, depth and height. Tick With a lid for a closed box.",
           "On a laser, enter the Kerf, the width of the line the beam burns away. On a router, choose the flat bit you will cut with.",
           "Press Make the box. The panels are laid out to fit your material. If they need more than one piece, choose which sheet to cut in step 5.",
+          "To put words on a panel, press Add text… in step 3 and move them onto it. They are engraved before the panels are cut free, so they land where you put them.",
           "Generate and cut each sheet.",
         ],
       },
