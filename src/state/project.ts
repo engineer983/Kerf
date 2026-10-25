@@ -365,9 +365,15 @@ interface ProjectState {
    * from the front for a front-left origin, from the back for a back-left one.
    */
   front: number;
-  /** Size of the piece of material, which sits in the bed's origin corner. */
+  /** Size of the piece of material. */
   stockWidth: number;
   stockLength: number;
+  /**
+   * Where the material sits, as for the artwork: from the bed's left edge,
+   * and from the edge on the machine's origin side. 0, 0 is the origin corner.
+   */
+  stockLeft: number;
+  stockFront: number;
   /** Router speed in rpm, used to work out feeds. */
   spindleRpm: number;
   showSource: boolean;
@@ -493,6 +499,21 @@ interface ProjectState {
   setMaterial: (id: string) => void;
   setThickness: (thickness: number) => void;
   setStock: (patch: { stockWidth?: number; stockLength?: number }) => void;
+  /** Moves the material, carrying the design with it so it stays where it was on the material. */
+  setStockPlace: (patch: { stockLeft?: number; stockFront?: number }) => void;
+  /**
+   * Puts the material at a place and size, and the design in its middle, as
+   * one undo step. Used when a found outline is applied.
+   */
+  placeMaterial: (place: { stockLeft: number; stockFront: number; stockWidth: number; stockLength: number }) => void;
+  /** Moves the artwork and every added item together so their middle is the material's middle. */
+  centreOnMaterial: () => void;
+  /**
+   * Shrinks everything together, if needed, to fit the material less a
+   * margin, and centres it there. A box or a set of layers can't be resized,
+   * so then it is only centred.
+   */
+  fitEverythingOnMaterial: () => void;
   setSpindleRpm: (spindleRpm: number) => void;
   /** Changes what an operation does, giving it a suitable bit and speeds. */
   setOperationType: (id: number, type: OperationKind["type"]) => void;
@@ -585,10 +606,30 @@ function sheetBody(svg: string): string {
   return svg.slice(start, svg.lastIndexOf("</svg>")).trim();
 }
 
-/** Where the piece of material sits: in the bed's origin corner. */
-export function stockRect(s: Pick<ProjectState, "stockWidth" | "stockLength" | "bed" | "origin">) {
-  const y = s.origin === "backLeft" ? 0 : s.bed.height - s.stockLength;
-  return { x: 0, y, width: s.stockWidth, height: s.stockLength };
+/** Where the piece of material sits, in bed coordinates (mm, Y down from the back). */
+export function stockRect(
+  s: Pick<ProjectState, "stockWidth" | "stockLength" | "stockLeft" | "stockFront" | "bed" | "origin">,
+) {
+  const y = s.origin === "backLeft" ? s.stockFront : s.bed.height - s.stockFront - s.stockLength;
+  return { x: s.stockLeft, y, width: s.stockWidth, height: s.stockLength };
+}
+
+/** The left and origin-side distances of a rectangle given in bed coordinates. */
+export function placeOf(rect: { x: number; y: number; height: number }, s: Pick<ProjectState, "bed" | "origin">) {
+  return { left: rect.x, front: s.origin === "backLeft" ? rect.y : s.bed.height - rect.y - rect.height };
+}
+
+/** Whether the material reaches past the edge of the bed. */
+export function stockOffBed(
+  s: Pick<ProjectState, "stockWidth" | "stockLength" | "stockLeft" | "stockFront" | "bed">,
+): boolean {
+  const slack = 0.01;
+  return (
+    s.stockLeft < -slack ||
+    s.stockFront < -slack ||
+    s.stockLeft + s.stockWidth > s.bed.width + slack ||
+    s.stockFront + s.stockLength > s.bed.height + slack
+  );
 }
 
 /** Clear material left around new artwork when it is sized to fit, in mm. */
@@ -616,6 +657,8 @@ const UNDOABLE = [
   "front",
   "stockWidth",
   "stockLength",
+  "stockLeft",
+  "stockFront",
   "materialId",
   "thickness",
   "operations",
@@ -967,10 +1010,41 @@ export const useProject = create<ProjectState>((set, get) => {
     return [tenth(width * used), tenth(height * used)];
   }
 
-  /** The position that puts something of this size in the middle of the material. */
+  /**
+   * The position that puts something of this size in the middle of the
+   * material. Something larger than the material starts at its origin-side
+   * corner, as it always has.
+   */
   function centred(width: number, height: number) {
-    const { stockWidth, stockLength } = get();
-    return { left: tenth(Math.max(0, (stockWidth - width) / 2)), front: tenth(Math.max(0, (stockLength - height) / 2)) };
+    const s = get();
+    const stock = stockRect(s);
+    const x = stock.x + Math.max(0, (stock.width - width) / 2);
+    const inset = Math.max(0, (stock.height - height) / 2);
+    const y = s.origin === "backLeft" ? stock.y + inset : stock.y + stock.height - inset - height;
+    const place = placeOf({ x, y, height }, s);
+    return { left: tenth(place.left), front: tenth(place.front) };
+  }
+
+  /**
+   * The artwork and items moved by (dx, dy) in bed coordinates, as a patch.
+   * A move towards the back is a smaller "front" for a front-left origin and
+   * a larger one for a back-left origin.
+   */
+  function shifted(s: ProjectState, dx: number, dy: number) {
+    const dFront = s.origin === "backLeft" ? dy : -dy;
+    return {
+      left: tenth(s.left + dx),
+      front: tenth(s.front + dFront),
+      items: s.items.map((item) => ({ ...item, left: tenth(item.left + dx), front: tenth(item.front + dFront) })),
+    };
+  }
+
+  /** The move, in bed coordinates, that puts the middle of everything on the middle of the material. */
+  function towardsMiddle(s: ProjectState): [number, number] {
+    const all = everythingRect(s);
+    if (!all) return [0, 0];
+    const stock = stockRect(s);
+    return [stock.x + stock.width / 2 - (all.x + all.width / 2), stock.y + stock.height / 2 - (all.y + all.height / 2)];
   }
 
   /** Keeps exactly one operation for the added items while there are any, and none when there are not. */
@@ -1092,6 +1166,8 @@ export const useProject = create<ProjectState>((set, get) => {
     front: STOCK_MARGIN_MM,
     stockWidth: 300,
     stockLength: 200,
+    stockLeft: 0,
+    stockFront: 0,
     showSource: true,
     materialId: DEFAULT_MATERIAL.id,
     thickness: DEFAULT_MATERIAL.thickness,
@@ -1700,7 +1776,13 @@ export const useProject = create<ProjectState>((set, get) => {
           design: null,
           optimizeNote: null,
         });
-        get().restore({ ...saved.settings, items: saved.settings.items ?? [] });
+        // Projects saved before the material had a place had it in the origin corner.
+        get().restore({
+          ...saved.settings,
+          items: saved.settings.items ?? [],
+          stockLeft: saved.settings.stockLeft ?? 0,
+          stockFront: saved.settings.stockFront ?? 0,
+        });
         set({ selected: null });
         nextItemId = Math.max(nextItemId, ...get().items.map((item) => item.id + 1));
         // A saved design is put back as the thing being cut.
@@ -1748,6 +1830,57 @@ export const useProject = create<ProjectState>((set, get) => {
     setThickness: (thickness) =>
       set((s) => ({ thickness, operations: followThickness(s.operations, s.thickness, thickness), ...staleGcode() })),
     setStock: (patch) => set(patch),
+    setStockPlace: (patch) =>
+      set((s) => {
+        const dLeft = (patch.stockLeft ?? s.stockLeft) - s.stockLeft;
+        const dFront = (patch.stockFront ?? s.stockFront) - s.stockFront;
+        if (dLeft === 0 && dFront === 0) return {};
+        // The material and the design are measured the same way, so the
+        // design moves by the same amounts and stays where it was on it.
+        return {
+          ...patch,
+          left: tenth(s.left + dLeft),
+          front: tenth(s.front + dFront),
+          items: s.items.map((item) => ({ ...item, left: tenth(item.left + dLeft), front: tenth(item.front + dFront) })),
+          ...staleGcode(),
+        };
+      }),
+    placeMaterial: (place) =>
+      set((s) => {
+        const next = { ...s, ...place };
+        const [dx, dy] = towardsMiddle(next);
+        // All in one change, so a single undo puts everything back.
+        return { ...place, ...(everythingRect(next) ? shifted(next, dx, dy) : {}), ...staleGcode() };
+      }),
+    centreOnMaterial: () =>
+      set((s) => {
+        if (!everythingRect(s)) return {};
+        const [dx, dy] = towardsMiddle(s);
+        return { ...shifted(s, dx, dy), ...staleGcode() };
+      }),
+    fitEverythingOnMaterial: () =>
+      set((s) => {
+        const all = everythingRect(s);
+        if (!all) return {};
+        const fixed = s.design !== null && isFixed(s.design);
+        const room = [Math.max(1, s.stockWidth - STOCK_MARGIN_MM * 2), Math.max(1, s.stockLength - STOCK_MARGIN_MM * 2)];
+        // Only ever smaller: this is for work that doesn't fit, not for filling.
+        const k = fixed ? 1 : Math.min(1, room[0] / all.width, room[1] / all.height);
+        const stock = stockRect(s);
+        const [cx, cy] = [all.x + all.width / 2, all.y + all.height / 2];
+        const [tx, ty] = [stock.x + stock.width / 2, stock.y + stock.height / 2];
+        const scaled = (r: { x: number; y: number; width: number; height: number }) => {
+          const rect = { x: tx + (r.x - cx) * k, y: ty + (r.y - cy) * k, width: r.width * k, height: r.height * k };
+          const place = placeOf(rect, s);
+          return { widthMm: tenth(rect.width), heightMm: tenth(rect.height), left: tenth(place.left), front: tenth(place.front) };
+        };
+        const art = artworkRect(s);
+        return {
+          ...(art ? scaled(art) : {}),
+          items: s.items.map((item) => ({ ...item, ...scaled(itemRect(item, s)) })),
+          ...staleGcode(),
+        };
+      }),
     setSpindleRpm: (spindleRpm) =>
       set((s) => ({
         spindleRpm,

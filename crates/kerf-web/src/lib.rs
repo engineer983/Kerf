@@ -14,6 +14,7 @@ use kerf_ai::{Endpoint, ImageEndpoint, Shape, ToolSpec};
 use kerf_core::camera::{self, BedPictureRequest, CameraFit, CameraStill};
 use kerf_core::design::Design;
 use kerf_core::drawing::TextSpec;
+use kerf_core::material::{self, FindMaterialRequest};
 use kerf_core::{Added, DepthOptions, JobInput, LoadedImage};
 use kerf_gcode::Job;
 use kerf_make::{BoxSpec, LayerSpec};
@@ -222,6 +223,12 @@ pub fn run(command: &str, input: &str, file: &[u8]) -> Result<String, String> {
                 fit: CameraFit,
             }
             reply(camera::check_fit(&args::<Input>(input)?.fit)?)
+        }
+        "find_material" => {
+            let request: FindMaterialRequest = args(input)?;
+            let still = with(|state| state.camera_still.clone())
+                .ok_or("Take a picture with the camera first.")?;
+            reply(material::find_material_request(&still, &request)?)
         }
 
         "app_info" => reply(json!({ "name": "Kerf", "version": env!("CARGO_PKG_VERSION") })),
@@ -668,5 +675,28 @@ mod tests {
         let png = camera_picture_png(request).unwrap();
         let picture = kerf_trace::image::load_from_memory(&png).unwrap();
         assert_eq!((picture.width(), picture.height()), (120, 120));
+    }
+
+    #[test]
+    fn the_material_is_found_in_the_camera_still() {
+        let request = r#"{"fit":{"points":[{"px":0,"py":0,"x":0,"y":0},{"px":120,"py":0,"x":60,"y":0},{"px":120,"py":120,"x":60,"y":60},{"px":0,"py":120,"x":0,"y":60}],"bedWidth":60,"bedHeight":60,"pictureWidth":120,"pictureHeight":120},"bed":{"width":60,"height":60},"seed":null,"stock":null,"thickness":3}"#;
+        assert!(run("find_material", request, &[])
+            .unwrap_err()
+            .contains("Take a picture"));
+
+        // The dark square, 30 mm across in the middle of a 60 mm bed, is the material.
+        run("set_camera_still", "{}", &square()).unwrap();
+        let found: Value =
+            serde_json::from_str(&run("find_material", request, &[]).unwrap()).unwrap();
+        assert!(
+            (found["width"].as_f64().unwrap() - 30.0).abs() < 1.0,
+            "{found}"
+        );
+        assert!(
+            (found["centre"][0].as_f64().unwrap() - 30.0).abs() < 1.0,
+            "{found}"
+        );
+        assert_eq!(found["corners"].as_array().unwrap().len(), 4);
+        assert!(found["warnings"].as_array().unwrap().is_empty(), "{found}");
     }
 }

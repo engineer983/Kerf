@@ -1,18 +1,26 @@
 import { MATERIALS } from "../lib/materials";
-import { useProject } from "../state/project";
+import { stockOffBed, useProject } from "../state/project";
 import { NumberField, Section, Select } from "./controls";
+import { FindMaterialButton, zeroWarning } from "./FoundMaterial";
 
-/** The piece of material the job is made on: what it is, and how big. */
+const quiet = "rounded-lg border border-line px-3 py-1.5 transition-colors hover:text-accent disabled:opacity-40";
+
+/** The piece of material the job is made on: what it is, how big, and where it sits. */
 export function MaterialPanel() {
   const materialId = useProject((s) => s.materialId);
   const thickness = useProject((s) => s.thickness);
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
+  const stockLeft = useProject((s) => s.stockLeft);
+  const stockFront = useProject((s) => s.stockFront);
   const bed = useProject((s) => s.bed);
   const origin = useProject((s) => s.origin);
   const machineKind = useProject((s) => s.machineKind);
   const actions = useProject.getState();
   const tooBig = stockWidth > bed.width || stockLength > bed.height;
+  const offBed = !tooBig && stockOffBed({ stockWidth, stockLength, stockLeft, stockFront, bed });
+  const side = origin === "backLeft" ? "back" : "front";
+  const inCorner = stockLeft === 0 && stockFront === 0;
 
   return (
     <div className="flex flex-col gap-5">
@@ -54,11 +62,58 @@ export function MaterialPanel() {
           </p>
         )}
         <p className="text-muted">
-          The material sits in the {origin === "backLeft" ? "back" : "front"}-left corner of the bed.
           {machineKind === "cnc"
-            ? " Router speeds are worked out from the material and the bit."
-            : " Laser speed and power are yours to set; the material only changes the preview."}
+            ? "Router speeds are worked out from the material and the bit."
+            : "Laser speed and power are yours to set; the material only changes the preview."}
         </p>
+      </Section>
+      <Section title="Where it sits">
+        <NumberField
+          label="From left"
+          unit="mm"
+          step={1}
+          min={-5000}
+          max={5000}
+          value={stockLeft}
+          hint={{ text: "How far the material's left edge is from the left edge of the bed. The design moves with it." }}
+          onChange={(value) => actions.setStockPlace({ stockLeft: value })}
+        />
+        <NumberField
+          label={origin === "backLeft" ? "From back" : "From front"}
+          unit="mm"
+          step={1}
+          min={-5000}
+          max={5000}
+          value={stockFront}
+          hint={{ text: `How far the material's ${side} edge is from the ${side} edge of the bed. The design moves with it.` }}
+          onChange={(value) => actions.setStockPlace({ stockFront: value })}
+        />
+        <p className="text-muted">
+          {inCorner
+            ? `The material sits in the ${side}-left corner of the bed.`
+            : `The material is ${stockLeft} mm from the left and ${stockFront} mm from the ${side}.`}
+        </p>
+        {!inCorner && (
+          <p role="alert" className="text-accent">
+            {zeroWarning({ origin, stockLeft, stockFront })}
+          </p>
+        )}
+        {offBed && (
+          <p role="alert" className="text-accent">
+            Part of the material is off the {bed.width} × {bed.height} mm bed, so the machine can't reach all of it.
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <button
+            className={quiet}
+            disabled={inCorner}
+            onClick={() => actions.setStockPlace({ stockLeft: 0, stockFront: 0 })}
+            title={`Move the material, and the design on it, back into the ${side}-left corner`}
+          >
+            Put it back in the corner
+          </button>
+          <FindMaterialButton className={quiet} showReason />
+        </div>
       </Section>
       <button
         onClick={() => actions.setStep("design")}

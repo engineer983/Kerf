@@ -10,6 +10,7 @@ import { artworkRect, everythingRect, itemRect, jobOrder, jobUses, stockRect, us
 import { useToolbox } from "../state/tools";
 import { useCamera } from "../state/camera";
 import { CameraCorner, CameraNotes } from "./CameraCorner";
+import { FoundOverlay, FoundPanel } from "./FoundMaterial";
 import { Handles } from "./Handles";
 import { PlaybackBar } from "./PlaybackBar";
 import { View3D } from "./View3D";
@@ -80,6 +81,8 @@ export function Canvas() {
   const origin = useProject((s) => s.origin);
   const stockWidth = useProject((s) => s.stockWidth);
   const stockLength = useProject((s) => s.stockLength);
+  const stockLeft = useProject((s) => s.stockLeft);
+  const stockFront = useProject((s) => s.stockFront);
   const tools = useToolbox((s) => s.tools);
   const cameraPicture = useCamera((s) => (s.show ? s.bedPictureUrl : null));
   const cameraOpacity = useCamera((s) => s.opacity);
@@ -180,6 +183,28 @@ export function Canvas() {
     pan.current = null;
   }
 
+  /**
+   * The arrow keys move whatever is selected by 1 mm, or 10 mm with Shift,
+   * through the same actions as dragging. They only ever move the design on
+   * screen. They act only while the canvas itself has focus, so keys pressed
+   * in any other control, the machine panel's included, never get here.
+   */
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
+    const step = e.shiftKey ? 10 : 1;
+    const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!move) return;
+    const s = useProject.getState();
+    if (s.cropping) return;
+    const item = s.items.find((i) => i.id === s.selected);
+    const rect = item ? itemRect(item, s) : artworkRect(s);
+    if (!rect) return;
+    e.preventDefault();
+    const next = { ...rect, x: rect.x + move[0], y: rect.y + move[1] };
+    if (item) s.setItemRect(item.id, next);
+    else s.setArtworkRect(next);
+  }
+
   function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragOver(false);
@@ -235,7 +260,7 @@ export function Canvas() {
     Array.from({ length: Math.floor(length / rulerStep) + 1 }, (_, i) => i * rulerStep);
 
   const material = findMaterial(materialId);
-  const stock = stockRect({ stockWidth, stockLength, bed, origin });
+  const stock = stockRect({ stockWidth, stockLength, stockLeft, stockFront, bed, origin });
   const [sx, sy, sw, sh] = image ? [stock.x, stock.y, stock.width, stock.height] : [0, 0, 0, 0];
 
   // The bare material, as an image for the 2D view.
@@ -383,7 +408,16 @@ export function Canvas() {
   return (
     <main
       ref={containerRef}
-      className="relative min-w-0 flex-1 cursor-grab overflow-hidden bg-bg active:cursor-grabbing"
+      className="relative min-w-0 flex-1 cursor-grab overflow-hidden bg-bg outline-none active:cursor-grabbing"
+      // Focusable, so the arrow keys can nudge the selected thing.
+      tabIndex={0}
+      aria-label="Canvas. Arrow keys move the selected thing 1 mm, or 10 mm with Shift."
+      onKeyDown={onKeyDown}
+      // Before the handles, which stop the event, so clicking or dragging
+      // something on the canvas also gives the canvas the keys.
+      onPointerDownCapture={(e) => {
+        if (!(e.target as Element).closest("button, input, select, textarea, a")) e.currentTarget.focus({ preventScroll: true });
+      }}
       onWheel={onWheel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -712,6 +746,10 @@ export function Canvas() {
           </button>
         </div>
       )}
+      {view && !(simulation && mode === "3d") && (
+        <FoundOverlay viewBox={`${view.x} ${view.y} ${size.w * view.mmPerPx} ${size.h * view.mmPerPx}`} px={px} toBed={toBed} />
+      )}
+      {!cropRect && !(simulation && mode === "3d") && <FoundPanel />}
       {simulation && mode === "3d" && <View3D simulation={simulation} bed={bed} />}
       {simulation && <PlaybackBar canCompare={comparable} />}
 

@@ -164,3 +164,81 @@ export function checkCameraFit(fit: CameraFit): Promise<{ mirrored: boolean }> {
 export function cameraBedPicture(fit: CameraFit, bed: { width: number; height: number }): Promise<ArrayBuffer> {
   return invoke("camera_bed_picture", { fit, bed });
 }
+
+/** The material as found in the camera picture, in canvas bed mm (X from the left, Y down from the back). */
+export interface FoundMaterial {
+  /** Back left, back right, front right, front left (before any turn). */
+  corners: [[number, number], [number, number], [number, number], [number, number]];
+  centre: [number, number];
+  /** Along the side nearest to left-to-right. */
+  width: number;
+  /** Along the side nearest to back-to-front. */
+  length: number;
+  /** How far it is turned, clockwise on screen. */
+  angleDeg: number;
+  /** The largest rectangle square to the bed inside it, round the same centre. */
+  straightWidth: number;
+  straightLength: number;
+  /** What to check, in plain words. Empty when nothing looks doubtful. */
+  warnings: string[];
+}
+
+export type Corners = FoundMaterial["corners"];
+
+/**
+ * The rectangle that four corners (in order round it) stand for: the centre
+ * is their average and each side the average of the two opposite sides.
+ * Used once the person has dragged the corners of a found outline.
+ */
+export function outlineRect(corners: Corners) {
+  const [a, b, c, d] = corners;
+  const centre: [number, number] = [(a[0] + b[0] + c[0] + d[0]) / 4, (a[1] + b[1] + c[1] + d[1]) / 4];
+  const side = (p: [number, number], q: [number, number]) => Math.hypot(q[0] - p[0], q[1] - p[1]);
+  // The two sides that run across, added, give the direction of the turn.
+  const across = [b[0] - a[0] + (c[0] - d[0]), b[1] - a[1] + (c[1] - d[1])];
+  return {
+    centre,
+    width: (side(a, b) + side(d, c)) / 2,
+    length: (side(a, d) + side(b, c)) / 2,
+    angleDeg: (Math.atan2(across[1], across[0]) * 180) / Math.PI,
+  };
+}
+
+/**
+ * The largest rectangle square to the bed, round the same centre, inside a
+ * `width` × `length` rectangle turned by `angleDeg`. The same sum as
+ * `straight_inside` in `kerf-core/src/material.rs`, where it is tested.
+ */
+export function straightInside(width: number, length: number, angleDeg: number): [number, number] {
+  const s = Math.abs(Math.sin((angleDeg * Math.PI) / 180));
+  const c = Math.abs(Math.cos((angleDeg * Math.PI) / 180));
+  if (s < 1e-9) return [width, length];
+  if (c < 1e-9) return [length, width];
+  const [hw, hl] = [width / 2, length / 2];
+  const fits = (a: number, b: number) => a >= 0 && b >= 0 && a * c + b * s <= hw + 1e-9 && a * s + b * c <= hl + 1e-9;
+  let best: [number, number] = [0, 0];
+  const consider = (a: number, b: number) => {
+    if (fits(a, b) && a * b > best[0] * best[1]) best = [a, b];
+  };
+  consider(hw / (2 * c), hw / (2 * s));
+  consider(hl / (2 * s), hl / (2 * c));
+  const det = c * c - s * s;
+  if (Math.abs(det) > 1e-12) consider((hw * c - hl * s) / det, (hl * c - hw * s) / det);
+  return [best[0] * 2, best[1] * 2];
+}
+
+/**
+ * Looks for the material in the latest still. It only proposes an outline;
+ * nothing is changed until the person says to use it.
+ */
+export function findMaterial(request: {
+  fit: CameraFit;
+  bed: { width: number; height: number };
+  /** A place the person clicked on the material, in bed mm. */
+  seed: [number, number] | null;
+  /** Where the material is set to be now, in bed mm. */
+  stock: { x: number; y: number; width: number; height: number } | null;
+  thickness: number;
+}): Promise<FoundMaterial> {
+  return invoke("find_material", request);
+}

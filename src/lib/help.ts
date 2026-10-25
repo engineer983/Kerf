@@ -57,6 +57,8 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Hover over any setting's name for an explanation, often with a small animation.",
           "The panels on the right can be made wider or narrower: drag a panel's left edge. Double-click the edge to go back to its usual width.",
           "Ctrl+Z undoes a change to the settings; the arrows in the title bar do the same.",
+          "Click the canvas, then the arrow keys move whatever is selected 1 mm at a time, or 10 mm with Shift. They only move the design on screen, never the machine.",
+          "Centre everything on the material, in step 3, moves the artwork and its words and drawings together into the middle of the material.",
           "The Result view shows roughly what the finished piece will look like, and 3D lets you turn it. Press play to watch the job run.",
           "A project is saved to Your projects each time you generate, and when you press Save.",
           "The assistant can set a job up from a wish such as \"make this as realistic as possible\". It cannot move or start a machine.",
@@ -72,7 +74,9 @@ export const HELP_TOPICS: HelpTopic[] = [
       { text: "Step 2 asks for the piece's width, length and thickness. They matter more than they seem to." },
       {
         points: [
-          "Width and length decide how big the design can be and where it sits. The piece is assumed to be in the machine's origin corner: front-left on the X-Carve, back-left on the WeCreat.",
+          "Width and length decide how big the design can be and where it sits. The piece starts in the machine's origin corner: front-left on the X-Carve, back-left on the WeCreat.",
+          "If the piece is somewhere else on the bed, type where it sits under Where it sits: how far its left edge is from the bed's left edge, and how far its front (or back) edge is from the bed's. The design moves with it, so it stays where it was on the piece. Put it back in the corner undoes that. With a camera, Find the material does it for you.",
+          "Kerf measures every job from the bed's origin corner, not from the material. If you set the work zero on the material's own corner (Zero XY here), leave the material in the corner in step 2; otherwise the job lands that far off the material. Frame the job first to check.",
           "Thickness decides how deep a cut-out goes and how deep a box's joints are cut. Sheet sold as 3 mm is often 2.7 to 3.2 mm, so measure it with calipers, or use the thickness the WeCreat reports when it auto-focuses.",
           "On a router, the material type sets the cutting speeds. On a laser it only changes how the preview looks.",
           "Leave a margin. Clamps, tape and the machine's own reach all need room at the edges.",
@@ -106,8 +110,8 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Wide-angle lenses curve straight lines near the edges of the picture. Kerf doesn't straighten that yet, so the corners you lined up on are the most accurate places.",
           "If the bed size changes, or you use another camera, Kerf asks for lining up again. Changing the X0 Y0 corner doesn't move the picture.",
           "If the camera gets knocked or moved, line it up again. Kerf can't tell. The canvas shows when it was last lined up.",
-          "The orange outline is where Kerf thinks the material is. If the real sheet in the picture is somewhere else, move the material or the sheet before cutting.",
-          "After a job runs, or the material size changes, the picture is marked as maybe out of date. Take a new one.",
+          "The orange outline is where Kerf thinks the material is. If the real sheet in the picture is somewhere else, press Find the material, type where it sits in step 2, or move the sheet, before cutting.",
+          "After a job runs, or the material is moved or resized by hand, the picture is marked as maybe out of date. Take a new one.",
         ],
       },
       {
@@ -123,6 +127,43 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Linux: your user must be in the video group. The deb needs the gstreamer1.0-plugins-good package; the AppImage brings its own.",
           "In a browser, the page must be https or localhost, and the browser asks before letting it use the camera.",
         ],
+      },
+    ],
+  },
+
+  {
+    id: "find-material",
+    title: "Finding the material with the camera",
+    group: "Getting started",
+    blocks: [
+      {
+        text: "Once the camera is lined up, Kerf can look for your piece of material in the picture and put the design in the middle of it. It looks for something plain, such as plywood, MDF, card or masked acrylic, sitting on something busy, such as honeycomb, slats or clamps.",
+      },
+      {
+        steps: [
+          "Put the material on the bed and press Find the material, in the canvas's bottom-right corner or in step 2. If the picture may be out of date, Kerf takes a new one first.",
+          "Kerf draws the outline it found over the picture, with what it found and anything it isn't sure of. Nothing has changed yet.",
+          "If the outline is wrong, drag its corners onto the real corners. If Kerf found the wrong thing, or nothing, press Click on the material to try again and click on a plain part of the piece.",
+          "If the size is within 10 mm of what you typed, Kerf keeps your size, because a ruler beats a camera. Untick Keep my size to use the camera's.",
+          "Press Use this outline. The material moves there and the design is centred on it. One Ctrl+Z puts it all back.",
+          "Then adjust by dragging, typing, or with the arrow keys, and frame the job before cutting.",
+        ],
+      },
+      {
+        heading: "What to know",
+        points: [
+          "Kerf can't turn a design. If the material is at an angle, Kerf uses the straight part in the middle of it and says how big that is. Straighten the material for the full size.",
+          "It looks for a rectangle. A round piece is found by the square around it, so its middle is right. For an L-shaped or ragged offcut, check the outline and the design's place yourself.",
+          "Thick material looks shifted in the picture, more so towards the edges, because its top is nearer the camera. Check the far edges.",
+          "Clear and mirrored acrylic show the bed or the room, so they are usually not found. Click on them, or drag the corners into place.",
+          "The design's size isn't changed. If it doesn't fit, Make it fit shrinks everything together to fit, leaving 10 mm round it.",
+          "The place found is measured from the bed's origin corner, so the job's work zero must be that corner too. Don't set the zero on the material's corner when the material has been found or moved.",
+        ],
+      },
+      {
+        heading: "Before cutting",
+        warning:
+          "The outline is a guess. A wrong one puts a correct job in the wrong place: on a laser, onto the honeycomb or slats, which is a fire risk; on a router, into a clamp. Check the outline doesn't include a clamp, keep the design at least 10 mm from any clamp, and frame the job with the laser off before you start.",
       },
     ],
   },
