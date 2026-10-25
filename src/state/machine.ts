@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import * as ipc from "../lib/ipc";
-import type { JobState, MachineAction, MachineState, PortInfo } from "../lib/ipc";
+import type { Firmware, JobState, MachineAction, MachineState, PartsProgress, PortInfo, ProgramPart } from "../lib/ipc";
 
 const CONSOLE_LIMIT = 200;
 
@@ -18,6 +18,30 @@ interface MachineStore {
   connected: boolean;
   /** Firmware version from the start-up banner, once seen. */
   version: string | null;
+  /** Grbl or grblHAL, from the banner or `$I`. */
+  firmware: Firmware | null;
+  /** Input pins on in the last status report; "P" is the probe touching. */
+  pins: string;
+  /**
+   * The machine has homed since connecting, as far as the interface has seen.
+   * Only used for messages; the sender checks for itself.
+   */
+  homed: boolean;
+  /** Where a job with bit changes has got to, from the sender. */
+  parts: PartsProgress | null;
+  /**
+   * The running job's parts as generated when it was started, so the bit
+   * named at a change is the one in the file being run.
+   */
+  jobParts: ProgramPart[];
+  /** The running job changes bits with an automatic tool changer. */
+  jobAtc: boolean;
+  /** The last touch plate probe, while running or once it has ended. */
+  probe: { state: "running" | "done" | "failed"; message: string | null } | null;
+  /** The probe test has passed since connecting. */
+  probeTested: boolean;
+  /** Notes what job is about to start, then starts it. */
+  startJob: (programId: number, parts: ProgramPart[], atc: boolean) => Promise<void>;
   state: MachineState | null;
   /** Work position in millimetres. */
   position: [number, number, number] | null;
@@ -51,6 +75,12 @@ const DISCONNECTED = {
   connecting: false,
   connected: false,
   version: null,
+  firmware: null,
+  pins: "",
+  homed: false,
+  parts: null,
+  probe: null,
+  probeTested: false,
   state: null,
   position: null,
   machinePosition: null,
@@ -66,17 +96,35 @@ export const useMachine = create<MachineStore>((set, get) => {
   if (ipc.isTauri()) {
     void ipc.onMachineEvent((event) => {
       switch (event.type) {
-        case "status":
+        case "status": {
+          const previous = get().state;
           set({
             state: event.state,
             position: event.position,
             machinePosition: event.machinePosition,
             spindle: event.spindle,
+            pins: event.pins,
+            ...(event.state === "idle" && previous === "home" ? { homed: true } : {}),
           });
           break;
+        }
         case "welcome":
-          set({ version: event.version, settings: {} });
-          log(`Connected to Grbl ${event.version}`);
+          set({ version: event.version, firmware: event.firmware, settings: {}, homed: false });
+          log(`Connected to ${event.firmware === "grblHal" ? "grblHAL" : "Grbl"} ${event.version}`);
+          break;
+        case "firmware":
+          set({ firmware: event.firmware });
+          break;
+        case "parts":
+          set({ parts: event.progress });
+          break;
+        case "probe":
+          set({ probe: { state: event.state, message: event.message } });
+          if (event.state === "failed" && event.message) log(event.message);
+          break;
+        case "probeTested":
+          set({ probeTested: true });
+          log("Probe test passed: the plate touching the bit was seen.");
           break;
         case "setting":
           set((s) => ({ settings: { ...s.settings, [event.number]: event.value } }));
@@ -94,11 +142,13 @@ export const useMachine = create<MachineStore>((set, get) => {
           break;
         case "alarm":
           log(`ALARM ${event.code}: ${event.description}`);
-          set({ error: `Alarm ${event.code}: ${event.description}` });
+          set({ error: `Alarm ${event.code}: ${event.description}`, homed: false });
           break;
         case "job":
           set({ job: event });
-          if (event.state !== "running") {
+          if (event.state === "waitingForBit") {
+            log("Part finished. Waiting for the bit to be changed.");
+          } else if (event.state !== "running") {
             log(event.message ?? `Job ${event.state} (${event.acknowledged} of ${event.total} lines).`);
           }
           break;
@@ -123,6 +173,13 @@ export const useMachine = create<MachineStore>((set, get) => {
     console: [],
     error: null,
     originMoved: false,
+    jobParts: [],
+    jobAtc: false,
+
+    startJob: async (programId, parts, atc) => {
+      set({ jobParts: parts, jobAtc: atc, probe: null });
+      await get().act({ type: "startJob", programId });
+    },
 
     refreshPorts: async () => {
       try {

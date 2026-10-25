@@ -16,6 +16,7 @@ import {
 import { MACHINE_PRESETS } from "../lib/machines";
 import { jobIsActive, useMachine } from "../state/machine";
 import { useProject } from "../state/project";
+import { ChangeCard, ProbeControls } from "./BitChange";
 import { Section, Segmented } from "./controls";
 
 const FRAME_FEED = 3000;
@@ -84,11 +85,15 @@ export function MachinePanel() {
 
   const running = jobIsActive(m.job);
   const idle = m.connected && m.state === "idle" && !running;
+  // A job with bit changes is under way: running a part, or waiting between.
+  const inParts = m.parts !== null;
+  const waitingForBit = m.parts?.waiting === true;
+  const runningPart = running && inParts ? m.jobParts[m.parts!.part - 1] : undefined;
   // Moving, or perhaps about to: still working through a job's last lines,
   // jogging, paused, homing, or stopped by the safety door. Stop shows for all
   // of them; while homing it resets the machine at once.
   const moving =
-    running || (m.state !== null && ["run", "jog", "hold", "home", "door"].includes(m.state));
+    running || (m.state !== null && ["run", "jog", "hold", "home", "door", "tool"].includes(m.state));
   const canDisconnect = !running && (m.state === null || ["idle", "alarm", "sleep"].includes(m.state));
   const modeProblem = laserModeProblem(machineKind, m.settings[32]);
   const homingOff = m.settings[22] !== undefined && Number(m.settings[22]) === 0;
@@ -208,7 +213,9 @@ export function MachinePanel() {
             {m.version && (
               <>
                 <dt className="text-muted">Firmware</dt>
-                <dd>Grbl {m.version}</dd>
+                <dd>
+                  {m.firmware === "grblHal" ? "grblHAL" : "Grbl"} {m.version}
+                </dd>
               </>
             )}
             {m.settings[130] && m.settings[131] && (
@@ -308,7 +315,14 @@ export function MachinePanel() {
                 Home
               </button>
               <button className={quiet} disabled={m.state !== "alarm"} onClick={() => void m.act({ type: "unlock" })}>Unlock</button>
-              <button className={quiet} disabled={!idle} onClick={() => void m.act({ type: "setOrigin", z: false })}>Zero XY here</button>
+              <button
+                className={quiet}
+                disabled={!idle || inParts}
+                title={inParts ? "Turned off while the job waits for a bit change: moving the X/Y zero would cut the rest in the wrong place" : undefined}
+                onClick={() => void m.act({ type: "setOrigin", z: false })}
+              >
+                Zero XY here
+              </button>
               <button className={quiet} disabled={!idle} onClick={() => void m.act({ type: "setOrigin", z: true })}>Zero Z here</button>
               <button
                 className={`${quiet} col-span-2`}
@@ -320,9 +334,28 @@ export function MachinePanel() {
             </div>
           </Section>
 
+          {machineKind === "cnc" && !inParts && !running && (
+            <Section title="Touch plate">
+              <ProbeControls disabled={!idle} />
+            </Section>
+          )}
+
           <Section title="Job">
-            {!program && <p className="text-muted">Generate the G-code in Operations first.</p>}
-            {program && !running && (
+            {m.state === "tool" &&
+              (m.jobAtc ? (
+                <p role="alert" className="text-accent">
+                  The automatic tool changer is changing the bit. Stopping during an automatic change can leave the tool
+                  half-released. Check the spindle by hand before running again.
+                </p>
+              ) : (
+                <p role="alert" className="text-accent">
+                  The machine is waiting for a bit change that Kerf can't help with in this mode. Stop the job, or finish
+                  the change with the machine's own controls.
+                </p>
+              ))}
+            {waitingForBit && <ChangeCard />}
+            {!program && !inParts && <p className="text-muted">Generate the G-code in Operations first.</p>}
+            {program && !running && !inParts && (
               <>
                 <p className="text-muted">
                   Coordinates are measured from the work zero. Framing moves at the current height, so
@@ -340,12 +373,32 @@ export function MachinePanel() {
                     {modeProblem}
                   </p>
                 )}
+                {program.parts.length > 1 && (
+                  <p>
+                    This job uses {program.parts.length} bits and stops {program.parts.length - 1} time
+                    {program.parts.length === 2 ? "" : "s"} to change them. Fit bit 1 (
+                    {program.parts[0].tool?.name ?? "the first bit"}) and set zero as usual.
+                  </p>
+                )}
+                {program.changeLift !== null && !(m.homed && m.settings[132] !== undefined) && (
+                  <p className="text-muted">
+                    Kerf can't check there's room for the bit to rise {program.changeLift} mm. Check by hand.
+                  </p>
+                )}
+                {program.needsHoming && !m.homed && (
+                  <p className="text-muted">This job changes bits at a fixed place on the machine, so home the machine first.</p>
+                )}
+                {program.atc && m.firmware !== "grblHal" && (
+                  <p className="text-muted">
+                    This job uses an automatic tool changer, which needs grblHAL. Kerf checks the firmware when you start.
+                  </p>
+                )}
                 <button
                   className={primary}
                   disabled={!idle || modeProblem !== null || program.programId === undefined}
                   onClick={() => {
                     if (armed && program.programId !== undefined) {
-                      void m.act({ type: "startJob", programId: program.programId });
+                      void m.startJob(program.programId, program.parts, program.atc);
                     }
                     setArmed(!armed);
                   }}
@@ -354,10 +407,15 @@ export function MachinePanel() {
                 </button>
               </>
             )}
-            {m.job && (
+            {m.job && !waitingForBit && (
               <div>
+                {runningPart && (
+                  <p className="mb-1">
+                    Part {m.parts!.part} of {m.parts!.of}: {runningPart.tool?.name ?? "bit"}
+                  </p>
+                )}
                 <div className="mb-1 flex justify-between">
-                  <span className="capitalize">{m.job.state}</span>
+                  <span className="capitalize">{m.job.state === "waitingForBit" ? "Finishing the part" : m.job.state}</span>
                   <span className="font-mono text-[12px] text-muted">
                     {m.job.acknowledged.toLocaleString()} / {m.job.total.toLocaleString()}
                   </span>

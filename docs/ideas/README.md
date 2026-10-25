@@ -7,7 +7,7 @@ Rough ideas for Kerf, waiting to be planned. To plan one, ask Claude to use the 
 | 1 | Camera view of the bed | built | [camera-view.md](camera-view.md) |
 | 2 | Auto-centre the design on the material | built, untested on hardware | [auto-centre.md](auto-centre.md) |
 | 3 | Control the connected machine (X, Y, Z, homing) | built (simulated controller only; hardware checks to do) | [machine-control.md](machine-control.md) |
-| 4 | Changing bits within one job (manual and automatic tool changes) | planned | [tool-changer.md](tool-changer.md) |
+| 4 | Changing bits within one job (manual and automatic tool changes) | built through step 7 except the fixed tool-length setter (simulated controller only; hardware checks to do) | [tool-changer.md](tool-changer.md) |
 
 ## 1. Camera view of the bed
 

@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::jog;
-use crate::response::{describe_alarm, describe_error, MachineState, Response, Status};
+use crate::probe;
+use crate::response::{describe_alarm, describe_error, Firmware, MachineState, Response, Status};
 use crate::stream::{Streamer, RX_BUFFER_BYTES};
 
 const FEED_HOLD: u8 = b'!';
@@ -43,6 +44,17 @@ const ACCELERATION: u32 = 120;
 /// GRBL's laser mode setting. With it on, the laser is off whenever the
 /// machine is not moving, and power changes do not stop motion.
 const LASER_MODE: u32 = 32;
+/// Asks for the work offsets: `[G54:...]`, `[G92:...]`, `[TLO:...]` and the
+/// rest, then `ok`.
+const OFFSETS_QUERY: &str = "$#";
+/// Asks which firmware this is; grblHAL answers with `[FIRMWARE:grblHAL]`.
+const BUILD_INFO_QUERY: &str = "$I";
+/// How long Continue or Probe waits for the fresh offsets it asks for. Less
+/// than [`REPLY_TIMEOUT`], so that the caller never hears of a failure while
+/// the worker goes ahead anyway.
+const READ_TIMEOUT: Duration = Duration::from_millis(1500);
+/// How closely the X/Y zero must match its value when the job paused.
+const ZERO_TOLERANCE: f64 = 0.001;
 
 /// What the machine cuts with, which decides how GRBL's laser mode must be set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +79,74 @@ pub enum JobState {
     Finished,
     Stopped,
     Failed,
+    /// A part has finished and the job waits, with the machine idle, for
+    /// the bit to be changed and Z set again.
+    WaitingForBit,
+}
+
+/// What a job needs beyond its lines.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JobOptions {
+    /// The job moves in machine coordinates (`G53`), which only mean
+    /// something once the machine has homed.
+    pub needs_homing: bool,
+    /// The controller changes bits itself at each `M6`, which only grblHAL
+    /// accepts.
+    pub atc: bool,
+    /// How high above the work zero the bit rises at each change, when it
+    /// changes over the work zero.
+    pub change_lift: Option<f64>,
+    /// Positions the job goes to in machine coordinates, checked against
+    /// the machine's travel.
+    pub machine_moves: Vec<[f64; 3]>,
+    /// How far above the work zero the bit must be at those positions: the
+    /// larger of the lift and the job's highest safe height.
+    pub change_clearance: Option<f64>,
+}
+
+/// Where a job with bit changes has got to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartsProgress {
+    /// The part running, or just finished, counting from 1.
+    pub part: usize,
+    pub of: usize,
+    /// The part has finished and the job waits for a bit change.
+    pub waiting: bool,
+    /// The machine has said both that the spindle is switched off (`M5`)
+    /// and that it reports a speed of 0.
+    pub spindle_off: bool,
+    /// Z has been set again since the job paused.
+    pub z_set: bool,
+    /// Z was set with the touch plate, so the clip must come off.
+    pub plate_used: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProbeState {
+    Running,
+    Done,
+    Failed,
+}
+
+/// The work offsets from a `$#` reply.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Offsets {
+    g54: Option<[f64; 3]>,
+    g92: Option<[f64; 3]>,
+    /// The tool length offset; grblHAL may give one value per axis.
+    tlo: Option<Vec<f64>>,
+}
+
+impl Offsets {
+    /// G92 and the tool length offset are both zero, so the work zero is
+    /// G54 alone.
+    fn only_g54(&self) -> bool {
+        let zero = |v: &f64| v.abs() < 1e-6;
+        self.g92.is_some_and(|g| g.iter().all(zero))
+            && self.tlo.as_ref().is_some_and(|t| t.iter().all(zero))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -85,11 +165,29 @@ pub enum Event {
         machine_position: Option<[f64; 3]>,
         feed: Option<f64>,
         spindle: Option<f64>,
+        /// Input pins reported as on, such as `P` for the probe.
+        pins: String,
     },
     /// The controller restarted and identified itself.
     Welcome {
         version: String,
+        firmware: Firmware,
     },
+    /// The firmware, as `$I` reported it.
+    Firmware {
+        firmware: Firmware,
+    },
+    /// Where a job with bit changes has got to; `None` once it has ended.
+    Parts {
+        progress: Option<PartsProgress>,
+    },
+    /// Setting Z with the touch plate.
+    Probe {
+        state: ProbeState,
+        message: Option<String>,
+    },
+    /// The probe test passed: the plate touching the bit was seen.
+    ProbeTested,
     Setting {
         number: u32,
         value: String,
@@ -133,8 +231,26 @@ const RESYNC_TIMEOUT: Duration = Duration::from_secs(1);
 /// How long a caller waits for the worker to accept or refuse a move.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The worker's answer to a request to move.
-type Reply = Sender<Result<(), String>>;
+/// Where the worker answers a request to move, or to start or carry on a job.
+struct Reply {
+    sender: Sender<Result<(), String>>,
+    asked: Instant,
+}
+
+impl Reply {
+    fn send(&self, answer: Result<(), String>) -> Result<(), mpsc::SendError<Result<(), String>>> {
+        self.sender.send(answer)
+    }
+
+    /// Whether the caller may have stopped waiting, or soon will. A request
+    /// answered this late is refused rather than carried out, so the caller
+    /// is never told it failed while it goes ahead.
+    fn late(&self) -> bool {
+        self.asked.elapsed() >= READ_TIMEOUT
+    }
+}
+
+const LATE: &str = "The machine did not answer in time. Try again.";
 
 enum Command {
     Line(String),
@@ -152,9 +268,41 @@ enum Command {
     HeldJogAlive,
     HeldJogStop,
     Reset,
-    StartJob(Streamer),
+    /// A job's parts: one for a job with no bit changes.
+    StartJob {
+        parts: Vec<Streamer>,
+        options: JobOptions,
+        reply: Reply,
+    },
     StopJob,
+    /// Streams the next part, once the checks on a fresh `$#` read pass.
+    ContinueJob {
+        plate_cleared: bool,
+        reply: Reply,
+    },
+    ProbeZ {
+        probe: ProbeSettings,
+        reply: Reply,
+    },
+    /// Watches for the probe pin, to show that the plate and clip work.
+    ProbeTest,
+    /// Makes the current position the work zero in X and Y, or in Z.
+    Zero {
+        xy: bool,
+        reply: Reply,
+    },
     Disconnect,
+}
+
+/// How to set Z with the touch plate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProbeSettings {
+    /// The plate's thickness in millimetres.
+    pub plate: f64,
+    /// The furthest the bit may go down.
+    pub travel: f64,
+    pub fast_feed: f64,
+    pub slow_feed: f64,
 }
 
 /// Whether the spindle or laser is switched on (`M3`/`M4`) or off (`M5`)
@@ -210,6 +358,27 @@ impl Connection {
             held: None,
             resync: None,
             work_offset: None,
+            position: None,
+            machine_position: None,
+            reported_z: None,
+            pins: String::new(),
+            firmware: None,
+            build_info_grblhal: false,
+            seen_home: false,
+            homed: false,
+            offsets: None,
+            reading: Offsets::default(),
+            reads_queued: 0,
+            reads_done: 0,
+            pending: None,
+            continuing: None,
+            probe_request: None,
+            starting: None,
+            on_g54: None,
+            probing: None,
+            probe_watch: false,
+            probe_tested: false,
+            last_parts: Some(None),
             last_status_query: Instant::now() - STATUS_INTERVAL,
             last_progress: Instant::now(),
             partial: Vec::new(),
@@ -231,8 +400,11 @@ impl Connection {
 
     /// Sends a command that the worker accepts or refuses, and waits for its answer.
     fn ask(&self, command: impl FnOnce(Reply) -> Command) -> Result<(), String> {
-        let (reply, answer) = mpsc::channel();
-        self.send(command(reply))?;
+        let (sender, answer) = mpsc::channel();
+        self.send(command(Reply {
+            sender,
+            asked: Instant::now(),
+        }))?;
         match answer.recv_timeout(REPLY_TIMEOUT) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => {
@@ -339,6 +511,18 @@ impl Connection {
     /// Starts streaming `program`. The machine must be idle, with laser mode
     /// set to suit `tool`.
     pub fn start_job(&self, program: &str, tool: Tool) -> Result<(), String> {
+        self.start_parts(&[program], tool, &JobOptions::default())
+    }
+
+    /// Starts a job made of `parts`, one per bit. Each part after the first
+    /// waits until [`continue_job`](Self::continue_job) is called and its
+    /// checks pass. One part runs exactly as [`start_job`](Self::start_job).
+    pub fn start_parts(
+        &self,
+        parts: &[&str],
+        tool: Tool,
+        options: &JobOptions,
+    ) -> Result<(), String> {
         match *lock(&self.state) {
             Some(MachineState::Idle) => {}
             Some(state) => {
@@ -349,11 +533,74 @@ impl Connection {
             None => return Err("The machine has not reported its state yet.".into()),
         }
         self.check_laser_mode(tool)?;
-        let streamer = Streamer::new(program)?;
-        if streamer.progress().1 == 0 {
+        if parts.is_empty() {
             return Err("The program is empty.".into());
         }
-        self.send(Command::StartJob(streamer))
+        let mut streamers = Vec::with_capacity(parts.len());
+        for part in parts {
+            let streamer = Streamer::new(part)?;
+            if streamer.progress().1 == 0 {
+                return Err("The program is empty.".into());
+            }
+            streamers.push(streamer);
+        }
+        let options = options.clone();
+        self.ask(|reply| Command::StartJob {
+            parts: streamers,
+            options,
+            reply,
+        })
+    }
+
+    /// Streams the next part of a job that waits for a bit change. Refused
+    /// unless the spindle is known to be off, Z has been set again, the X/Y
+    /// zero is as it was when the job paused, and the touch plate's clip is
+    /// off (`plate_cleared`) if the plate was used.
+    pub fn continue_job(&self, plate_cleared: bool) -> Result<(), String> {
+        self.ask(|reply| Command::ContinueJob {
+            plate_cleared,
+            reply,
+        })
+    }
+
+    /// Sets Z with a touch plate under the bit. Allowed when the machine
+    /// could be jogged, and only once the probe test has passed.
+    pub fn probe_z(&self, probe: ProbeSettings) -> Result<(), String> {
+        let ProbeSettings {
+            plate,
+            travel,
+            fast_feed,
+            slow_feed,
+        } = probe;
+        if !(plate.is_finite() && plate > 0.0 && plate <= 50.0) {
+            return Err("Enter the touch plate's thickness first (in the Device step).".into());
+        }
+        if !(travel.is_finite() && travel > 0.0 && travel <= 50.0) {
+            return Err("The probing distance must be between 0 and 50 mm.".into());
+        }
+        if !(fast_feed.is_finite() && fast_feed > 0.0 && fast_feed <= 500.0)
+            || !(slow_feed.is_finite() && slow_feed > 0.0 && slow_feed <= fast_feed)
+        {
+            return Err("The probing speeds must be slow: at most 500 mm/min, and the second no faster than the first.".into());
+        }
+        self.ask(|reply| Command::ProbeZ { probe, reply })
+    }
+
+    /// Starts watching for the probe pin. The test passes once the machine
+    /// reports the plate touching the bit.
+    pub fn probe_test(&self) -> Result<(), String> {
+        self.send(Command::ProbeTest)
+    }
+
+    /// Makes the current X and Y the work zero, in the active coordinate
+    /// system. Refused while a job waits for a bit change.
+    pub fn zero_xy(&self) -> Result<(), String> {
+        self.ask(|reply| Command::Zero { xy: true, reply })
+    }
+
+    /// Makes the current Z the work zero, in the active coordinate system.
+    pub fn zero_z(&self) -> Result<(), String> {
+        self.ask(|reply| Command::Zero { xy: false, reply })
     }
 
     /// Halts motion with a feed hold, then resets once the machine has stopped,
@@ -368,20 +615,27 @@ impl Connection {
     }
 
     fn check_laser_mode(&self, tool: Tool) -> Result<(), String> {
-        let settings = lock(&self.settings);
-        let Some(value) = settings.get(&LASER_MODE) else {
-            return Err("Kerf has not read the machine's settings yet, so it cannot check laser mode ($32). Wait a moment, or send $$ from the console, and try again.".into());
-        };
-        let on = value.trim().parse::<f64>().is_ok_and(|v| v == 1.0);
-        match tool {
-            Tool::Laser if !on => Err(format!(
-                "Laser mode is off on this machine ($32={value}). Without it the laser stays on whenever the machine pauses, and the head stops at every change of power. Send $32=1 from the console, then start again."
-            )),
-            Tool::Spindle if on => Err(
-                "Laser mode is on ($32=1), so the spindle would stop on every rapid move and restart without waiting to reach speed. For a router, send $32=0 from the console, then start again.".into(),
-            ),
-            _ => Ok(()),
+        match laser_mode_problem(&lock(&self.settings), tool) {
+            Some(problem) => Err(problem),
+            None => Ok(()),
         }
+    }
+}
+
+/// Why the machine's laser mode (`$32`) does not suit `tool`, if it does not.
+fn laser_mode_problem(settings: &HashMap<u32, String>, tool: Tool) -> Option<String> {
+    let Some(value) = settings.get(&LASER_MODE) else {
+        return Some("Kerf has not read the machine's settings yet, so it cannot check laser mode ($32). Wait a moment, or send $$ from the console, and try again.".into());
+    };
+    let on = value.trim().parse::<f64>().is_ok_and(|v| v == 1.0);
+    match tool {
+        Tool::Laser if !on => Some(format!(
+            "Laser mode is off on this machine ($32={value}). Without it the laser stays on whenever the machine pauses, and the head stops at every change of power. Send $32=1 from the console, then start again."
+        )),
+        Tool::Spindle if on => Some(
+            "Laser mode is on ($32=1), so the spindle would stop on every rapid move and restart without waiting to reach speed. For a router, send $32=0 from the console, then start again.".into(),
+        ),
+        _ => None,
     }
 }
 
@@ -429,6 +683,46 @@ struct Worker<F> {
     resync: Option<Resync>,
     /// The last `WCO` reported; GRBL only sends it every few reports.
     work_offset: Option<[f64; 3]>,
+    /// The last work and machine positions worked out from a status report.
+    position: Option<[f64; 3]>,
+    machine_position: Option<[f64; 3]>,
+    /// The Z the last status report itself gave: machine Z from `MPos`, or
+    /// work Z from `WPos`, with no stored offset applied.
+    reported_z: Option<ReportedZ>,
+    /// Input pins on in the last status report; `P` is the probe.
+    pins: String,
+    firmware: Option<Firmware>,
+    /// A `[FIRMWARE:grblHAL]` line came with the `$I` reply in flight.
+    build_info_grblhal: bool,
+    /// Homing was seen under way; once the machine is idle after it, it has homed.
+    seen_home: bool,
+    /// The machine has homed since Kerf connected, with no alarm or reset since.
+    homed: bool,
+    /// The last complete `$#` reply, and the one coming in.
+    offsets: Option<Offsets>,
+    reading: Offsets,
+    /// `$#` reads asked for, and answered, since connecting. A request that
+    /// needs a fresh read waits for the one it asked for.
+    reads_queued: u64,
+    reads_done: u64,
+    /// The parts of a job still to run, while it has more than one.
+    pending: Option<PendingParts>,
+    /// A Continue waiting for its fresh `$#` read.
+    continuing: Option<ReadRequest<bool>>,
+    /// A probe waiting for its fresh `$#` read before it starts.
+    probe_request: Option<ReadRequest<ProbeSettings>>,
+    /// A job with bit changes waiting for its fresh `$#` read before it starts.
+    starting: Option<ReadRequest<(Vec<Streamer>, JobOptions)>>,
+    /// Whether G54 is the coordinate system in use, from the last `[GC:...]`
+    /// report; `None` until one says, or after a typed line may change it.
+    on_g54: Option<bool>,
+    probing: Option<ProbeRun>,
+    /// The probe test is watching for the pin.
+    probe_watch: bool,
+    /// The probe test has passed since connecting.
+    probe_tested: bool,
+    /// The last [`Event::Parts`] sent, so that only changes are sent.
+    last_parts: Option<Option<PartsProgress>>,
     last_status_query: Instant,
     last_progress: Instant,
     partial: Vec<u8>,
@@ -447,6 +741,94 @@ struct HeldJog {
     sent: u32,
     /// When the interface last said it is still held.
     alive: Instant,
+}
+
+/// The parts of a job after the first, kept apart from `job` and
+/// `waiting_job` so that while the job waits for a bit change the machine
+/// can be jogged and zeroed under the usual rules.
+struct PendingParts {
+    parts: VecDeque<Streamer>,
+    /// The part running or just finished, counting from 1.
+    part: usize,
+    of: usize,
+    stage: PartStage,
+    /// How far the part that just finished got, for reporting.
+    finished: (usize, usize),
+    /// The offsets read once the part had finished.
+    offsets_at_pause: Option<Offsets>,
+    z_set: bool,
+    plate_used: bool,
+    change_lift: Option<f64>,
+    machine_moves: Vec<[f64; 3]>,
+    change_clearance: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartStage {
+    /// A part is being streamed (or waits to start).
+    Running,
+    /// Its last line has been answered; it is over once a status report
+    /// after that says the machine is idle.
+    Ending,
+    /// Over; waiting for the `$#` read that records the offsets.
+    Reading(u64),
+    /// Waiting for the bit change.
+    Waiting,
+}
+
+/// The Z a status report gave, as it gave it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ReportedZ {
+    Machine(f64),
+    Work(f64),
+}
+
+/// A request answered once a `$#` read it asked for has come back.
+struct ReadRequest<T> {
+    ticket: u64,
+    reply: Reply,
+    value: T,
+}
+
+/// Setting Z with the touch plate, one line at a time.
+struct ProbeRun {
+    settings: ProbeSettings,
+    stage: ProbeStage,
+    /// The line in flight, whose answer moves the sequence on.
+    line: String,
+    /// The work offset in Z when probing began; G92 and the tool length
+    /// offset were zero, so this turns machine Z into work Z.
+    g54_z: f64,
+    /// Machine Z of the latest touch, if the line in flight touched.
+    touched: Option<f64>,
+    /// Work Z of the first, quick touch.
+    first_work_z: f64,
+}
+
+const PROBE_FAILED: &str = "The probe didn't touch (or was already touching). Unlock, check the clip and the plate, and try again.";
+const Z_NOT_SET: &str = "Set Z again for the new bit before continuing: probe it, or lower it onto the material and press Zero Z here.";
+const NO_OFFSETS: &str =
+    "The machine did not report its work offsets in time, so Kerf has not carried on. Try again.";
+const INTERRUPTED: &str = "That was interrupted before the machine answered. Try again.";
+
+/// A number with up to three decimals and no trailing zeros, for messages.
+fn trim(value: f64) -> String {
+    let text = format!("{value:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ProbeStage {
+    Fast,
+    BackOff,
+    Slow,
+    SetZ,
+    Lift,
+    /// Waiting for the `$#` read that shows Z was set to this.
+    Confirm {
+        ticket: u64,
+        g54_z: f64,
+    },
 }
 
 struct Resync {
@@ -513,6 +895,7 @@ impl<F: FnMut(Event)> Worker<F> {
             }
 
             self.pump()?;
+            self.expire_requests();
 
             if self.last_status_query.elapsed() >= STATUS_INTERVAL {
                 self.port.write_all(&[STATUS_QUERY])?;
@@ -548,11 +931,25 @@ impl<F: FnMut(Event)> Worker<F> {
     fn handle(&mut self, command: Command) -> std::io::Result<()> {
         match command {
             Command::Line(line) => {
-                if self.job.is_some() || self.waiting_job.is_some() {
+                if self.job.is_some() || self.waiting_job.is_some() || self.part_ending() {
                     self.emit(Event::Line {
                         text: format!("Not sent while a job is running: {line}"),
                     });
+                } else if self.checking() {
+                    self.emit(Event::Line {
+                        text: format!(
+                            "Not sent while Kerf is probing or checking the machine: {line}"
+                        ),
+                    });
                 } else {
+                    if is_offsets_query(&line) {
+                        self.reads_queued += 1;
+                    }
+                    // A line that may change the work zero in use: ask again.
+                    let reread = selects_work_zero(&line);
+                    if reread {
+                        self.on_g54 = None;
+                    }
                     // Counted from when it is queued, so a move asked for
                     // after a typed M3 is refused even before the M3 is sent.
                     if let Some(on) = spindle_words(&line) {
@@ -563,6 +960,9 @@ impl<F: FnMut(Event)> Worker<F> {
                         };
                     }
                     self.manual_queue.push_back(line);
+                    if reread {
+                        self.manual_queue.push_back(RESYNC_MARKER.to_owned());
+                    }
                 }
             }
             Command::Realtime(CYCLE_START) if self.reset_pending.is_some() => {
@@ -604,9 +1004,113 @@ impl<F: FnMut(Event)> Worker<F> {
                 self.after_reset();
                 self.abandon(JobState::Stopped, None);
             }
-            Command::StartJob(streamer) => {
-                self.stop_held(Some("Stopped moving: a job was started."))?;
-                self.waiting_job = Some(streamer);
+            Command::StartJob {
+                parts,
+                options,
+                reply,
+            } => {
+                let answer = if reply.late() {
+                    Err(LATE.into())
+                } else {
+                    self.check_can_start(&options)
+                };
+                let checked = parts.len() > 1
+                    || options.atc
+                    || options.needs_homing
+                    || options.change_lift.is_some();
+                match answer {
+                    // A job that changes bits starts from a fresh read of
+                    // the offsets, checked before anything is sent.
+                    Ok(()) if checked => {
+                        let ticket = self.queue_offsets_read();
+                        self.starting = Some(ReadRequest {
+                            ticket,
+                            reply,
+                            value: (parts, options),
+                        });
+                    }
+                    Ok(()) => {
+                        self.begin_job(parts, options)?;
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            Command::ContinueJob {
+                plate_cleared,
+                reply,
+            } => {
+                let answer = if reply.late() {
+                    Err(LATE.into())
+                } else {
+                    self.check_can_continue()
+                };
+                match answer {
+                    Ok(()) => {
+                        // Answered once a fresh read of the offsets is back.
+                        let ticket = self.queue_offsets_read();
+                        self.continuing = Some(ReadRequest {
+                            ticket,
+                            reply,
+                            value: plate_cleared,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            Command::ProbeZ { probe, reply } => {
+                let answer = if reply.late() {
+                    Err(LATE.into())
+                } else {
+                    self.check_can_probe()
+                };
+                match answer {
+                    Ok(()) => {
+                        let ticket = self.queue_offsets_read();
+                        self.probe_request = Some(ReadRequest {
+                            ticket,
+                            reply,
+                            value: probe,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            Command::ProbeTest => {
+                self.probe_watch = true;
+                if self.pins.contains('P') {
+                    self.probe_passed();
+                }
+            }
+            Command::Zero { xy, reply } => {
+                let answer = if reply.late() {
+                    Err(LATE.into())
+                } else if self.job.is_some() || self.waiting_job.is_some() || self.part_ending() {
+                    Err("A job is running.".into())
+                } else if self.checking() {
+                    Err("Kerf is probing or checking the machine. Try again in a moment.".into())
+                } else if xy && self.pending.is_some() {
+                    Err("Zero XY is turned off while the job waits for a bit change: moving the X/Y zero would cut the rest of the job in the wrong place.".into())
+                } else {
+                    // P0 is the coordinate system in use, which is the one
+                    // the job's G54 and the checks at Continue read.
+                    self.manual_queue.push_back(
+                        if xy {
+                            "G10 L20 P0 X0 Y0"
+                        } else {
+                            "G10 L20 P0 Z0"
+                        }
+                        .to_owned(),
+                    );
+                    Ok(())
+                };
+                let _ = reply.send(answer);
             }
             Command::StopJob if self.held.is_some() => {
                 // A jog is stopped with a jog cancel, never a feed hold: a hold
@@ -614,9 +1118,13 @@ impl<F: FnMut(Event)> Worker<F> {
                 self.stop_held(None)?;
             }
             Command::StopJob => {
-                if *lock(&self.state) == Some(MachineState::Home) {
+                if matches!(
+                    *lock(&self.state),
+                    Some(MachineState::Home | MachineState::Tool)
+                ) {
                     // GRBL ignores a feed hold while homing; only a soft reset
                     // stops it. It then raises an alarm (homing aborted).
+                    // grblHAL waiting at a tool change is stopped the same way.
                     self.port.write_all(&[SOFT_RESET])?;
                     self.after_reset();
                     self.abandon(JobState::Stopped, None);
@@ -625,7 +1133,9 @@ impl<F: FnMut(Event)> Worker<F> {
                     // working through the last lines of one, or a jog.
                     self.port.write_all(&[FEED_HOLD])?;
                     self.reset_pending.get_or_insert_with(Instant::now);
-                } else if self.waiting_job.is_some() {
+                } else if self.waiting_job.is_some() || self.pending.is_some() || self.checking() {
+                    // Waiting for a bit change, or about to probe: nothing
+                    // is moving, so ending the job is enough.
                     self.abandon(JobState::Stopped, None);
                 }
             }
@@ -638,9 +1148,26 @@ impl<F: FnMut(Event)> Worker<F> {
     /// cannot switch a laser or spindle on, but they carry along one that is
     /// already on, so it must be known to be off.
     fn check_can_move(&self) -> Result<(), String> {
-        if self.job.is_some() || self.waiting_job.is_some() {
+        if self.job.is_some() || self.waiting_job.is_some() || self.part_ending() {
             return Err("A job is running.".into());
         }
+        if self.checking() {
+            return Err("Kerf is probing or checking the machine. Try again in a moment.".into());
+        }
+        self.check_machine_free()
+    }
+
+    /// A part has finished but the job is not yet waiting for the bit
+    /// change: the machine has not yet been seen idle, or the offsets read.
+    fn part_ending(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|p| matches!(p.stage, PartStage::Ending | PartStage::Reading(_)))
+    }
+
+    /// The checks before moving that do not depend on a job: nothing being
+    /// stopped, the spindle known to be off, and nothing else waiting.
+    fn check_machine_free(&self) -> Result<(), String> {
         if self.reset_pending.is_some() {
             return Err("The machine is being stopped.".into());
         }
@@ -719,6 +1246,557 @@ impl<F: FnMut(Event)> Worker<F> {
         Ok(())
     }
 
+    /// A `$n` setting as a number, if it has been read.
+    fn setting(&self, number: u32) -> Option<f64> {
+        lock(&self.settings)
+            .get(&number)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    }
+
+    /// Why a job must not start now, if it must not. Only the checks the
+    /// worker can make; the caller has checked the state and laser mode.
+    fn check_can_start(&mut self, options: &JobOptions) -> Result<(), String> {
+        if self.pending.is_some() {
+            return Err("A job is waiting for a bit change. Continue or stop it first.".into());
+        }
+        if self.job.is_some() || self.waiting_job.is_some() {
+            return Err("A job is already running.".into());
+        }
+        if self.checking() {
+            return Err("Kerf is probing or checking the machine. Try again in a moment.".into());
+        }
+        if options.atc {
+            match self.firmware {
+                Some(Firmware::GrblHal) => {}
+                Some(Firmware::Grbl) => return Err("This job changes bits with an automatic tool changer (M6), which needs grblHAL. This machine runs Grbl, which refuses M6.".into()),
+                None => {
+                    let asked = self
+                        .manual_queue
+                        .iter()
+                        .chain(&self.manual_in_flight)
+                        .any(|l| l.eq_ignore_ascii_case(BUILD_INFO_QUERY));
+                    if !asked {
+                        self.manual_queue.push_back(BUILD_INFO_QUERY.to_owned());
+                    }
+                    return Err("Kerf is checking which firmware the machine runs. Try again in a moment.".into());
+                }
+            }
+        }
+        if options.needs_homing && !self.homed {
+            return Err("This job goes to a fixed place on the machine to change bits, which needs the machine to have homed since Kerf connected. Home it, then start again.".into());
+        }
+        if !options.machine_moves.is_empty() {
+            let travel = [
+                self.setting(TRAVEL),
+                self.setting(TRAVEL + 1),
+                self.setting(TRAVEL + 2),
+            ];
+            let [Some(tx), Some(ty), Some(tz)] = travel else {
+                return Err("Kerf has not read the machine's travel ($130 to $132) yet, so it cannot check the bit change place. Wait a moment, or send $$ from the console, and try again.".into());
+            };
+            for [x, y, z] in &options.machine_moves {
+                // After homing, GRBL's machine coordinates run from 0 at the
+                // home corner to minus the travel.
+                let within = |v: f64, travel: f64| v <= 0.0 && v >= -travel;
+                let inside = within(*x, tx) && within(*y, ty) && within(*z, tz);
+                if !inside {
+                    return Err(format!(
+                        "The bit change place (X{x} Y{y} Z{z} from home) is outside the machine's travel ({tx} × {ty} × {tz} mm). Change it in the Device step and generate again."
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Kerf is waiting on the machine for a probe, a Continue or a Start.
+    fn checking(&self) -> bool {
+        self.probing.is_some()
+            || self.probe_request.is_some()
+            || self.continuing.is_some()
+            || self.starting.is_some()
+    }
+
+    /// Why the work zero in use is not one Kerf can rely on, if it is not.
+    /// Every part asserts G54, and the checks read G54, so it must be G54.
+    fn check_on_g54(&self) -> Result<(), String> {
+        match self.on_g54 {
+            Some(true) => Ok(()),
+            Some(false) => Err("The machine is using a work zero other than G54. Kerf sets and checks G54, so send G54 from the console, then set zero and try again.".into()),
+            None => Err("Kerf has not yet read which work zero the machine is using. Send $G from the console, or wait a moment, and try again.".into()),
+        }
+    }
+
+    /// The checks on the fresh offsets before a job with bit changes
+    /// starts, then it starts.
+    fn finish_start(&mut self, parts: Vec<Streamer>, options: JobOptions) -> Result<(), String> {
+        self.check_can_start(&options)?;
+        let offsets = self.offsets.clone().unwrap_or_default();
+        if !offsets.only_g54() {
+            return Err("A G92 offset or a tool length offset is set, so Kerf could not check the zero at the bit changes. Clear it (send G92.1 and G49 from the console), set zero, then start again.".into());
+        }
+        let Some(g54) = offsets.g54 else {
+            return Err(NO_OFFSETS.into());
+        };
+        self.check_on_g54()?;
+        self.check_lift(options.change_lift, Some(g54[2]))?;
+        check_clearance(&options.machine_moves, options.change_clearance, g54[2])?;
+        self.begin_job(parts, options)
+            .map_err(|e| format!("Kerf could not start the job: {e}"))
+    }
+
+    /// Starts a job that has passed its checks.
+    fn begin_job(&mut self, parts: Vec<Streamer>, options: JobOptions) -> std::io::Result<()> {
+        self.stop_held(Some("Stopped moving: a job was started."))?;
+        let of = parts.len();
+        let mut parts = VecDeque::from(parts);
+        self.waiting_job = parts.pop_front();
+        if of > 1 {
+            self.pending = Some(PendingParts {
+                parts,
+                part: 1,
+                of,
+                stage: PartStage::Running,
+                finished: (0, 0),
+                offsets_at_pause: None,
+                z_set: false,
+                plate_used: false,
+                change_lift: options.change_lift,
+                machine_moves: options.machine_moves,
+                change_clearance: options.change_clearance,
+            });
+            self.emit_parts();
+        }
+        Ok(())
+    }
+
+    /// Whether the bit can rise `lift` above the work zero, whose machine Z
+    /// is `zero_z`, without passing the top of Z. Only checked once the
+    /// machine has homed and its Z travel is known; otherwise the person is
+    /// asked to check by hand.
+    fn check_lift(&self, lift: Option<f64>, zero_z: Option<f64>) -> Result<(), String> {
+        let (Some(lift), Some(zero_z)) = (lift, zero_z) else {
+            return Ok(());
+        };
+        if !self.homed || self.setting(TRAVEL + 2).is_none() {
+            return Ok(());
+        }
+        // After homing, machine Z0 is the top of Z.
+        if zero_z + lift > 1e-6 {
+            let room = (-zero_z).max(0.0);
+            return Err(format!(
+                "The bit can't rise {} mm above the material here; there's only {} mm left. Lower \"Raise for changing bits\" to {} or less and generate again.",
+                trim(lift),
+                trim(room),
+                room.floor()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Why the next part must not start now, before its fresh offsets read.
+    fn check_can_continue(&self) -> Result<(), String> {
+        let Some(pending) = &self.pending else {
+            return Err("No job is waiting for a bit change.".into());
+        };
+        if pending.stage != PartStage::Waiting {
+            return Err("The part has not finished yet.".into());
+        }
+        if self.checking() {
+            return Err("Kerf is probing or checking the machine. Try again in a moment.".into());
+        }
+        if *lock(&self.state) != Some(MachineState::Idle) {
+            return Err("The machine must be idle to carry on.".into());
+        }
+        self.check_machine_free()?;
+        if !self.manual_in_flight.is_empty() {
+            return Err(
+                "The machine is still busy with earlier commands. Try again in a moment.".into(),
+            );
+        }
+        if !pending.z_set {
+            return Err(Z_NOT_SET.into());
+        }
+        Ok(())
+    }
+
+    /// The checks on the fresh offsets, then the next part is started.
+    fn finish_continue(&mut self, plate_cleared: bool) -> Result<(), String> {
+        self.check_can_continue()?;
+        let offsets = self.offsets.clone().unwrap_or_default();
+        let pending = self.pending.as_ref().expect("checked above");
+        let pause = pending.offsets_at_pause.clone().unwrap_or_default();
+        let (Some(now), Some(then)) = (offsets.g54, pause.g54) else {
+            return Err("The machine did not report its work offsets, so Kerf cannot check the X/Y zero. Stop the job.".into());
+        };
+        let xy_kept = (now[0] - then[0]).abs() <= ZERO_TOLERANCE
+            && (now[1] - then[1]).abs() <= ZERO_TOLERANCE;
+        if !xy_kept || !offsets.only_g54() {
+            return Err("The X/Y zero (or an offset) has changed since the job paused, so the next part would be cut in the wrong place. Stop the job.".into());
+        }
+        if pending.plate_used {
+            if self.pins.contains('P') {
+                return Err("The probe still reads as touching. Take the clip off the bit and move the plate away.".into());
+            }
+            if !plate_cleared {
+                return Err(
+                    "Take the clip off the bit and move the plate away, then tick the box.".into(),
+                );
+            }
+        }
+        if let Some(problem) = laser_mode_problem(&lock(&self.settings), Tool::Spindle) {
+            return Err(problem);
+        }
+        self.check_on_g54()?;
+        self.check_lift(pending.change_lift, Some(now[2]))?;
+        check_clearance(&pending.machine_moves, pending.change_clearance, now[2])?;
+
+        let pending = self.pending.as_mut().expect("checked above");
+        pending.part += 1;
+        pending.stage = PartStage::Running;
+        pending.z_set = false;
+        pending.plate_used = false;
+        pending.offsets_at_pause = None;
+        self.waiting_job = pending.parts.pop_front();
+        self.emit_parts();
+        Ok(())
+    }
+
+    /// Why probing must not start now, before its fresh offsets read.
+    fn check_can_probe(&self) -> Result<(), String> {
+        self.check_can_move()?;
+        if *lock(&self.state) != Some(MachineState::Idle) {
+            return Err("The machine must be idle to probe.".into());
+        }
+        if !self.manual_in_flight.is_empty() {
+            return Err(
+                "The machine is still busy with earlier commands. Try again in a moment.".into(),
+            );
+        }
+        if !self.probe_tested {
+            return Err("Test the probe first: touch the plate to the bit and check that the light comes on.".into());
+        }
+        self.check_on_g54()?;
+        if self.pins.contains('P') {
+            return Err("The probe already reads as touching. Check the clip and the plate are apart, then try again.".into());
+        }
+        Ok(())
+    }
+
+    /// Sends the first probing line, once the fresh offsets show nothing
+    /// that would make the new Z wrong.
+    fn start_probe(&mut self, settings: ProbeSettings) -> Result<(), String> {
+        self.check_can_probe()?;
+        let offsets = self.offsets.clone().unwrap_or_default();
+        if !offsets.only_g54() {
+            return Err("A G92 offset or a tool length offset is set, which would make the new Z wrong. Clear it (send G92.1 and G49 from the console), then try again.".into());
+        }
+        let Some(g54) = offsets.g54 else {
+            return Err("The machine did not report its work offsets. Try again.".into());
+        };
+        // Work Z from what the last report itself said and the fresh G54,
+        // never from a work offset the reports may not have repeated lately.
+        // G92 and the tool length offset are zero, so the work zero is G54.
+        let (work_z, machine_z) = match self.reported_z {
+            Some(ReportedZ::Machine(z)) => (z - g54[2], z),
+            Some(ReportedZ::Work(z)) => (z, z + g54[2]),
+            None => {
+                return Err(
+                    "Kerf does not know where the bit is yet. Wait a moment and try again.".into(),
+                )
+            }
+        };
+        let work = [0.0, 0.0, work_z];
+        let mut travel = settings.travel;
+        // Never further than the bottom of Z, when that is known.
+        if let (true, Some(z_travel)) = (self.homed, self.setting(TRAVEL + 2)) {
+            travel = travel.min(machine_z + z_travel);
+        }
+        if travel < 0.5 {
+            return Err("There is no room left below the bit to probe.".into());
+        }
+        let line = probe::fast_line(work[2], travel, settings.fast_feed);
+        self.manual_queue.push_back(line.clone());
+        self.probing = Some(ProbeRun {
+            settings,
+            stage: ProbeStage::Fast,
+            line,
+            g54_z: g54[2],
+            touched: None,
+            first_work_z: 0.0,
+        });
+        // The clip is on from now, whatever happens.
+        if let Some(pending) = &mut self.pending {
+            pending.plate_used = true;
+        }
+        self.emit(Event::Probe {
+            state: ProbeState::Running,
+            message: None,
+        });
+        self.emit_parts();
+        Ok(())
+    }
+
+    /// The probing line in flight was answered: send the next, if the
+    /// touches it needed were reported.
+    fn probe_answered(&mut self) {
+        let Some(run) = &mut self.probing else {
+            return;
+        };
+        let ProbeSettings {
+            plate, slow_feed, ..
+        } = run.settings;
+        let next = match run.stage {
+            ProbeStage::Fast => run.touched.take().map(|machine_z| {
+                run.first_work_z = machine_z - run.g54_z;
+                run.stage = ProbeStage::BackOff;
+                probe::back_off_line(run.first_work_z)
+            }),
+            ProbeStage::BackOff => {
+                run.stage = ProbeStage::Slow;
+                Some(probe::slow_line(run.first_work_z, slow_feed))
+            }
+            // Only now, after a reported touch, is Z set.
+            ProbeStage::Slow => run.touched.take().map(|machine_z| {
+                run.stage = ProbeStage::SetZ;
+                run.g54_z = machine_z - plate;
+                probe::set_z_line(machine_z, plate)
+            }),
+            ProbeStage::SetZ => {
+                run.stage = ProbeStage::Lift;
+                Some(probe::lift_line(plate))
+            }
+            ProbeStage::Lift => {
+                run.stage = ProbeStage::Confirm {
+                    ticket: self.reads_queued + 1,
+                    g54_z: run.g54_z,
+                };
+                run.line.clear();
+                self.queue_offsets_read();
+                return;
+            }
+            ProbeStage::Confirm { .. } => return,
+        };
+        match next {
+            Some(next) => {
+                run.line = next.clone();
+                self.manual_queue.push_back(next);
+            }
+            None => self.probe_failed(PROBE_FAILED),
+        }
+    }
+
+    /// Ends probing without setting Z (or without confirming it), and says why.
+    fn probe_failed(&mut self, message: &str) {
+        if self.probing.take().is_some() {
+            self.emit(Event::Probe {
+                state: ProbeState::Failed,
+                message: Some(message.to_owned()),
+            });
+        }
+    }
+
+    fn probe_passed(&mut self) {
+        self.probe_watch = false;
+        self.probe_tested = true;
+        self.emit(Event::ProbeTested);
+    }
+
+    /// Queues a `$#` read and returns its ticket.
+    fn queue_offsets_read(&mut self) -> u64 {
+        self.manual_queue.push_back(OFFSETS_QUERY.to_owned());
+        self.reads_queued += 1;
+        self.reads_queued
+    }
+
+    /// After lines were dropped unsent or unanswered: counts the `$#` reads
+    /// still to come, and refuses requests whose read is gone.
+    fn recount_reads(&mut self) {
+        let left = self
+            .manual_queue
+            .iter()
+            .chain(&self.manual_in_flight)
+            .filter(|l| is_offsets_query(l))
+            .count() as u64;
+        self.reads_queued = self.reads_done + left;
+        let queued = self.reads_queued;
+        if self.continuing.as_ref().is_some_and(|r| r.ticket > queued) {
+            let request = self.continuing.take().expect("checked");
+            let _ = request.reply.send(Err(INTERRUPTED.into()));
+        }
+        if self
+            .probe_request
+            .as_ref()
+            .is_some_and(|r| r.ticket > queued)
+        {
+            let request = self.probe_request.take().expect("checked");
+            let _ = request.reply.send(Err(INTERRUPTED.into()));
+        }
+        if self.starting.as_ref().is_some_and(|r| r.ticket > queued) {
+            let request = self.starting.take().expect("checked");
+            let _ = request.reply.send(Err(INTERRUPTED.into()));
+        }
+        if self.probing.as_ref().is_some_and(
+            |r| matches!(r.stage, ProbeStage::Confirm { ticket, .. } if ticket > queued),
+        ) {
+            self.probe_failed(PROBE_FAILED);
+        }
+    }
+
+    /// A `$#` read has been answered (or refused, if `ok` is false).
+    fn finish_read(&mut self, ok: bool) {
+        self.reads_done += 1;
+        let reading = std::mem::take(&mut self.reading);
+        if ok {
+            self.offsets = Some(reading);
+        }
+        let done = self.reads_done;
+        let offsets = self.offsets.clone().filter(|_| ok);
+        let mut waiting_now = None;
+        let mut read_again = false;
+        if let Some(pending) = &mut self.pending {
+            match pending.stage {
+                PartStage::Reading(ticket) if done >= ticket => {
+                    match offsets.filter(|o| o.g54.is_some()) {
+                        Some(offsets) => {
+                            pending.offsets_at_pause = Some(offsets);
+                            pending.stage = PartStage::Waiting;
+                            waiting_now = Some(pending.finished);
+                        }
+                        None => read_again = true,
+                    }
+                }
+                PartStage::Waiting => {
+                    // Z is set again once G54 Z differs from the pause.
+                    let then = pending.offsets_at_pause.as_ref().and_then(|o| o.g54);
+                    let now = offsets.and_then(|o| o.g54);
+                    if let (Some(then), Some(now)) = (then, now) {
+                        if (then[2] - now[2]).abs() > 1e-4 {
+                            pending.z_set = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if read_again {
+            let ticket = self.queue_offsets_read();
+            if let Some(pending) = &mut self.pending {
+                pending.stage = PartStage::Reading(ticket);
+            }
+        }
+        if let Some((acknowledged, total)) = waiting_now {
+            self.emit(Event::Job {
+                state: JobState::WaitingForBit,
+                acknowledged,
+                total,
+                message: None,
+            });
+        }
+        if self.continuing.as_ref().is_some_and(|r| r.ticket <= done) {
+            let request = self.continuing.take().expect("checked");
+            let answer = if !ok {
+                Err(NO_OFFSETS.into())
+            } else if request.reply.late() {
+                Err(LATE.into())
+            } else {
+                self.finish_continue(request.value)
+            };
+            let _ = request.reply.send(answer);
+        }
+        if self.starting.as_ref().is_some_and(|r| r.ticket <= done) {
+            let request = self.starting.take().expect("checked");
+            let (parts, options) = request.value;
+            let answer = if !ok {
+                Err(NO_OFFSETS.into())
+            } else if request.reply.late() {
+                Err(LATE.into())
+            } else {
+                self.finish_start(parts, options)
+            };
+            let _ = request.reply.send(answer);
+        }
+        if self
+            .probe_request
+            .as_ref()
+            .is_some_and(|r| r.ticket <= done)
+        {
+            let request = self.probe_request.take().expect("checked");
+            let answer = if !ok {
+                Err(NO_OFFSETS.into())
+            } else if request.reply.late() {
+                Err(LATE.into())
+            } else {
+                self.start_probe(request.value)
+            };
+            let _ = request.reply.send(answer);
+        }
+        if let Some(ProbeRun {
+            stage: ProbeStage::Confirm { ticket, g54_z },
+            ..
+        }) = self.probing
+        {
+            if done >= ticket {
+                let set = self
+                    .offsets
+                    .as_ref()
+                    .and_then(|o| o.g54)
+                    .is_some_and(|g| ok && (g[2] - g54_z).abs() <= ZERO_TOLERANCE);
+                if set {
+                    self.probing = None;
+                    if let Some(pending) = &mut self.pending {
+                        pending.z_set = true;
+                        pending.plate_used = true;
+                    }
+                    self.emit(Event::Probe {
+                        state: ProbeState::Done,
+                        message: None,
+                    });
+                } else {
+                    self.probe_failed("Kerf could not confirm the new Z. Set Z again.");
+                }
+            }
+        }
+        self.emit_parts();
+    }
+
+    /// Fails requests that waited for a read when the deadline has passed.
+    fn expire_requests(&mut self) {
+        if self.continuing.as_ref().is_some_and(|r| r.reply.late()) {
+            let request = self.continuing.take().expect("checked");
+            let _ = request.reply.send(Err(NO_OFFSETS.into()));
+        }
+        if self.probe_request.as_ref().is_some_and(|r| r.reply.late()) {
+            let request = self.probe_request.take().expect("checked");
+            let _ = request.reply.send(Err(NO_OFFSETS.into()));
+        }
+        if self.starting.as_ref().is_some_and(|r| r.reply.late()) {
+            let request = self.starting.take().expect("checked");
+            let _ = request.reply.send(Err(NO_OFFSETS.into()));
+        }
+    }
+
+    fn parts_progress(&self) -> Option<PartsProgress> {
+        self.pending.as_ref().map(|p| PartsProgress {
+            part: p.part,
+            of: p.of,
+            waiting: p.stage == PartStage::Waiting,
+            spindle_off: self.spindle_mode == SpindleMode::Off && self.spindle == Some(0.0),
+            z_set: p.z_set,
+            plate_used: p.plate_used,
+        })
+    }
+
+    /// Sends [`Event::Parts`] if it has changed since last sent.
+    fn emit_parts(&mut self) {
+        let now = self.parts_progress();
+        if self.last_parts.as_ref() != Some(&now) {
+            self.last_parts = Some(now.clone());
+            self.emit(Event::Parts { progress: now });
+        }
+    }
+
     /// Whether the last report says the machine is, or may be, in motion or
     /// with its spindle or laser on.
     fn is_moving(&self) -> bool {
@@ -749,6 +1827,9 @@ impl<F: FnMut(Event)> Worker<F> {
         self.held = None;
         self.resync = None;
         self.spindle_mode = SpindleMode::Unknown;
+        // A reset while moving loses the position, so homing counts no more.
+        self.homed = false;
+        self.seen_home = false;
     }
 
     /// Stops a held jog, if one is running, and says why when there is a
@@ -786,6 +1867,7 @@ impl<F: FnMut(Event)> Worker<F> {
     fn finish_resync(&mut self) -> std::io::Result<()> {
         self.manual_in_flight.clear();
         self.resync = None;
+        self.recount_reads();
         self.port.write_all(&[JOG_CANCEL])
     }
 
@@ -892,13 +1974,37 @@ impl<F: FnMut(Event)> Worker<F> {
             Response::Ok => {
                 if let Some(job) = &mut self.job {
                     job.on_ok();
-                    if job.is_finished() {
+                    let more_parts = self.pending.as_ref().is_some_and(|p| !p.parts.is_empty());
+                    if job.is_finished() && more_parts {
+                        // The part's last line, a dwell, is only answered
+                        // once motion has stopped. It is over once a status
+                        // report after this says the machine is idle.
+                        let (acknowledged, total) = job.progress();
+                        self.job = None;
+                        if let Some(pending) = &mut self.pending {
+                            pending.stage = PartStage::Ending;
+                            pending.finished = (acknowledged, total);
+                        }
+                        self.emit(Event::Job {
+                            state: JobState::Running,
+                            acknowledged,
+                            total,
+                            message: None,
+                        });
+                        // The part ends with M5, but the machine is asked.
+                        self.spindle_mode = SpindleMode::Unknown;
+                        self.manual_queue.push_back("$G".to_owned());
+                        self.emit_parts();
+                    } else if job.is_finished() {
                         self.emit_progress(JobState::Finished, None);
                         self.job = None;
                         // A Kerf job ends with M5, but the machine is asked
                         // rather than assumed.
                         self.spindle_mode = SpindleMode::Unknown;
                         self.manual_queue.push_back("$G".to_owned());
+                        if self.pending.take().is_some() {
+                            self.emit_parts();
+                        }
                     } else if self.last_progress.elapsed() >= PROGRESS_INTERVAL {
                         self.emit_progress(JobState::Running, None);
                     }
@@ -916,6 +2022,7 @@ impl<F: FnMut(Event)> Worker<F> {
                     if is_setting_change(&line) {
                         self.manual_queue.push_back("$$".to_owned());
                     }
+                    self.manual_answered(&line);
                 }
             }
             Response::Error(code) => {
@@ -937,6 +2044,12 @@ impl<F: FnMut(Event)> Worker<F> {
                     self.abandon(JobState::Failed, message);
                     self.reset_pending.get_or_insert_with(Instant::now);
                 } else if let Some(line) = self.manual_in_flight.pop_front() {
+                    if is_offsets_query(&line) {
+                        self.finish_read(false);
+                    }
+                    if self.probing.as_ref().is_some_and(|r| r.line == line) {
+                        self.probe_failed(PROBE_FAILED);
+                    }
                     let jog = line.starts_with("$J=");
                     // A refused M5 may have left the spindle on: ask.
                     if spindle_words(&line).is_some() {
@@ -960,21 +2073,72 @@ impl<F: FnMut(Event)> Worker<F> {
             Response::Alarm(code) => {
                 self.stop_held(None)?;
                 let description = describe_alarm(code).to_owned();
-                self.abandon(
-                    JobState::Failed,
-                    Some(format!("Alarm {code}: {description}")),
-                );
+                self.homed = false;
+                self.seen_home = false;
+                // Only Kerf's own probe going wrong keeps a job that waits
+                // for a bit change: nothing has been set, and the person
+                // can unlock and try again. Any other alarm ends the job.
+                if self.probing.is_some() && matches!(code, 4 | 5) {
+                    self.probe_failed(PROBE_FAILED);
+                    self.manual_queue.clear();
+                    self.manual_in_flight.clear();
+                    self.recount_reads();
+                } else {
+                    self.abandon(
+                        JobState::Failed,
+                        Some(format!("Alarm {code}: {description}")),
+                    );
+                }
                 self.emit(Event::Alarm { code, description });
             }
             Response::Status(status) => self.on_status(status)?,
-            Response::Welcome(version) => {
+            Response::Welcome(firmware, version) => {
                 // The controller has restarted, so everything queued is gone.
                 self.after_reset();
                 self.abandon(JobState::Stopped, None);
                 lock(&self.settings).clear();
-                self.emit(Event::Welcome { version });
+                self.firmware = Some(firmware);
+                self.emit(Event::Welcome { version, firmware });
                 self.manual_queue.push_back("$$".to_owned());
                 self.manual_queue.push_back("$G".to_owned());
+            }
+            Response::Offset(name, values) => {
+                let xyz = (values.len() >= 3).then(|| [values[0], values[1], values[2]]);
+                match name.as_str() {
+                    "G54" => self.reading.g54 = xyz,
+                    "G92" => self.reading.g92 = xyz,
+                    "TLO" => self.reading.tlo = Some(values),
+                    _ => {}
+                }
+                self.emit(Event::Line {
+                    text: line.trim().to_owned(),
+                });
+            }
+            Response::Probe { position, ok } => {
+                // The `[PRB:...]` line in a `$#` reply is the last probe's,
+                // not news; only one answering a probing line counts.
+                let answering = self.probing.as_ref().is_some_and(|r| {
+                    matches!(r.stage, ProbeStage::Fast | ProbeStage::Slow)
+                        && self.manual_in_flight.front() == Some(&r.line)
+                });
+                if answering {
+                    if ok {
+                        if let Some(run) = &mut self.probing {
+                            run.touched = Some(position[2]);
+                        }
+                    } else {
+                        self.probe_failed(PROBE_FAILED);
+                    }
+                }
+                self.emit(Event::Line {
+                    text: line.trim().to_owned(),
+                });
+            }
+            Response::Other(text) if text.starts_with("[FIRMWARE:") => {
+                if text.to_ascii_lowercase().contains("grblhal") {
+                    self.build_info_grblhal = true;
+                }
+                self.emit(Event::Line { text });
             }
             Response::Setting(number, value) => {
                 lock(&self.settings).insert(number, value.clone());
@@ -998,6 +2162,16 @@ impl<F: FnMut(Event)> Worker<F> {
                 if !later_spindle_word {
                     self.spindle_mode = modes_spindle(&text);
                 }
+                let later_work_zero = self
+                    .manual_in_flight
+                    .iter()
+                    .skip(query)
+                    .chain(&self.manual_queue)
+                    .any(|l| selects_work_zero(l));
+                if !later_work_zero {
+                    self.on_g54 = modes_on_g54(&text);
+                }
+                self.emit_parts();
                 let mut marker = false;
                 if let Some(resync) = &mut self.resync {
                     if resync.stage == ResyncStage::Sent {
@@ -1019,6 +2193,35 @@ impl<F: FnMut(Event)> Worker<F> {
         Ok(())
     }
 
+    /// A manual line was answered with `ok`.
+    fn manual_answered(&mut self, line: &str) {
+        if is_offsets_query(line) {
+            self.finish_read(true);
+        }
+        if line.eq_ignore_ascii_case(BUILD_INFO_QUERY) {
+            let firmware = if self.build_info_grblhal || self.firmware == Some(Firmware::GrblHal) {
+                Firmware::GrblHal
+            } else {
+                Firmware::Grbl
+            };
+            self.build_info_grblhal = false;
+            self.firmware = Some(firmware);
+            self.emit(Event::Firmware { firmware });
+        }
+        if self.probing.as_ref().is_some_and(|r| r.line == line) {
+            self.probe_answered();
+        } else if self.probing.is_none()
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.stage == PartStage::Waiting)
+            && changes_offsets(line)
+        {
+            // Read again, to see whether Z has been set or X/Y moved.
+            self.queue_offsets_read();
+        }
+    }
+
     fn on_status(&mut self, status: Status) -> std::io::Result<()> {
         if status.work_offset.is_some() {
             self.work_offset = status.work_offset;
@@ -1037,13 +2240,47 @@ impl<F: FnMut(Event)> Worker<F> {
         });
         *lock(&self.state) = Some(status.state);
         self.spindle = status.spindle;
+        self.position = position;
+        self.machine_position = machine_position;
+        self.reported_z = match (status.machine_position, status.work_position) {
+            (Some(m), _) => Some(ReportedZ::Machine(m[2])),
+            (None, Some(w)) => Some(ReportedZ::Work(w[2])),
+            _ => None,
+        };
+        self.pins = status.pins.clone();
         self.emit(Event::Status {
             state: status.state,
             position,
             machine_position,
             feed: status.feed,
             spindle: status.spindle,
+            pins: status.pins,
         });
+        match status.state {
+            MachineState::Home => self.seen_home = true,
+            MachineState::Idle if self.seen_home => {
+                self.seen_home = false;
+                self.homed = true;
+            }
+            _ => {}
+        }
+        if self.probe_watch && self.pins.contains('P') {
+            self.probe_passed();
+        }
+        // The first status after a part's last `ok` that says idle: the
+        // part is over, and the offsets are read before the job waits.
+        if status.state == MachineState::Idle
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.stage == PartStage::Ending)
+        {
+            let ticket = self.queue_offsets_read();
+            if let Some(pending) = &mut self.pending {
+                pending.stage = PartStage::Reading(ticket);
+            }
+        }
+        self.emit_parts();
         // `Hold:1` means still slowing down; only `Hold:0` is at rest.
         let at_rest = match status.state {
             MachineState::Idle => true,
@@ -1090,13 +2327,20 @@ impl<F: FnMut(Event)> Worker<F> {
     /// Forgets all queued work, reporting the end of a job if one was active.
     /// A pending reset is kept.
     fn abandon(&mut self, state: JobState, message: Option<String>) {
-        if self.job.is_some() || self.waiting_job.is_some() {
+        if self.job.is_some() || self.waiting_job.is_some() || self.pending.is_some() {
             self.emit_progress(state, message);
         }
         self.job = None;
         self.waiting_job = None;
+        // The parts still to run go too: Start needs a new job.
+        self.pending = None;
+        self.probe_failed("Probing was stopped before Z was set.");
+        self.probe_watch = false;
         self.manual_queue.clear();
         self.manual_in_flight.clear();
+        self.reading = Offsets::default();
+        self.recount_reads();
+        self.emit_parts();
     }
 
     fn emit_progress(&mut self, state: JobState, message: Option<String>) {
@@ -1178,6 +2422,100 @@ fn is_modes_query(line: &str) -> bool {
     line.trim().eq_ignore_ascii_case(RESYNC_MARKER)
 }
 
+/// Why a change at a fixed place would take the bit too close to the work,
+/// whose zero is at machine Z `zero_z`: each place's Z must be at least
+/// `clearance` above it.
+fn check_clearance(moves: &[[f64; 3]], clearance: Option<f64>, zero_z: f64) -> Result<(), String> {
+    let Some(clearance) = clearance else {
+        return Ok(());
+    };
+    for [_, _, z] in moves {
+        if *z < zero_z + clearance - 1e-6 {
+            return Err(format!(
+                "The place to change bits (Z{} from home) is only {} mm above the material here; it must be at least {} mm above it, or the bit could hit the work on the way. Set a higher place in the Device step and generate again.",
+                trim(*z),
+                trim(z - zero_z),
+                trim(clearance)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a `$G` report says G54 is in use: `Some(false)` for G55 to G59.
+fn modes_on_g54(report: &str) -> Option<bool> {
+    let words = report
+        .trim_start_matches("[GC:")
+        .trim_end_matches(']')
+        .split_whitespace();
+    let mut found = None;
+    for word in words {
+        match word {
+            "G54" => found = Some(true),
+            "G55" | "G56" | "G57" | "G58" | "G59" | "G59.1" | "G59.2" | "G59.3" => {
+                found = Some(false)
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Whether a typed line may change the coordinate system in use (G54 to G59).
+fn selects_work_zero(line: &str) -> bool {
+    if line.trim_start().starts_with('$') {
+        return false;
+    }
+    let code: String = line
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find('G') {
+        rest = &rest[at + 1..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.trim_start_matches('0').parse::<u32>() {
+            if (54..=59).contains(&n) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// A `$#` line, which GRBL answers with the work offsets.
+fn is_offsets_query(line: &str) -> bool {
+    line.trim() == OFFSETS_QUERY
+}
+
+/// Whether a line may change a work offset: `G10` or `G92` (not `G100`).
+fn changes_offsets(line: &str) -> bool {
+    if line.trim_start().starts_with('$') {
+        return false;
+    }
+    let code: String = line
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let mut rest = code.as_str();
+    while let Some(at) = rest.find('G') {
+        rest = &rest[at + 1..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if matches!(digits.trim_start_matches('0'), "10" | "92") {
+            return true;
+        }
+    }
+    false
+}
+
 /// A line such as `$32=1`, but not a jog (`$J=...`).
 fn is_setting_change(line: &str) -> bool {
     line.strip_prefix('$')
@@ -1255,6 +2593,160 @@ mod tests {
         panic_on_read: bool,
         /// Make the next read take this long, as a busy computer might.
         slow_read: Option<Duration>,
+        /// Behave as grblHAL: its banner after a reset, and `$I` says so.
+        hal: bool,
+        /// Where the machine is, and its offsets. `None` takes the usual
+        /// test values: machine 5, 6, 7 and G54 1, 1, 1.
+        mpos: Option<[f64; 3]>,
+        g54: Option<[f64; 3]>,
+        g92: [f64; 3],
+        tlo: f64,
+        /// The probe pin reads as touching.
+        probe_touching: bool,
+        /// Machine Z of the top of a touch plate under the bit, if one is there.
+        plate_at: Option<f64>,
+        /// A failed probe reports `[PRB:...:0]` instead of raising an alarm.
+        probe_misses_quietly: bool,
+        /// Status reports to say `Run` after each dwell, as when the planner
+        /// is slow to empty.
+        run_after_dwell: u32,
+        busy_reports: u32,
+        /// Report the `Tool` state, as grblHAL does at a tool change.
+        tool_state: bool,
+        /// The coordinate system `$G` reports, if not G54.
+        work_zero: Option<&'static str>,
+        /// A `WCO` for status reports to give in place of the real one, as
+        /// when GRBL has not repeated it since an offset changed.
+        stale_wco: Option<[f64; 3]>,
+    }
+
+    impl Sim {
+        fn mpos(&self) -> [f64; 3] {
+            self.mpos.unwrap_or([5.0, 6.0, 7.0])
+        }
+
+        fn g54(&self) -> [f64; 3] {
+            self.g54.unwrap_or([1.0, 1.0, 1.0])
+        }
+
+        /// The work coordinate offset: G54, G92 and the tool length offset.
+        fn wco(&self) -> [f64; 3] {
+            let g54 = self.g54();
+            [
+                g54[0] + self.g92[0],
+                g54[1] + self.g92[1],
+                g54[2] + self.g92[2] + self.tlo,
+            ]
+        }
+
+        /// Runs the parts of a line that move the simulated machine or set
+        /// its offsets. Returns false if the line raised an alarm instead of
+        /// being answered.
+        fn run_motion(&mut self, line: &str) -> bool {
+            let words = |line: &str| -> Vec<(char, f64)> {
+                let mut found = Vec::new();
+                let mut chars = line.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c.is_ascii_alphabetic() {
+                        let mut number = String::new();
+                        while let Some(&d) = chars.peek() {
+                            if d.is_ascii_digit() || d == '.' || d == '-' {
+                                number.push(d);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Ok(value) = number.parse() {
+                            found.push((c.to_ascii_uppercase(), value));
+                        }
+                    }
+                }
+                found
+            };
+            let found = words(line);
+            let word = |letter: char| found.iter().find(|(l, _)| *l == letter).map(|(_, v)| *v);
+            let has_g = |n: f64| {
+                found
+                    .iter()
+                    .any(|(l, v)| *l == 'G' && (*v - n).abs() < 1e-9)
+            };
+            if line.starts_with('$') {
+                return true;
+            }
+            if has_g(10.0) {
+                let mut g54 = self.g54();
+                let mpos = self.mpos();
+                let l20 = word('L') == Some(20.0);
+                for (axis, letter) in ['X', 'Y', 'Z'].into_iter().enumerate() {
+                    if let Some(value) = word(letter) {
+                        g54[axis] = if l20 {
+                            let extra = self.g92[axis] + if axis == 2 { self.tlo } else { 0.0 };
+                            mpos[axis] - extra - value
+                        } else {
+                            value
+                        };
+                    }
+                }
+                self.g54 = Some(g54);
+                return true;
+            }
+            if has_g(92.0) {
+                let mpos = self.mpos();
+                let g54 = self.g54();
+                for (axis, letter) in ['X', 'Y', 'Z'].into_iter().enumerate() {
+                    if let Some(value) = word(letter) {
+                        self.g92[axis] = mpos[axis] - g54[axis] - value;
+                    }
+                }
+                return true;
+            }
+            if let (true, Some(target)) = (has_g(38.2), word('Z')) {
+                let mut mpos = self.mpos();
+                if self.probe_touching {
+                    self.alarm = true;
+                    self.say("ALARM:4");
+                    return false;
+                }
+                let target = target + self.wco()[2];
+                match self.plate_at {
+                    Some(plate) if plate <= mpos[2] && plate >= target => {
+                        mpos[2] = plate;
+                        self.mpos = Some(mpos);
+                        self.say(&format!(
+                            "[PRB:{:.3},{:.3},{:.3}:1]",
+                            mpos[0], mpos[1], mpos[2]
+                        ));
+                    }
+                    _ => {
+                        mpos[2] = target;
+                        self.mpos = Some(mpos);
+                        if self.probe_misses_quietly {
+                            self.say(&format!(
+                                "[PRB:{:.3},{:.3},{:.3}:0]",
+                                mpos[0], mpos[1], mpos[2]
+                            ));
+                        } else {
+                            self.alarm = true;
+                            self.say("ALARM:5");
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+            if has_g(4.0) {
+                self.busy_reports = self.run_after_dwell;
+            }
+            if (has_g(0.0) || has_g(1.0)) && !has_g(53.0) {
+                if let Some(z) = word('Z') {
+                    let mut mpos = self.mpos();
+                    mpos[2] = z + self.wco()[2];
+                    self.mpos = Some(mpos);
+                }
+            }
+            true
+        }
     }
 
     /// How long the Sim takes over each jog line it runs.
@@ -1280,6 +2772,11 @@ mod tests {
                             "Alarm"
                         } else if sim.homing {
                             "Home"
+                        } else if sim.tool_state {
+                            "Tool"
+                        } else if sim.busy_reports > 0 {
+                            sim.busy_reports -= 1;
+                            "Run"
                         } else if sim.held && sim.settling > 0 {
                             sim.settling -= 1;
                             "Hold:1"
@@ -1299,13 +2796,22 @@ mod tests {
                         } else {
                             format!("|FS:0,{}", sim.spindle)
                         };
+                        let (mpos, wco) = (sim.mpos(), sim.wco());
                         let position = if sim.report_work_position {
-                            "WPos:4.000,5.000,6.000"
+                            format!(
+                                "WPos:{:.3},{:.3},{:.3}",
+                                mpos[0] - wco[0],
+                                mpos[1] - wco[1],
+                                mpos[2] - wco[2]
+                            )
                         } else {
-                            "MPos:5.000,6.000,7.000"
+                            format!("MPos:{:.3},{:.3},{:.3}", mpos[0], mpos[1], mpos[2])
                         };
+                        let pins = if sim.probe_touching { "|Pn:P" } else { "" };
+                        let shown = sim.stale_wco.unwrap_or(wco);
                         sim.say(&format!(
-                            "<{state}|{position}{spindle}|WCO:1.000,1.000,1.000>"
+                            "<{state}|{position}{spindle}{pins}|WCO:{:.3},{:.3},{:.3}>",
+                            shown[0], shown[1], shown[2]
                         ));
                         sim.realtime.push(byte);
                     }
@@ -1368,7 +2874,13 @@ mod tests {
                             sim.alarm = true;
                             sim.say("ALARM:6");
                         }
-                        sim.say("Grbl 1.1h ['$' for help]");
+                        sim.busy_reports = 0;
+                        sim.tool_state = false;
+                        if sim.hal {
+                            sim.say("GrblHAL 1.1f ['$' or '$HELP' for help]");
+                        } else {
+                            sim.say("Grbl 1.1h ['$' for help]");
+                        }
                     }
                     b'\n' => {
                         let line = std::mem::take(&mut sim.partial);
@@ -1440,12 +2952,39 @@ mod tests {
                             }
                             if line == "$G" && !sim.modes_query_without_report {
                                 let mode = if sim.spindle_on { "M3" } else { "M5" };
-                                sim.say(&format!("[GC:G0 G54 G17 G21 G90 G94 {mode} M9 T0 F0 S0]"));
+                                let zero = sim.work_zero.unwrap_or("G54");
+                                sim.say(&format!(
+                                    "[GC:G0 {zero} G17 G21 G90 G94 {mode} M9 T0 F0 S0]"
+                                ));
                             }
                             if let Some(mode) = line.strip_prefix("$32=") {
                                 sim.laser_mode = Some(if mode == "1" { "1" } else { "0" });
                             }
-                            sim.say("ok");
+                            if line == "$#" {
+                                let (g54, g92, tlo) = (sim.g54(), sim.g92, sim.tlo);
+                                sim.say(&format!(
+                                    "[G54:{:.3},{:.3},{:.3}]",
+                                    g54[0], g54[1], g54[2]
+                                ));
+                                sim.say("[G55:0.000,0.000,0.000]");
+                                sim.say("[G28:0.000,0.000,0.000]");
+                                sim.say(&format!(
+                                    "[G92:{:.3},{:.3},{:.3}]",
+                                    g92[0], g92[1], g92[2]
+                                ));
+                                sim.say(&format!("[TLO:{tlo:.3}]"));
+                                sim.say("[PRB:0.000,0.000,0.000:0]");
+                            }
+                            if line == "$I" {
+                                sim.say("[VER:1.1h.20190825:]");
+                                sim.say("[OPT:V,15,128]");
+                                if sim.hal {
+                                    sim.say("[FIRMWARE:grblHAL]");
+                                }
+                            }
+                            if sim.run_motion(&line) {
+                                sim.say("ok");
+                            }
                         }
                         sim.executed.push(line);
                     }
@@ -1566,6 +3105,8 @@ mod tests {
 
         let (state, acknowledged, total, _) = h.wait_for_job_end();
         assert_eq!((state, acknowledged, total), (JobState::Finished, 400, 400));
+        // The `$G` after the job is sent just after it is reported finished.
+        wait_until_executed(&h, 403);
         let sim = h.sim.lock().unwrap();
         assert!(!sim.overflowed);
         // The settings query sent on connecting runs first.
@@ -1694,7 +3235,9 @@ mod tests {
         let h = connect(|_| {});
         h.wait_for_state(MachineState::Idle);
         h.connection.reset().unwrap();
-        h.wait_for(|e| matches!(e, Event::Welcome { version } if version == "1.1h").then_some(()));
+        h.wait_for(|e| {
+            matches!(e, Event::Welcome { version, .. } if version == "1.1h").then_some(())
+        });
         let setting = h.wait_for(|e| match e {
             Event::Setting { number, value } => Some((*number, value.clone())),
             _ => None,
@@ -2572,5 +4115,847 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e == Event::Disconnected { reason: None }));
+    }
+
+    // Jobs with bit changes, and setting Z with a touch plate.
+
+    /// The first part of a two-bit job, as `kerf-gcode` writes it: the
+    /// change block at the end turns the spindle off, waits for it to stop,
+    /// raises the bit, moves over the work zero and ends on a short dwell.
+    const PART_1: &str = "; Generated by Kerf\nG17 G21 G90 G94 G54\nG0 Z5\nM3 S10000\nG4 P2\nG1 Z-1 F100\nG1 X1 F300\nG0 Z5\n; Bit change 1 of 1: fit T2 (1 mm tapered ball nose), then set Z again\nM5\nG4 P5\nG0 Z20\nG0 X0 Y0\nG4 P0.1\n";
+    const PART_2: &str = "G17 G21 G90 G94 G54\nG0 Z5\nM3 S10000\nG4 P2\nG1 Z-1 F100\nG1 X2 F300\nG0 Z5\nM5\nG0 X0 Y0\n";
+    const SECOND_PART_CUT: &str = "G1 X2 F300";
+
+    fn code_lines(text: &str) -> Vec<&str> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with(';'))
+            .collect()
+    }
+
+    /// Connected to a router: laser mode off, settings and spindle state read.
+    fn connect_router(setup: impl FnOnce(&mut Sim)) -> Harness {
+        connect_ready(|sim| {
+            sim.laser_mode = Some("0");
+            setup(sim);
+        })
+    }
+
+    fn two_parts(lift: Option<f64>) -> JobOptions {
+        JobOptions {
+            change_lift: lift,
+            ..JobOptions::default()
+        }
+    }
+
+    impl Harness {
+        fn executed(&self) -> Vec<String> {
+            self.sim.lock().unwrap().executed.clone()
+        }
+
+        /// Starts the two-part job and waits until it waits for the bit.
+        fn run_to_change(&self) {
+            self.connection
+                .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+                .unwrap();
+            self.wait_for_bit();
+        }
+
+        fn wait_for_bit(&self) {
+            self.wait_for(|e| {
+                matches!(
+                    e,
+                    Event::Job {
+                        state: JobState::WaitingForBit,
+                        ..
+                    }
+                )
+                .then_some(())
+            });
+        }
+
+        fn wait_for_parts(&self, mut pick: impl FnMut(&PartsProgress) -> bool) {
+            self.wait_for(|e| match e {
+                Event::Parts {
+                    progress: Some(progress),
+                } if pick(progress) => Some(()),
+                _ => None,
+            });
+        }
+
+        fn wait_for_probe(&self) -> (ProbeState, Option<String>) {
+            self.wait_for(|e| match e {
+                Event::Probe { state, message } if *state != ProbeState::Running => {
+                    Some((*state, message.clone()))
+                }
+                _ => None,
+            })
+        }
+
+        /// Passes the probe test: the plate touches the bit, then is taken away.
+        fn pass_probe_test(&self) {
+            self.connection.probe_test().unwrap();
+            self.sim.lock().unwrap().probe_touching = true;
+            self.wait_for(|e| matches!(e, Event::ProbeTested).then_some(()));
+            self.sim.lock().unwrap().probe_touching = false;
+            self.wait_for(|e| {
+                matches!(e, Event::Status { pins, state: MachineState::Idle, .. } if pins.is_empty())
+                    .then_some(())
+            });
+        }
+
+        fn wait_for_idle_and_quiet(&self) {
+            self.wait_for_state(MachineState::Idle);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    const PLATE: ProbeSettings = ProbeSettings {
+        plate: 12.7,
+        travel: probe::DEFAULT_TRAVEL,
+        fast_feed: probe::DEFAULT_FAST_FEED,
+        slow_feed: probe::DEFAULT_SLOW_FEED,
+    };
+
+    #[test]
+    fn grblhal_banner_is_a_restart() {
+        let h = connect(|sim| sim.hal = true);
+        h.wait_for_state(MachineState::Idle);
+        h.connection
+            .start_job(&program(20_000), Tool::Laser)
+            .unwrap();
+        wait_for_running(&h);
+        // The machine's own reset button: GRBL forgets everything and says
+        // hello again, with grblHAL's banner.
+        {
+            let mut sim = h.sim.lock().unwrap();
+            sim.buffered.clear();
+            sim.say("GrblHAL 1.1f ['$' or '$HELP' for help]");
+        }
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Stopped);
+        let firmware = h.wait_for(|e| match e {
+            Event::Welcome { firmware, version } if version == "1.1f" => Some(*firmware),
+            _ => None,
+        });
+        assert_eq!(firmware, Firmware::GrblHal);
+        // The settings and modes are read again, and nothing more of the job is sent.
+        h.wait_for(|e| matches!(e, Event::Setting { number: 130, .. }).then_some(()));
+        std::thread::sleep(Duration::from_millis(200));
+        // Lines already on their way when the banner came may still arrive,
+        // but once Kerf has seen it, nothing of the job is sent.
+        let wire = h.wire();
+        let reread = wire
+            .iter()
+            .rposition(|l| l == "$$")
+            .expect("settings read again");
+        assert!(
+            !wire[reread..].iter().any(|l| l.starts_with("G1")),
+            "{:?}",
+            &wire[reread..]
+        );
+        assert!(wire[reread..].contains(&"$G".to_owned()));
+    }
+
+    #[test]
+    fn grblhal_restart_while_waiting_ends_the_job() {
+        let h = connect_router(|sim| sim.hal = true);
+        h.run_to_change();
+        h.sim
+            .lock()
+            .unwrap()
+            .say("GrblHAL 1.1f ['$' or '$HELP' for help]");
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Stopped);
+        h.wait_for(|e| matches!(e, Event::Parts { progress: None }).then_some(()));
+        let error = h.connection.continue_job(false).unwrap_err();
+        assert!(error.contains("No job is waiting"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn waits_between_parts_until_continued() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        std::thread::sleep(Duration::from_millis(300));
+        // The offsets are read before anything of the job is sent.
+        let mut expected: Vec<&str> = vec!["$$", "$G", "$#"];
+        expected.extend(code_lines(PART_1));
+        // The spindle's state and the offsets are read once the part is over.
+        expected.extend(["$G", "$#"]);
+        assert_eq!(h.executed(), expected);
+
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.waiting && p.z_set && p.spindle_off);
+        when_free(|| h.connection.continue_job(false)).unwrap();
+        let (state, acknowledged, total, _) = h.wait_for_job_end();
+        assert_eq!((state, acknowledged, total), (JobState::Finished, 9, 9));
+        h.wait_for(|e| matches!(e, Event::Parts { progress: None }).then_some(()));
+        std::thread::sleep(Duration::from_millis(100));
+        // Zero Z here, the read it causes, the fresh read for Continue, then part 2.
+        expected.extend(["G10 L20 P0 Z0", "$#", "$#"]);
+        expected.extend(code_lines(PART_2));
+        expected.push("$G");
+        assert_eq!(h.executed(), expected);
+    }
+
+    #[test]
+    fn waiting_card_not_shown_until_a_fresh_idle_after_last_ok() {
+        // The machine says it is still running for a while after each dwell.
+        let h = connect_router(|sim| sim.run_after_dwell = 4);
+        h.connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+            .unwrap();
+        let mut last_ok_seen = false;
+        let mut running_after = 0;
+        let mut last_state = None;
+        h.wait_for(|e| match e {
+            Event::Job {
+                state: JobState::Running,
+                acknowledged,
+                total,
+                ..
+            } if acknowledged == total && *total > 0 => {
+                last_ok_seen = true;
+                None
+            }
+            Event::Status { state, .. } => {
+                if last_ok_seen && *state == MachineState::Run {
+                    running_after += 1;
+                }
+                last_state = Some(*state);
+                None
+            }
+            Event::Parts {
+                progress: Some(PartsProgress { waiting: true, .. }),
+            } => Some(()),
+            Event::Job {
+                state: JobState::WaitingForBit,
+                ..
+            } => {
+                assert!(last_ok_seen, "waited before the last line was answered");
+                assert!(running_after >= 1, "no busy report was waited out");
+                assert_eq!(last_state, Some(MachineState::Idle));
+                None
+            }
+            _ => None,
+        });
+        assert!(running_after >= 1);
+    }
+
+    #[test]
+    fn continue_is_refused_until_z_is_set() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        h.wait_for_idle_and_quiet();
+        let error = h.connection.continue_job(false).unwrap_err();
+        assert!(error.contains("Set Z again"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn continue_is_refused_while_the_spindle_is_on() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        h.sim.lock().unwrap().spindle = 100;
+        h.wait_for(|e| {
+            matches!(e, Event::Status { spindle: Some(s), .. } if *s == 100.0).then_some(())
+        });
+        let error = h.connection.continue_job(false).unwrap_err();
+        assert!(error.contains("S100"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn continue_refused_after_typed_m3_while_waiting() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        h.connection.send_line("M3 S1000").unwrap();
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("M3 or M4"), "{error}");
+        wait_until_executed(&h, h.executed().len().max(1));
+        std::thread::sleep(Duration::from_millis(100));
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("M3 or M4"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+        // Switched off again, it may carry on.
+        h.connection.send_line("M5").unwrap();
+        when_free(|| h.connection.continue_job(false)).unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Finished);
+    }
+
+    #[test]
+    fn continue_is_refused_if_xy_zero_changed() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        h.connection.send_line("G10 L20 P0 X0").unwrap();
+        wait_until_executed(&h, h.executed().len() + 2);
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("X/Y zero"), "{error}");
+        assert!(error.contains("Stop the job"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn continue_is_refused_with_g92_set() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        h.connection.send_line("G92 Z3").unwrap();
+        wait_until_executed(&h, h.executed().len() + 2);
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("(or an offset)"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn jogging_and_zero_z_work_while_waiting() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.jog(0.0, 0.0, 5.0, 200.0)).unwrap();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        let executed = h.executed();
+        let at = executed
+            .iter()
+            .position(|l| l == "$J=G91 G21 Z5.000 F200")
+            .expect("the jog ran");
+        assert_eq!(executed[at + 1], "G10 L20 P0 Z0");
+    }
+
+    #[test]
+    fn zero_xy_is_refused_while_waiting() {
+        let h = connect_router(|_| {});
+        // Before a job, it is Kerf's own P0 line.
+        when_free(|| h.connection.zero_xy()).unwrap();
+        wait_until_executed(&h, 3);
+        assert_eq!(h.executed()[2], "G10 L20 P0 X0 Y0");
+        h.run_to_change();
+        let error = h.connection.zero_xy().unwrap_err();
+        assert!(error.contains("Zero XY"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        let wire = h.wire();
+        assert_eq!(
+            wire.iter().filter(|l| *l == "G10 L20 P0 X0 Y0").count(),
+            1,
+            "{wire:?}"
+        );
+    }
+
+    #[test]
+    fn start_refused_while_waiting_for_bit() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        h.wait_for_idle_and_quiet();
+        for refusal in [
+            h.connection.start_job(PART_2, Tool::Spindle),
+            h.connection
+                .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0))),
+        ] {
+            let error = refusal.unwrap_err();
+            assert!(error.contains("waiting for a bit change"), "{error}");
+        }
+    }
+
+    #[test]
+    fn stop_while_waiting_ends_the_job() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        h.wait_for_idle_and_quiet();
+        h.connection.stop_job().unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Stopped);
+        h.wait_for(|e| matches!(e, Event::Parts { progress: None }).then_some(()));
+        let error = h.connection.continue_job(false).unwrap_err();
+        assert!(error.contains("No job is waiting"), "{error}");
+        // Start needs a new job, which it accepts.
+        h.connection.start_job(PART_2, Tool::Spindle).unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Finished);
+        assert_eq!(
+            h.executed()
+                .iter()
+                .filter(|l| *l == SECOND_PART_CUT)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn reset_while_waiting_clears_parts() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        when_free(|| h.connection.zero_z()).unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        h.connection.reset().unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Stopped);
+        h.wait_for(|e| matches!(e, Event::Welcome { .. }).then_some(()));
+        let error = h.connection.continue_job(false).unwrap_err();
+        assert!(error.contains("No job is waiting"), "{error}");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn probe_lines_are_exact_and_sent_one_at_a_time() {
+        // Work Z 6 (machine 7, G54 Z 1); the plate's top is at machine Z 0.
+        let h = connect_router(|sim| sim.plate_at = Some(0.0));
+        h.pass_probe_test();
+        let before = h.executed().len();
+        h.connection.probe_z(PLATE).unwrap();
+        assert_eq!(h.wait_for_probe(), (ProbeState::Done, None));
+        let sim = h.sim.lock().unwrap();
+        let lines = [
+            "G90 G38.2 Z-4.000 F100",
+            "G90 G0 Z1.000",
+            "G90 G38.2 Z-2.000 F25",
+            "G10 L2 P0 Z-12.700",
+            "G90 G0 Z17.700",
+        ];
+        let mut expected = vec!["$#"];
+        expected.extend(lines);
+        expected.push("$#");
+        assert_eq!(sim.executed[before..], expected);
+        // Each line arrived only once the one before it had run.
+        for pair in lines.windows(2) {
+            let ran = sim.executed.iter().position(|l| l == pair[0]).unwrap();
+            let (_, run_by_then) = sim
+                .arrivals
+                .iter()
+                .find(|(l, _)| l == pair[1])
+                .expect("sent");
+            assert!(
+                *run_by_then > ran,
+                "{} was sent before {} ran",
+                pair[1],
+                pair[0]
+            );
+        }
+        assert_eq!(sim.g54(), [1.0, 1.0, -12.7]);
+    }
+
+    #[test]
+    fn probe_start_height_ignores_a_stale_work_offset() {
+        // Work Z is 6 (machine 7, G54 Z 1), but the status reports still
+        // give an old offset. With MPos or with WPos only ($10=0), the first
+        // line goes down 10 mm from work Z 6, from the fresh G54.
+        for work_position in [false, true] {
+            let h = connect_router(|sim| {
+                sim.plate_at = Some(0.0);
+                sim.report_work_position = work_position;
+                sim.stale_wco = Some([1.0, 1.0, 9.0]);
+            });
+            h.pass_probe_test();
+            h.connection.probe_z(PLATE).unwrap();
+            assert_eq!(h.wait_for_probe(), (ProbeState::Done, None));
+            let wire = h.wire();
+            let first = wire.iter().find(|l| l.contains("G38.2")).unwrap();
+            assert_eq!(
+                first, "G90 G38.2 Z-4.000 F100",
+                "WPos only: {work_position}"
+            );
+            assert!(wire.contains(&"G10 L2 P0 Z-12.700".to_owned()), "{wire:?}");
+        }
+    }
+
+    #[test]
+    fn g10_not_sent_after_failed_probe() {
+        for quietly in [false, true] {
+            // No plate under the bit: it goes the whole 10 mm and touches nothing.
+            let h = connect_router(|sim| sim.probe_misses_quietly = quietly);
+            h.pass_probe_test();
+            h.connection.probe_z(PLATE).unwrap();
+            let (state, message) = h.wait_for_probe();
+            assert_eq!(state, ProbeState::Failed, "quietly: {quietly}");
+            assert!(message.unwrap().contains("didn't touch"));
+            std::thread::sleep(Duration::from_millis(200));
+            let wire = h.wire();
+            assert!(!wire.iter().any(|l| l.starts_with("G10")), "{wire:?}");
+            assert!(!wire.contains(&"G90 G0 Z-2.000".to_owned()), "{wire:?}");
+            assert_eq!(
+                wire.iter().filter(|l| l.contains("G38.2")).count(),
+                1,
+                "{wire:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_is_refused_when_already_touching() {
+        let h = connect_router(|sim| sim.plate_at = Some(0.0));
+        let error = h.connection.probe_z(PLATE).unwrap_err();
+        assert!(error.contains("Test the probe first"), "{error}");
+        h.pass_probe_test();
+        h.sim.lock().unwrap().probe_touching = true;
+        h.wait_for(|e| matches!(e, Event::Status { pins, .. } if pins == "P").then_some(()));
+        let error = h.connection.probe_z(PLATE).unwrap_err();
+        assert!(error.contains("already reads as touching"), "{error}");
+        // A plate thickness is needed, and no default is assumed.
+        let error = h
+            .connection
+            .probe_z(ProbeSettings {
+                plate: 0.0,
+                ..PLATE
+            })
+            .unwrap_err();
+        assert!(error.contains("thickness"), "{error}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!h.wire().iter().any(|l| l.contains("G38")));
+    }
+
+    #[test]
+    fn probe_alarm_keeps_parts_other_alarm_ends_job() {
+        let h = connect_router(|_| {});
+        h.run_to_change();
+        h.pass_probe_test();
+        // No plate: the probe runs out of travel and GRBL raises alarm 5.
+        h.connection.probe_z(PLATE).unwrap();
+        assert_eq!(h.wait_for_probe().0, ProbeState::Failed);
+        h.wait_for(|e| matches!(e, Event::Alarm { code: 5, .. }).then_some(()));
+        h.sim.lock().unwrap().alarm = false;
+        h.wait_for_idle_and_quiet();
+        // Still waiting for the bit, with Z not set.
+        let error = h.connection.continue_job(true).unwrap_err();
+        assert!(error.contains("Set Z again"), "{error}");
+        // Any other alarm ends the job.
+        {
+            let mut sim = h.sim.lock().unwrap();
+            sim.alarm = true;
+            sim.say("ALARM:1");
+        }
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Failed);
+        let error = h.connection.continue_job(true).unwrap_err();
+        assert!(error.contains("No job is waiting"), "{error}");
+    }
+
+    #[test]
+    fn continue_refused_while_probe_pin_touching() {
+        // After part 1 the bit is at work Z 20 (machine 21); the plate's top
+        // is at machine Z 15.
+        let h = connect_router(|sim| sim.plate_at = Some(15.0));
+        h.run_to_change();
+        h.pass_probe_test();
+        when_free(|| h.connection.probe_z(PLATE)).unwrap();
+        assert_eq!(h.wait_for_probe(), (ProbeState::Done, None));
+        h.wait_for_parts(|p| p.z_set && p.plate_used);
+        assert!(h.wire().contains(&"G10 L2 P0 Z2.300".to_owned()));
+        // The clip is still on.
+        h.sim.lock().unwrap().probe_touching = true;
+        h.wait_for(|e| matches!(e, Event::Status { pins, .. } if pins == "P").then_some(()));
+        let error = h.connection.continue_job(true).unwrap_err();
+        assert!(error.contains("still reads as touching"), "{error}");
+        h.sim.lock().unwrap().probe_touching = false;
+        h.wait_for(|e| {
+            matches!(e, Event::Status { pins, state: MachineState::Idle, .. } if pins.is_empty())
+                .then_some(())
+        });
+        // Off, but the box is not ticked.
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("tick the box"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+        when_free(|| h.connection.continue_job(true)).unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Finished);
+    }
+
+    /// Homes the simulated machine and waits until Kerf has seen it idle after.
+    fn home(h: &Harness) {
+        h.sim.lock().unwrap().homing = true;
+        h.wait_for_state(MachineState::Home);
+        h.sim.lock().unwrap().homing = false;
+        h.wait_for_state(MachineState::Idle);
+    }
+
+    #[test]
+    fn machine_moves_need_homing_this_session() {
+        let h = connect_router(|sim| sim.extra_settings = vec![(131, "500.000"), (132, "80.000")]);
+        let options = JobOptions {
+            needs_homing: true,
+            machine_moves: vec![[-10.0, -10.0, -5.0]],
+            ..JobOptions::default()
+        };
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &options)
+            .unwrap_err();
+        assert!(error.contains("homed"), "{error}");
+        home(&h);
+        let outside = JobOptions {
+            machine_moves: vec![[-800.0, -10.0, -5.0]],
+            ..options.clone()
+        };
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &outside)
+            .unwrap_err();
+        assert!(error.contains("outside the machine's travel"), "{error}");
+        h.connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &options)
+            .unwrap();
+        h.wait_for_bit();
+        // A reset forgets the homing: a new job must home again.
+        h.connection.reset().unwrap();
+        h.wait_for(|e| matches!(e, Event::Welcome { .. }).then_some(()));
+        h.wait_for_idle_and_quiet();
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &options)
+            .unwrap_err();
+        assert!(error.contains("homed"), "{error}");
+    }
+
+    #[test]
+    fn lift_refused_when_it_would_pass_machine_z0() {
+        let h = connect_router(|sim| {
+            sim.extra_settings = vec![(131, "500.000"), (132, "80.000")];
+            // The material's top is 12 mm below the top of Z.
+            sim.g54 = Some([0.0, 0.0, -12.0]);
+            sim.mpos = Some([0.0, 0.0, -12.0]);
+        });
+        // Not homed: Kerf cannot tell, so the job may start (the person is warned).
+        h.connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+            .unwrap();
+        h.wait_for_bit();
+        h.connection.stop_job().unwrap();
+        h.wait_for_job_end();
+        home(&h);
+        h.wait_for(|e| matches!(e, Event::Status { .. }).then_some(()));
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+            .unwrap_err();
+        assert!(error.contains("rise 20 mm"), "{error}");
+        assert!(error.contains("only 12 mm left"), "{error}");
+        assert!(error.contains("to 12 or less"), "{error}");
+
+        // Deeper down there is room; then Z is set higher at the change.
+        h.sim.lock().unwrap().g54 = Some([0.0, 0.0, -40.0]);
+        h.wait_for(|e| {
+            matches!(
+                e,
+                Event::Status {
+                    machine_position: Some(_),
+                    ..
+                }
+            )
+            .then_some(())
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        h.connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+            .unwrap();
+        h.wait_for_bit();
+        h.connection.send_line("G10 L2 P0 Z-5").unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("only 5 mm left"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn atc_job_refused_on_plain_grbl() {
+        let atc = JobOptions {
+            atc: true,
+            ..JobOptions::default()
+        };
+        let h = connect_router(|_| {});
+        let error = h
+            .connection
+            .start_parts(&[PART_2], Tool::Spindle, &atc)
+            .unwrap_err();
+        assert!(error.contains("checking which firmware"), "{error}");
+        let firmware = h.wait_for(|e| match e {
+            Event::Firmware { firmware } => Some(*firmware),
+            _ => None,
+        });
+        assert_eq!(firmware, Firmware::Grbl);
+        let error = h
+            .connection
+            .start_parts(&[PART_2], Tool::Spindle, &atc)
+            .unwrap_err();
+        assert!(error.contains("needs grblHAL"), "{error}");
+
+        let h = connect_router(|sim| sim.hal = true);
+        assert!(h
+            .connection
+            .start_parts(&[PART_2], Tool::Spindle, &atc)
+            .is_err());
+        let firmware = h.wait_for(|e| match e {
+            Event::Firmware { firmware } => Some(*firmware),
+            _ => None,
+        });
+        assert_eq!(firmware, Firmware::GrblHal);
+        when_free(|| h.connection.start_parts(&[PART_2], Tool::Spindle, &atc)).unwrap();
+        let (state, ..) = h.wait_for_job_end();
+        assert_eq!(state, JobState::Finished);
+    }
+
+    #[test]
+    fn stop_in_tool_state_resets() {
+        let h = connect(|sim| {
+            sim.tool_state = true;
+            sim.settle_reports = 1_000;
+        });
+        h.wait_for_state(MachineState::Tool);
+        let asked = Instant::now();
+        h.connection.stop_job().unwrap();
+        h.wait_for(|e| matches!(e, Event::Welcome { .. }).then_some(()));
+        assert!(asked.elapsed() < STOP_TIMEOUT / 3, "{:?}", asked.elapsed());
+        let sim = h.sim.lock().unwrap();
+        assert_eq!(
+            sim.realtime
+                .iter()
+                .filter(|&&b| b != STATUS_QUERY)
+                .collect::<Vec<_>>(),
+            [&SOFT_RESET]
+        );
+    }
+
+    #[test]
+    fn machine_change_place_below_the_work_is_refused() {
+        // The material's top (G54 Z) is 30 mm below the top of Z; the job
+        // must be 20 mm above it to go to the change place.
+        let h = connect_router(|sim| {
+            sim.extra_settings = vec![(131, "500.000"), (132, "80.000")];
+            sim.g54 = Some([-100.0, -100.0, -30.0]);
+            sim.mpos = Some([-100.0, -100.0, -10.0]);
+        });
+        home(&h);
+        let at = |z: f64| JobOptions {
+            needs_homing: true,
+            machine_moves: vec![[-10.0, -10.0, z]],
+            change_clearance: Some(20.0),
+            ..JobOptions::default()
+        };
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &at(-15.0))
+            .unwrap_err();
+        assert!(error.contains("only 15 mm above the material"), "{error}");
+        assert!(error.contains("at least 20 mm"), "{error}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!h.wire().iter().any(|l| l.starts_with("G17")));
+        // High enough: it starts. Then Z is set higher at the change.
+        h.connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &at(-5.0))
+            .unwrap();
+        h.wait_for_bit();
+        h.connection.send_line("G10 L2 P0 Z-20").unwrap();
+        h.wait_for_parts(|p| p.z_set);
+        let error = when_free(|| h.connection.continue_job(false)).unwrap_err();
+        assert!(error.contains("only 15 mm above the material"), "{error}");
+        assert!(!h.executed().contains(&SECOND_PART_CUT.to_owned()));
+    }
+
+    #[test]
+    fn change_place_xy_must_be_on_the_machine() {
+        let h = connect_router(|sim| sim.extra_settings = vec![(131, "500.000"), (132, "80.000")]);
+        home(&h);
+        for place in [
+            [10.0, -10.0, -5.0],
+            [-10.0, 10.0, -5.0],
+            [-10.0, -600.0, -5.0],
+        ] {
+            let options = JobOptions {
+                needs_homing: true,
+                machine_moves: vec![place],
+                ..JobOptions::default()
+            };
+            let error = h
+                .connection
+                .start_parts(&[PART_1, PART_2], Tool::Spindle, &options)
+                .unwrap_err();
+            assert!(
+                error.contains("outside the machine's travel"),
+                "{place:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_part_start_and_probe_refused_unless_g54() {
+        let h = connect_router(|sim| {
+            sim.work_zero = Some("G55");
+            sim.plate_at = Some(0.0);
+        });
+        let error = h
+            .connection
+            .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+            .unwrap_err();
+        assert!(error.contains("other than G54"), "{error}");
+        h.pass_probe_test();
+        let error = when_free(|| h.connection.probe_z(PLATE)).unwrap_err();
+        assert!(error.contains("other than G54"), "{error}");
+        std::thread::sleep(Duration::from_millis(100));
+        let wire = h.wire();
+        assert!(
+            !wire
+                .iter()
+                .any(|l| l.contains("G38") || l.starts_with("G17")),
+            "{wire:?}"
+        );
+        // A typed G54 is read back, and then both are allowed.
+        h.sim.lock().unwrap().work_zero = None;
+        h.connection.send_line("G54").unwrap();
+        h.wait_for(|e| matches!(e, Event::Line { text } if text.contains(" G54 ")).then_some(()));
+        when_free(|| h.connection.probe_z(PLATE)).unwrap();
+        assert_eq!(h.wait_for_probe(), (ProbeState::Done, None));
+    }
+
+    #[test]
+    fn multi_part_start_refused_with_g92_or_tool_offset_set() {
+        for (g92, tlo) in [([0.0, 0.0, 3.0], 0.0), ([0.0; 3], 1.5)] {
+            let h = connect_router(|sim| {
+                sim.g92 = g92;
+                sim.tlo = tlo;
+            });
+            let error = h
+                .connection
+                .start_parts(&[PART_1, PART_2], Tool::Spindle, &two_parts(Some(20.0)))
+                .unwrap_err();
+            assert!(
+                error.contains("G92 offset or a tool length offset"),
+                "{error}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!h.wire().iter().any(|l| l.starts_with("G17")));
+        }
+    }
+
+    #[test]
+    fn offset_lines_are_recognised() {
+        assert!(changes_offsets("G10 L20 P0 Z0"));
+        assert!(changes_offsets("g10l2p1x0"));
+        assert!(changes_offsets("G92 X0"));
+        assert!(changes_offsets("G0 X1 G092 Y0"));
+        assert!(!changes_offsets("G1 X10"));
+        assert!(!changes_offsets("G100"));
+        assert!(!changes_offsets("$J=G91 X1 F100"));
+        assert!(!changes_offsets("G0 X1 ; G10"));
+        assert!(selects_work_zero("G55"));
+        assert!(selects_work_zero("g0 g54 x1"));
+        assert!(!selects_work_zero("G540"));
+        assert!(!selects_work_zero("$G"));
+        assert_eq!(
+            modes_on_g54("[GC:G0 G54 G17 G21 G90 G94 M5 M9 T0 F0 S0]"),
+            Some(true)
+        );
+        assert_eq!(
+            modes_on_g54("[GC:G0 G56 G17 G21 G90 G94 M5 M9 T0 F0 S0]"),
+            Some(false)
+        );
     }
 }

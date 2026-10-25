@@ -321,6 +321,7 @@ mod tests {
                 origin: Origin::BackLeft,
                 start_gcode: String::new(),
                 end_gcode: String::new(),
+                tool_change: Default::default(),
             },
             offset: [50.0, 60.0],
             material_thickness: None,
@@ -330,6 +331,7 @@ mod tests {
                 feed: 800.0,
                 power: 0.0,
                 passes: 1,
+                tool: None,
             }],
         }
     }
@@ -487,6 +489,7 @@ mod tests {
                 feed: 3000.0,
                 power: 20.0,
                 passes: 1,
+                tool: None,
             },
         );
         let drawn = Artwork::from_svg(
@@ -517,6 +520,7 @@ mod tests {
             feed: 3000.0,
             power: 20.0,
             passes: 1,
+            tool: None,
         });
         let base = Artwork::from_svg(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="40mm" height="30mm" viewBox="0 0 40 30"><path d="M5 5H35" stroke="#000" fill="none"/></svg>"##,
@@ -534,6 +538,7 @@ mod tests {
             feed: 1500.0,
             power: 40.0,
             passes: 1,
+            tool: None,
         }];
         let additions = crate::generate::Additions {
             artwork: &lettering,

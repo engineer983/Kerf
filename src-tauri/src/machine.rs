@@ -3,7 +3,10 @@
 use std::sync::Mutex;
 
 use kerf_gcode::MachineKind;
-use kerf_grbl::{Connection, MachineState, PortInfo, Tool, DEFAULT_BAUD};
+use kerf_grbl::probe::{DEFAULT_FAST_FEED, DEFAULT_SLOW_FEED};
+use kerf_grbl::{
+    Connection, JobOptions, MachineState, PortInfo, ProbeSettings, Tool, DEFAULT_BAUD,
+};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -64,7 +67,9 @@ pub enum MachineAction {
     Home,
     /// Clears an alarm lock.
     Unlock,
-    /// Makes the current XY position (or Z position) the work origin.
+    /// Makes the current XY position (or Z position) the work origin, in the
+    /// coordinate system in use. XY is refused while a job waits for a bit
+    /// change.
     SetOrigin {
         z: bool,
     },
@@ -85,6 +90,19 @@ pub enum MachineAction {
         program_id: u64,
     },
     StopJob,
+    /// Streams the next part of a job waiting for a bit change, once the
+    /// sender's checks pass. `plate_cleared` is the person's tick that the
+    /// touch plate's clip is off the bit.
+    ContinueJob {
+        plate_cleared: bool,
+    },
+    /// Sets Z with a touch plate `plate` mm thick, going down at most `travel` mm.
+    ProbeZ {
+        plate: f64,
+        travel: f64,
+    },
+    /// Watches for the probe pin, so the person can check the plate and clip work.
+    ProbeTest,
 }
 
 fn finite(values: &[f64]) -> Result<(), String> {
@@ -188,8 +206,8 @@ pub fn machine_action(
         }
         MachineAction::Home => machine.send_line("$H"),
         MachineAction::Unlock => machine.send_line("$X"),
-        MachineAction::SetOrigin { z: false } => machine.send_line("G10 L20 P1 X0 Y0"),
-        MachineAction::SetOrigin { z: true } => machine.send_line("G10 L20 P1 Z0"),
+        MachineAction::SetOrigin { z: false } => machine.zero_xy(),
+        MachineAction::SetOrigin { z: true } => machine.zero_z(),
         MachineAction::Frame {
             min_x,
             min_y,
@@ -215,9 +233,32 @@ pub fn machine_action(
                 MachineKind::Laser => Tool::Laser,
                 MachineKind::Cnc => Tool::Spindle,
             };
-            machine.start_job(&program.text, tool)
+            let program = &program.program;
+            if program.parts.len() <= 1 && !program.atc && !program.needs_homing {
+                // One bit: exactly as before.
+                return machine.start_job(&program.text, tool);
+            }
+            let options = JobOptions {
+                needs_homing: program.needs_homing,
+                atc: program.atc,
+                change_lift: program.change_lift,
+                machine_moves: program.machine_moves.clone(),
+                change_clearance: program.change_clearance,
+            };
+            machine.start_parts(&program.part_streams(), tool, &options)
         }
         MachineAction::StopJob => machine.stop_job(),
+        MachineAction::ContinueJob { plate_cleared } => machine.continue_job(plate_cleared),
+        MachineAction::ProbeZ { plate, travel } => {
+            finite(&[plate, travel])?;
+            machine.probe_z(ProbeSettings {
+                plate,
+                travel,
+                fast_feed: DEFAULT_FAST_FEED,
+                slow_feed: DEFAULT_SLOW_FEED,
+            })
+        }
+        MachineAction::ProbeTest => machine.probe_test(),
     })
 }
 

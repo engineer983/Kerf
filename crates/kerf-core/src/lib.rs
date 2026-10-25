@@ -283,8 +283,9 @@ pub struct JobInput {
 }
 
 /// Traces at full resolution and generates the G-code. Returns what the
-/// interface is shown, and the program's full text.
-pub fn generate(input: JobInput) -> Result<(Generated, String), String> {
+/// interface is shown, and the whole program: its text, its parts, and what
+/// the saved files are built from.
+pub fn generate(input: JobInput) -> Result<(Generated, Program), String> {
     let JobInput {
         image,
         design_svg,
@@ -347,13 +348,16 @@ pub fn generate(input: JobInput) -> Result<(Generated, String), String> {
         additions.as_ref(),
         cutout_around,
     )?;
-    let text = std::mem::take(&mut program.text);
-    let head = text
+    // The text, and what the saved files and the sender need, are kept
+    // apart from what the interface is shown.
+    let stored = program.split_off_text();
+    let head = stored
+        .text
         .lines()
         .take(GCODE_HEAD_LINES)
         .collect::<Vec<_>>()
         .join("\n");
-    Ok((Generated { program, head }, text))
+    Ok((Generated { program, head }, stored))
 }
 #[cfg(test)]
 mod tests {

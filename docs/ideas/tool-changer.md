@@ -1,6 +1,6 @@
 # Changing bits within one job (manual and automatic tool changes)
 
-Status: planned
+Status: built, steps 0 to 7, except the fixed tool-length setter in step 6 (1e). Tested against the simulated controller and by automated tests only: not yet run on any real machine, touch plate or tool changer, and the screens have not been clicked through in a running app. See "As built".
 
 ## Review changes
 
@@ -28,6 +28,41 @@ Revised 2026-10-24 after the `gcode-safety-reviewer` (verdict: needs changes) an
   - One click saves one file, with no "Save all".
   - The README and Done-when checks for the browser are spelled out.
 - **More hardware tests.**
+
+## As built
+
+Built 2026-10-24 on top of machine control as merged (`d032c5f`). Every test named under Safety exists and passes. Where it differs from the plan:
+
+- **Built all at once.** The steps went in order, but in one change, so step 2's temporary "Start refuses multi-part jobs" was never shipped: step 3 replaced it in the same change.
+- **The fixed tool-length setter (1e) is not built.** The plan marks it "later" and names no test for it. The fixed change place from step 6 (`G53` moves, homing this session, the travel check) is built. The README's "Not built yet" line now names the setter and grblHAL's own tool-change handshake.
+- **Part texts are byte ranges, not copies.** `ProgramPart` keeps the byte range of its stream (and of its operations alone) inside `Program.text`, instead of a `stream: String`. That way a large relief isn't held three times over. `Program::part_stream(i)`, `part_streams()`, `part_file(i)` and `with_m6()` build the texts. `kerf_core::generate` now returns `(Generated, Program)`, splitting the text off with `Program::split_off_text()`. Both sides keep that whole `Program`: desktop `StoredProgram.program` and web `State.gcode`.
+- **Extra `Program` fields:** `needs_homing`, `atc`, `change_lift` and `machine_moves`. The sender's `JobOptions` comes from these.
+- **Sender API.** `Connection::start_job(&str, Tool)` is kept, so every existing test is unchanged. It now calls `start_parts(&[&str], Tool, &JobOptions)`, which replies through the worker, so the worker can refuse a start while parts remain.
+- **Sender events.** The parts' progress comes in a new `Event::Parts { progress }` (part, of, waiting, spindleOff, zSet, plateUsed), alongside `JobState::WaitingForBit` on `Event::Job`. Changing `Event::Job`'s fields would have broken the existing tests. Probing reports through `Event::Probe` and `Event::ProbeTested`. `Event::Status` gains `pins`, and `Event::Welcome` gains `firmware`. `Event::Firmware` reports the answer to `$I`.
+- **Zeroing goes through the worker.** `Connection::zero_xy()` and `zero_z()` send `G10 L20 P0 …`, and XY is refused there while a job waits. That makes the refusal testable against the simulated controller; `machine.rs` calls them.
+- **Continue and Probe wait for a fresh `$#`.** The worker answers them once the `$#` it asked for comes back, within 1.5 s, which is less than the caller's 2 s timeout. A request that arrives or finishes later is refused rather than carried out. The `machine_action` command is synchronous, so the window can wait up to that long.
+- **Probe defaults.** The probe uses 10 mm travel, 100 then 25 mm/min, a 2 mm back-off, a 3 mm slow travel, and a 5 mm lift after. The interface always sends the 10 mm travel. `plate_used` is set when probing starts, not when it ends, so a probe that stops after its `G10` still asks for the clip tick.
+- **Probe alarm.** On `ALARM:4` or `ALARM:5` while probing, the job (and any parts) is kept, but the sent and queued manual lines are cleared, as any alarm clears them.
+- **ATC needs the firmware known.** An ATC start with the firmware still unknown is refused with "Kerf is checking which firmware the machine runs". Kerf then sends `$I`, and the next Start can go ahead. `$I` isn't sent on connecting, because that would have changed the lines the existing tests pin.
+- **Lift check.** It uses the fresh `$#` G54 Z, both at Start and at Continue. It assumes GRBL's usual negative machine space after homing (machine Z0 at the top).
+- **Change-setting limits.** "Time for the spindle to stop" must be 1 to 120 s, and the lift 0 to 200 mm, checked when bits are named.
+- **Part files.** Each starts with a `; Part n of N, with T…` comment. Non-last files end `M5`, `G4 P<spin_down>`, `G0 Z<lift>`, `G0 X0 Y0`, the end G-code, then "; Next: fit … then run part n". Bit names are cleaned before going into any comment (no brackets, semicolons or line breaks).
+- **Laser jobs are untouched.** A laser job ignores the bit-change settings and any `tool`. The WeCreat preset's own end `M6` is pinned byte-for-byte by `a_vendor_m6_at_the_end_of_a_laser_job_is_left_alone`. `jobOrder` was not changed.
+- **Assistant guard.** The tool-name test is in `src-tauri/src/assistant.rs` (`the_assistant_has_no_tool_that_reaches_the_machine`). It reads every `name: "…"` in `src/lib/assistantTools.ts`, and checks the file calls no machine or export function.
+- **One existing test was made to wait.** `streams_a_job_to_completion_without_overflow` raced the `$G` sent after a job: it failed about 2 runs in 9 on the original code too. It now waits for that line before checking, and what it pins is unchanged. `parses_work_position_and_unknown_states` now uses `Cool` as its unknown state, since `Tool` is now a known one.
+- **Fixes after the safety review (needs changes, 7 items):**
+  1. *A part always travels before it plunges.* After a change, the writer marks its position unknown (`Writer::force_travel`), so the next part always writes its `G0 X… Y…`. Before this, a `G53` change could leave part 2 plunging at the change place. Tests: `machine_change_place_next_part_travels_before_plunging` (part 2 is exactly `G17 G21 G90 G94 G54`, `G0 Z5`, `M3 S12000`, `G4 P2`, `G0 X20 Y70`, `G1 Z-1 F200`, and its file travels before the first plunge) and `a_part_starting_at_the_origin_still_says_where_it_starts`.
+  2. *The fixed change place is checked against the work.* `Program.change_clearance` (and `JobOptions.change_clearance`) is the larger of the lift and the job's highest safe height. At Start and at Continue, a fresh `$#` must show the place's Z at least that far above G54 Z. "Use the current position" in the Device step only works on a homed machine with Z within 5 mm of the top. Test: `machine_change_place_below_the_work_is_refused`.
+  3. *G54 must be in use.* The worker tracks G54 from each `[GC:…]` reply, and asks again after a typed `G54`–`G59`. It refuses Probe, a multi-part Start and Continue unless G54 is in use. The probe's first line takes work Z from machine Z minus the fresh G54 Z, not the status report's work offset. Test: `multi_part_start_and_probe_refused_unless_g54`.
+  4. *Hand-switched routers.* "Switch the router back on now, then Continue." only shows once Z is set (and the clip box is ticked, if the plate was used). The probe controls are hidden while it shows.
+  5. *ATC.* `G0 Z<lift>` is written before the first `T<n> M6` too, pinned in `atc_job_starts_with_first_tool_change`.
+  6. *Change place X/Y.* X and Y must be between minus the travel and 0, as Z must. Test: `change_place_xy_must_be_on_the_machine`.
+  7. *Start reads the offsets first.* Any job with bit changes (more than one part, ATC, or a fixed place) reads `$#` before anything is sent. It refuses unless G92 and the tool length offset are zero; the lift and clearance checks use that read. Test: `multi_part_start_refused_with_g92_or_tool_offset_set`. The pinned line order in `waits_between_parts_until_continued` now starts `$$`, `$G`, `$#`. One-bit jobs start as before.
+- **Fixes after the second safety review (2 items):**
+  - *ATC changes travel before plunging too.* `force_travel` is now also set after the first `T<n> M6` and after every ATC change, so the next operation always writes `G0 X… Y…`. Test: `atc_next_operation_travels_after_m6`; after `T2 M6` the lines are exactly `G0 Z5`, `M3 S12000`, `G4 P2`, `G0 X20 Y70`, `G1 Z-1 F200`, and the same holds after `T1 M6` starting from the origin.
+  - *Probe start height with `$10=0`.* The worker keeps the Z the last status report gave as it gave it: machine Z from `MPos`, or work Z from `WPos`. With `MPos`, work Z is machine Z minus the fresh G54 Z. With `WPos` only, work Z is used as reported, and machine Z (for the travel cap) is that plus the fresh G54 Z. A stored work offset that the reports haven't repeated lately is never used. Test: `probe_start_height_ignores_a_stale_work_offset` covers both report kinds, with a stale `WCO` in the reports.
+  - The new `grblhal_banner_is_a_restart` test was also made exact about timing. Lines already on their way when the banner arrives may still reach the machine, so the test checks that nothing of the job is *sent* after Kerf has re-read the settings.
+- **Not checked by hand.** The browser and desktop screens were type-checked and built, but not clicked through. Nor was the Done-when walk-through against the simulated controller done in the running app. The browser's saved files are checked by the kerf-web tests.
 
 ## The idea
 

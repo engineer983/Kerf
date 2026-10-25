@@ -336,6 +336,7 @@ mod tests {
                 origin: Origin::BackLeft,
                 start_gcode: String::new(),
                 end_gcode: String::new(),
+                tool_change: Default::default(),
             },
             offset: [10.0, 10.0],
             material_thickness: None,
@@ -345,6 +346,7 @@ mod tests {
                 feed: 800.0,
                 power: 0.0,
                 passes: 1,
+                tool: None,
             }],
         }
     }

@@ -324,7 +324,20 @@ export const HELP_TOPICS: HelpTopic[] = [
       },
       {
         heading: "Changing the bit",
-        text: "Kerf has no automatic tool change. When operations use different bits it tells you, and you run them one at a time: untick Include in the job on all but one, run it, change the bit, set Zero Z again on the top of the material, then run the next. Leave X and Y alone.",
+        text: "A job can use more than one bit, such as a flat bit to rough out a relief, a tapered ball nose to finish it and a flat bit to cut it out. Step 5 lists the bits in order and how many times the job stops. When Kerf runs the job, it stops at each change with the spindle off and the bit raised over the work zero. Fit the next bit, set Z again (with the touch plate, or lower the bit onto the material and press Zero Z here), then press Continue twice. Kerf won't carry on until Z has been set again, and it won't let you move the X/Y zero while it waits. If you use another sender, save one file per bit and set Z before running each one.",
+      },
+      {
+        heading: "Setting Z with a touch plate",
+        steps: [
+          "Measure the plate's thickness with calipers and enter it in step 1, under Changing bits. Kerf leaves it blank until you do.",
+          "Clip the plate's wire to the bit, press Test the probe in step 6, then touch the plate to the bit. The light should turn on. Kerf won't probe until it has seen this once.",
+          "Lay the plate on the material under the bit, and jog the tip to within about 10 mm of it.",
+          "Press Probe Z with the touch plate, then again to confirm. The bit comes down slowly, touches twice, sets Z and lifts 5 mm.",
+          "Take the clip off the bit and move the plate away before carrying on. At a bit change Kerf asks you to tick that you have.",
+        ],
+      },
+      {
+        warning: "If the plate isn't under the bit, nothing stops it except the 10 mm limit: it goes down into whatever is below. Check the plate is there before you probe.",
       },
       {
         heading: "Router speed",
@@ -390,11 +403,12 @@ export const HELP_TOPICS: HelpTopic[] = [
           "Generate the G-code in step 5 and look it over in the Result and 3D views.",
           "In step 6, choose the machine's port and press Connect.",
           "Home the machine, or Unlock it if it starts in an alarm.",
-          "Jog to the front-left corner of the material and set Zero XY, then touch the bit to the top and set Zero Z.",
+          "Jog to the front-left corner of the material and set Zero XY, then touch the bit to the top and set Zero Z, or set Z with the touch plate (test it first, and take the clip off afterwards).",
           "Raise the bit clear, then press Go to XY zero to check where the origin is.",
           "Press Frame the job outline and check it clears the clamps and stays on the material.",
           "Put on glasses and ear protection, switch the router on, and press Start job, then again to confirm.",
           "Pause holds the machine where it is; Resume carries on. Stop halts it and abandons the job.",
+          "If the job uses more than one bit, it stops at each change and waits. Change the bit, set Z again, take any touch plate clip off, and press Continue twice.",
         ],
       },
       {

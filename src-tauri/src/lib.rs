@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use kerf_core::design::Design;
 use kerf_core::{Added, DepthOptions, Generated, JobInput, LoadedImage};
-use kerf_gcode::{Job, MachineKind};
+use kerf_gcode::{Job, MachineKind, Program};
 use kerf_trace::image::DynamicImage;
 use kerf_trace::{TraceSettings, Traced};
 use serde::Serialize;
@@ -40,7 +40,9 @@ pub(crate) struct StoredProgram {
     /// that what is exported or run is what is on screen.
     pub(crate) id: u64,
     pub(crate) kind: MachineKind,
-    pub(crate) text: String,
+    /// The whole program: its text, the parts the sender streams one bit at
+    /// a time, and what the saved files are built from.
+    pub(crate) program: Program,
 }
 
 impl StoredProgram {
@@ -262,30 +264,40 @@ async fn generate_gcode(
         added,
         cutout_around,
     };
-    let (generated, text) = blocking(move || kerf_core::generate(input)).await?;
+    let (generated, program) = blocking(move || kerf_core::generate(input)).await?;
     let mut stored = state.gcode.lock().unwrap();
     // A slower, earlier request must not replace the program of a later one.
     if state.latest_program.load(Ordering::SeqCst) != id {
         return Err("A newer program has been asked for since.".into());
     }
-    *stored = Some(StoredProgram { id, kind, text });
+    *stored = Some(StoredProgram { id, kind, program });
     Ok(GeneratedProgram {
         generated,
         program_id: id,
     })
 }
-/// Writes the last generated program where the user chooses.
-/// Returns the saved path, or `None` if the dialog was cancelled.
+/// Writes the last generated program where the user chooses: the whole of
+/// it, the file for one `part` (one bit), or, `with_tool_changes`, one file
+/// with `M6` at each bit change. Returns the saved path, or `None` if the
+/// dialog was cancelled.
 #[tauri::command]
 async fn export_gcode(
     app: AppHandle,
     suggested_name: String,
     program_id: u64,
+    part: Option<usize>,
+    with_tool_changes: bool,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let text = StoredProgram::matching(&state.gcode.lock().unwrap(), program_id)?
-        .text
-        .clone();
+    let text = {
+        let stored = state.gcode.lock().unwrap();
+        let program = &StoredProgram::matching(&stored, program_id)?.program;
+        match (part, with_tool_changes) {
+            (_, true) => program.with_m6()?,
+            (Some(part), false) => program.part_file(part)?,
+            (None, false) => program.text.clone(),
+        }
+    };
     blocking(move || {
         let Some(target) = app
             .dialog()
